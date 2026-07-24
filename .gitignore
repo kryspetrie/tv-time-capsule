@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# State (actually stored in ~/.local/share/tv-time-capsule, outside the repo)
+
+# IDE
+.vscode/
+.idea/
+
+# Media files (user content)
+media/
+sample/
