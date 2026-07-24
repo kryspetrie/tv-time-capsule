@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TV Time Capsule
+Comment=Child-friendly CRT media player — click to restart
+Exec=__EXEC__
+Icon=multimedia-video-player
+Terminal=false
+Categories=AudioVideo;Player;TV;
+Keywords=tv;video;kids;crt;
+StartupNotify=true

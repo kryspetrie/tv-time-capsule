@@ -69,23 +69,16 @@ echo ""
 
 # ─── Install Dependencies ────────────────────────────────────────────────────
 
-echo -e "${CYAN}Installing system packages...${NC}"
-sudo apt-get update -qq
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-sudo apt-get install -y -qq \
-    python3 \
-    python3-venv \
-    python3-pip \
-    ffmpeg \
-    exfat-fuse \
-    exfat-progs \
-    2>/dev/null || true
+echo -e "${CYAN}Installing system prerequisites...${NC}"
+"$SCRIPT_DIR/scripts/install-system-deps.sh"
 
-# Video player
+# Legacy Pi video player fallbacks
 if [ "$USE_OMXPLAYER" = true ]; then
     sudo apt-get install -y -qq omxplayer 2>/dev/null || true
     if ! command -v omxplayer &>/dev/null && ! command -v omxplayer.bin &>/dev/null; then
-        echo -e "${YELLOW}omxplayer not available, installing mpv instead...${NC}"
+        echo -e "${YELLOW}omxplayer not available, using mpv instead...${NC}"
         sudo apt-get install -y -qq mpv 2>/dev/null || true
         USE_OMXPLAYER=false
         USE_MPV=true
@@ -98,31 +91,57 @@ fi
 
 echo -e "${GREEN}✓${NC} System packages installed"
 
-# ─── Create venv and install pygame ──────────────────────────────────────────
+# Networking + passwordless mounts for kiosk / remote media
+"$SCRIPT_DIR/scripts/ensure-networking.sh" || true
+"$SCRIPT_DIR/scripts/ensure-mount-privileges.sh" --user "$USER_NAME" || true
+
+# ─── Create venv and install package ─────────────────────────────────────────
 
 echo -e "${CYAN}Setting up Python virtual environment...${NC}"
 
 sudo mkdir -p "$INSTALL_DIR"
 sudo chown -R "$USER_NAME:$USER_NAME" "$INSTALL_DIR"
 
-# Copy project files
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for f in tv_time_capsule.py requirements.txt; do
-    if [ -f "$SCRIPT_DIR/$f" ]; then
-        cp "$SCRIPT_DIR/$f" "$INSTALL_DIR/"
-    elif [ -f "$f" ]; then
-        cp "$f" "$INSTALL_DIR/"
-    fi
-done
+# Copy project files into the install dir
+mkdir -p "$INSTALL_DIR"
+if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete \
+        --exclude '.git' \
+        --exclude '.venv' \
+        --exclude '__pycache__' \
+        --exclude '*.pyc' \
+        --exclude 'media' \
+        --exclude 'sample' \
+        --exclude 'dist' \
+        "$SCRIPT_DIR/" "$INSTALL_DIR/"
+else
+    tar -C "$SCRIPT_DIR" \
+        --exclude='.git' \
+        --exclude='.venv' \
+        --exclude='__pycache__' \
+        --exclude='media' \
+        --exclude='sample' \
+        --exclude='dist' \
+        -cf - . | tar -C "$INSTALL_DIR" -xf -
+fi
 
-# Create venv
+# Create venv and install package (pip reads Poetry's pyproject.toml)
 python3 -m venv "$INSTALL_DIR/.venv"
 source "$INSTALL_DIR/.venv/bin/activate"
 pip install --upgrade pip --quiet
-pip install -r "$INSTALL_DIR/requirements.txt"
+pip install "$INSTALL_DIR"
 deactivate
 
-echo -e "${GREEN}✓${NC} Virtual environment created with pygame"
+echo -e "${GREEN}✓${NC} Virtual environment created with tv-time-capsule"
+
+# ─── Desktop shortcut (Raspberry Pi OS Desktop) ──────────────────────────────
+
+echo -e "${CYAN}Installing desktop shortcut (if Desktop is available)...${NC}"
+TV_TIME_CAPSULE_BIN="$INSTALL_DIR/.venv/bin/tv-time-capsule" \
+    MEDIA_DIR="$MEDIA_ROOT" \
+    "$SCRIPT_DIR/scripts/install-desktop-shortcut.sh" \
+        --user "$USER_NAME" \
+        --media-dir "$MEDIA_ROOT" || true
 
 # ─── Create Media Directory ──────────────────────────────────────────────────
 
@@ -140,36 +159,18 @@ echo "  ..."
 
 if [ "$AUTOSTART" = "yes" ]; then
     echo -e "${CYAN}Setting up autostart...${NC}"
-
-    sudo tee /etc/systemd/system/tv-time-capsule.service > /dev/null <<EOF
-[Unit]
-Description=TV Time Capsule — Child-friendly media player
-After=network.target
-
-[Service]
-Type=simple
-User=$USER_NAME
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/.venv/bin/python $INSTALL_DIR/tv_time_capsule.py --media-dir=$MEDIA_ROOT
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable tv-time-capsule.service
-    echo -e "${GREEN}✓${NC} Autostart enabled (boots straight to TV Time Capsule)"
-
-    echo ""
-    echo -e "${CYAN}Useful commands:${NC}"
-    echo "  sudo systemctl start tv-time-capsule    # Start manually"
-    echo "  sudo systemctl stop tv-time-capsule     # Stop (get terminal)"
-    echo "  sudo systemctl disable tv-time-capsule   # Disable autostart"
+    TV_TIME_CAPSULE_BIN="$INSTALL_DIR/.venv/bin/tv-time-capsule" \
+        MEDIA_DIR="$MEDIA_ROOT" \
+        "$SCRIPT_DIR/scripts/enable-autostart.sh" \
+            --user "$USER_NAME" \
+            --media-dir "$MEDIA_ROOT"
 else
-    echo -e "${YELLOW}Autostart not configured. Run manually:${NC}"
-    echo "  $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/tv_time_capsule.py --media-dir=$MEDIA_ROOT"
+    echo -e "${YELLOW}Autostart not configured. Enable later with:${NC}"
+    echo "  TV_TIME_CAPSULE_BIN=$INSTALL_DIR/.venv/bin/tv-time-capsule \\"
+    echo "    $SCRIPT_DIR/scripts/enable-autostart.sh --media-dir=$MEDIA_ROOT"
+    echo ""
+    echo -e "${YELLOW}Or run manually:${NC}"
+    echo "  $INSTALL_DIR/.venv/bin/tv-time-capsule --media-dir=$MEDIA_ROOT"
 fi
 
 # ─── Configure Audio ─────────────────────────────────────────────────────────
@@ -229,7 +230,7 @@ if [ "$AUTOSTART" = "yes" ]; then
     echo "     sudo reboot"
 else
     echo "  3. Run TV Time Capsule:"
-    echo "     $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/tv_time_capsule.py --media-dir=$MEDIA_ROOT"
+    echo "     $INSTALL_DIR/.venv/bin/tv-time-capsule --media-dir=$MEDIA_ROOT"
 fi
 echo ""
 echo -e "${CYAN}Controls:${NC}"

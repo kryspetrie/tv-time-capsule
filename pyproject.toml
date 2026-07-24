@@ -1,0 +1,33 @@
+[project]
+name = "tv-time-capsule"
+version = "1.0.0"
+description = "A child-friendly CRT media player for Raspberry Pi"
+authors = [
+    { name = "Krys Petrie", email = "kryspetrie@users.noreply.github.com" },
+]
+license = { text = "CC-BY-NC-4.0" }
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["pygame", "raspberry-pi", "media-player", "crt", "kids"]
+dependencies = [
+    "pygame (>=2.5.0)",
+    "numpy (>=1.21)",
+    "Pillow (>=9.0)",
+    "keyring (>=24.0)",
+]
+
+[project.urls]
+Homepage = "https://github.com/kryspetrie/tv-time-capsule"
+Repository = "https://github.com/kryspetrie/tv-time-capsule"
+
+[project.scripts]
+tv-time-capsule = "tv_time_capsule.cli:main"
+tv-time-capsule-secrets = "tv_time_capsule.secrets_cli:main"
+
+[tool.poetry]
+packages = [{ include = "tv_time_capsule", from = "src" }]
+include = ["src/tv_time_capsule/assets/*"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"

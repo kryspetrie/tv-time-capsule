@@ -1,0 +1,23 @@
+[Unit]
+Description=TV Time Capsule — child-friendly CRT media player
+Documentation=https://github.com/kryspetrie/tv-time-capsule
+After=network-online.target __AFTER__
+Wants=network-online.target __AFTER__
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__HOME__
+Environment=HOME=__HOME__
+Environment=XDG_RUNTIME_DIR=/run/user/__UID__
+__EXTRA_ENVIRONMENT__
+ExecStart=__EXEC_START__
+Restart=always
+RestartSec=5
+
+# Give USB / Wi‑Fi / remote mounts a moment on cold boot
+ExecStartPre=/bin/sleep 5
+
+[Install]
+WantedBy=__WANTED_BY__

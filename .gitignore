@@ -2,7 +2,13 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
 .venv/
+poetry.toml
+
 
 # OS
 .DS_Store
@@ -16,4 +22,6 @@ Thumbs.db
 
 # Media files (user content)
 media/
-sample/
+sample/.cache/
+sample/media-a/
+sample/media-b/
