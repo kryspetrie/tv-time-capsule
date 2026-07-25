@@ -42,7 +42,7 @@ Phases are sequential in intent but overlap is fine (e.g. start test scaffolding
 3. **CRT channel-change feel**
    - Brief static/noise overlay (~200–400 ms) when jumping channels or entering a show from the show browser.
    - Optional short audio sting (bundled asset, muted when volume is 0).
-   - Config: `ui.channel_change_effects` (`off` | `visual` | `visual+audio`).
+   - Config: `ui.channel_snow`, `ui.channel_snow_audio`, `ui.shutdown_collapse` (legacy `channel_change_effects` still mapped). Documented in [Fun tweaks & easter eggs](../usage/fun-tweaks-and-easter-eggs.md).
 
 ### Success criteria
 

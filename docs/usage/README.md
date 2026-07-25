@@ -16,6 +16,7 @@ How to install, configure, and run TV Time Capsule on a desktop or Raspberry Pi.
 10. [Autostart & login](autostart.md) — systemd, auto-login, desktop icon  
 11. [Troubleshooting](troubleshooting.md) — common failures  
 12. [Web admin](web-admin.md) — configure from phone/browser on LAN  
+13. [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md) — CRT snow, glitches, screensaver, secret test patterns  
 
 ## Configure from your phone
 

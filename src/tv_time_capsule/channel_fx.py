@@ -1,4 +1,8 @@
-"""CRT snow burst on channel changes and optional TV shutdown collapse."""
+"""CRT snow burst on channel changes and optional TV shutdown collapse.
+
+Fun tweak — see docs/usage/fun-tweaks-and-easter-eggs.md. Snow frames are
+pre-generated and cached when the effect is enabled (~320ms at 60fps).
+"""
 
 from __future__ import annotations
 

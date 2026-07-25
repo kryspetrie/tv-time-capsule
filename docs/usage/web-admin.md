@@ -49,7 +49,7 @@ http://<pi-ip-address>:8765/
 | Screen | What it does |
 |--------|----------------|
 | **Status** | Show count, current menu/playback state |
-| **Player settings** | Toggle channel snow, shutdown collapse, scanlines, screensaver (saved to config; applies immediately) |
+| **Player settings** | Toggle fun tweaks: channel snow, snow audio, shutdown collapse, scanlines, analog glitches (+ rate), screensaver (+ timeout). Saved to config; applies immediately. See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md). |
 | **Media paths** | Edit local library roots, verify readability, preview or apply library scans |
 | **Network mounts** | Edit CIFS/NFS/SSHFS/FTP entries, verify/mount shares |
 | **Cached library** | Full hierarchical tree of the in-memory discovery cache (shows → seasons → episodes) |

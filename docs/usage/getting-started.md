@@ -90,13 +90,18 @@ Useful flags:
 | `--media-dir DIR` | Scan this directory (repeatable). Overrides config paths for this run. |
 | `--windowed` | Run in a window instead of fullscreen (handy for testing) |
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
-| `--scanlines` | CRT scanline overlay |
-| `--channel-snow` | Fine B&W TV snow when tuning; CRT collapse on exit |
+| `--scanlines` | **Fun tweak** — CRT scanline overlay |
+| `--channel-snow` | **Fun tweak** — B&W static burst when committing channel numbers |
+| `--shutdown-collapse` | **Fun tweak** — CRT vertical collapse on quit |
+| `--analog-artifacts` | **Fun tweak** — random glitches on the show browser |
+| `--analog-artifact-rate N` | Glitches per minute with `--analog-artifacts` (default: config or 12) |
 | `--skip-mounts` | Do not mount remote shares from config |
-| `--screensaver` | Enable VHS logo screensaver after idle timeout |
+| `--screensaver` | **Fun tweak** — VHS logo screensaver after idle timeout |
 | `--screensaver-timeout SEC` | Idle seconds before screensaver (overrides config) |
 | `--admin` | Web admin UI at http://127.0.0.1:8765/ (see [Web admin](web-admin.md)) |
 | `--admin-port PORT` | Port for `--admin` (default 8765) |
+
+CRT polish and hidden test patterns: [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md).
 
 ## Display behaviour
 

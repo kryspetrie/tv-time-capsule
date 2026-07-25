@@ -21,7 +21,9 @@ Package root: `src/tv_time_capsule/`.
 | `keymap.py` | Default keymap, display names, load from config |
 | `gamepad.py` | USB controller → logical navigation actions |
 | `channels.py` | Custom show order and display channel numbers |
-| `channel_fx.py` | Optional CRT snow burst on channel changes |
+| `channel_fx.py` | Optional CRT snow burst on channel changes (pre-cached frames); shutdown collapse |
+| `analog_artifacts.py` | Optional random static / tear / roll on the show browser |
+| `test_patterns.py` | Easter egg dial codes `0` / `00` / `000` → user-supplied test pattern PNGs |
 | `screensaver.py` | Bouncing VHS logo idle screensaver (2× pixelated scale, multiply tint) |
 | `fonts.py` | VCR OSD Mono + pygame.font / freetype compatibility |
 | `assets/` | Bundled `vcr_osd_mono.ttf`, `vhs.bmp` (packaged as package data) |

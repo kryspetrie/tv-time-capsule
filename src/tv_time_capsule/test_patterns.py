@@ -1,5 +1,7 @@
 """Secret show-list test patterns (channels 0, 00, 000).
 
+Easter egg — see docs/usage/fun-tweaks-and-easter-eggs.md.
+
 Place your own ``colorbars.png``, ``grid.png``, and ``indianhead.png`` in
 ``src/tv_time_capsule/assets/``. The app never generates or overwrites them.
 """

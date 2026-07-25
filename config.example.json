@@ -126,12 +126,16 @@
   },
 
   "_ui": {
-    "channel_snow": "Fine B&W snow burst when tuning channels (CLI: --channel-snow)",
-    "shutdown_collapse": "CRT vertical collapse on quit (CLI: --shutdown-collapse)",
-    "channel_snow_audio": "Quiet white-noise static with channel snow (defaults on when channel_snow is true; set false to mute)",
-    "scanlines": "CRT scanline overlay (CLI: --scanlines)",
-    "analog_artifacts": "Random brief static, line tear, and vertical roll on the show browser (CLI: --analog-artifacts)",
-    "analog_artifact_rate": "Glitches per minute on the show browser when analog_artifacts is on (default 12; 0 = off)"
+    "channel_snow": "FUN TWEAK — B&W static burst when committing channel numbers on show/season/episode lists (not arrow keys). Pre-cached 320ms animation. CLI: --channel-snow",
+    "shutdown_collapse": "FUN TWEAK — CRT vertical collapse on quit. CLI: --shutdown-collapse",
+    "channel_snow_audio": "FUN TWEAK — Quiet white-noise with channel snow (defaults on when channel_snow is true; set false to mute)",
+    "scanlines": "FUN TWEAK — CRT scanline overlay. CLI: --scanlines",
+    "analog_artifacts": "FUN TWEAK — Random brief static, line tear, and vertical roll on the show browser only. CLI: --analog-artifacts",
+    "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches)"
+  },
+
+  "_easter_eggs": {
+    "test_patterns": "Show browser only — dial 0, 00, or 000 for full-screen colorbars.png, grid.png, indianhead.png from src/tv_time_capsule/assets/ (you supply the PNGs; app never generates them). Esc exits. See docs/usage/fun-tweaks-and-easter-eggs.md"
   },
 
   "_gamepad": "USB controllers via SDL. D-pad / left stick to navigate; A or Start to select; B or Back to go back. Set enabled false to disable.",
@@ -152,7 +156,7 @@
     "Not configurable here: 0–9 (channel numbers), H (help), Tab (key config), Q (quit), Space (pause during playback)."
   ],
 
-  "_screensaver": "Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",
+  "_screensaver": "FUN TWEAK — Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",
 
   "_mount_fields": {
     "type": "Required. cifs | smb | nfs | sshfs | sftp | ftp | ftps",

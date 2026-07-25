@@ -81,3 +81,15 @@ If the service exits unexpectedly, systemd restarts it (`Restart=on-failure`, 5s
 ## Desktop shortcut asks “Execute?”
 
 Re-run `./scripts/install-desktop-shortcut.sh` so the `.desktop` file is marked trusted, or right-click → Allow Launching (Pi Desktop).
+
+## Fun tweaks / CRT effects
+
+See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md). Common issues:
+
+| Symptom | Check |
+|---------|--------|
+| No static on channel change | Enable `ui.channel_snow` or `--channel-snow`. Snow runs on **numeric commit only**, not arrow keys. |
+| Snow silent | Set `ui.channel_snow_audio: true` (defaults on when snow is enabled). |
+| Glitches only on show list | Expected — `analog_artifacts` applies to the show browser only. |
+| Test pattern “not found” | Add your own `colorbars.png`, `grid.png`, `indianhead.png` under `src/tv_time_capsule/assets/` — the app never generates them. |
+| Screensaver never starts | `screensaver.enabled: true` or `--screensaver`; timeout is menu idle only (not during playback). |

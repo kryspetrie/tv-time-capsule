@@ -1,4 +1,7 @@
-"""Random analog-TV glitches: static, line tear, vertical roll."""
+"""Random analog-TV glitches: static, line tear, vertical roll.
+
+Fun tweak for the show browser — see docs/usage/fun-tweaks-and-easter-eggs.md.
+"""
 
 from __future__ import annotations
 

@@ -108,7 +108,9 @@ See [`config.example.json`](../../config.example.json) in the repo root for ever
 
 ## `screensaver`
 
-Optional idle screensaver: a greyscale VHS logo (`assets/vhs.bmp`) bounces on a black screen like a DVD screensaver. The logo is drawn at **2×** its source size with **nearest-neighbor scaling** (crisp, pixelated edges). On each edge bounce it picks a new random **multiply** tint color. **Any key** returns to the menu. Applies while browsing menus only (not during video playback, key configuration, or exit confirm).
+**Fun tweak** — optional idle screensaver: a greyscale VHS logo (`assets/vhs.bmp`) bounces on a black screen like a DVD screensaver. The logo is drawn at **2×** its source size with **nearest-neighbor scaling** (crisp, pixelated edges). On each edge bounce it picks a new random **multiply** tint color. **Any key** returns to the menu. Applies while browsing menus only (not during video playback, key configuration, or exit confirm).
+
+See also [Fun tweaks & easter eggs → Screensaver](fun-tweaks-and-easter-eggs.md#screensaver).
 
 The bundled asset is a 32-bit BMP so pygame can load it even when extended image formats (PNG/GIF) are unavailable.
 
@@ -149,7 +151,7 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 
 ## `ui`
 
-CRT-style feedback when tuning channels or quitting.
+CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md) for behavior details and suggested combos.
 
 ```json
 {
@@ -157,24 +159,27 @@ CRT-style feedback when tuning channels or quitting.
     "channel_snow": false,
     "shutdown_collapse": false,
     "channel_snow_audio": false,
-    "scanlines": false
+    "scanlines": false,
+    "analog_artifacts": false,
+    "analog_artifact_rate": 12
   }
 }
 ```
 
-| Key | Description |
-|-----|-------------|
-| `channel_snow` | Fine B&W TV snow burst when tuning channels |
-| `shutdown_collapse` | CRT vertical collapse animation on quit |
-| `channel_snow_audio` | Quiet white-noise static during channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
-| `scanlines` | Semi-transparent CRT scanline overlay |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `channel_snow` | `false` | **Fun tweak** — B&W static burst when committing a channel number (show, season, or episode list). Not arrow keys. |
+| `shutdown_collapse` | `false` | **Fun tweak** — CRT vertical collapse animation on quit |
+| `channel_snow_audio` | `false` | Quiet white-noise with channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
+| `scanlines` | `false` | **Fun tweak** — Semi-transparent CRT scanline overlay |
+| `analog_artifacts` | `false` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
+| `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches) |
 
-CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`
+CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`, `--analog-artifact-rate N`
 
-| `analog_artifacts` | Random brief static, horizontal line tear, and vertical roll on the show browser |
-| `analog_artifact_rate` | Glitches per minute on the show browser (default `12`; `0` disables timing even if enabled) |
+### Easter egg: secret test patterns
 
-**Secret test patterns** (show browser only): dial `0`, `00`, or `000` to display your own `colorbars.png`, `grid.png`, and `indianhead.png` from `src/tv_time_capsule/assets/` full screen. The app does not generate these files.
+On the **show browser only**, dial `0`, `00`, or `000` to display full-screen test patterns from your own PNGs in `src/tv_time_capsule/assets/` (`colorbars.png`, `grid.png`, `indianhead.png`). The app never generates these files. **Esc** exits. Full details: [Fun tweaks & easter eggs → Secret test patterns](fun-tweaks-and-easter-eggs.md#secret-test-patterns-show-browser).
 
 Legacy `channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` if the new keys are absent.
 
@@ -216,7 +221,9 @@ Customize show browse order and cable-style channel numbers on the **show list**
 | `order` | Show folder names in priority order. Unknown names are skipped. |
 | `numbers` | Optional fixed channel numbers. Other shows use their 1-based position in the ordered lineup. |
 
-Typing a channel number on the show list jumps to the matching show (gaps are allowed — e.g. channel 9 without a channel 8).
+Typing a channel number on the show list jumps to the matching show (gaps are allowed — e.g. channel 9 without a channel 8). On the **season** and **episode** lists, numbers select season or episode index instead. See [Controls → Channel numbers](controls.md#channel-numbers).
+
+With [channel snow](fun-tweaks-and-easter-eggs.md#channel-snow) enabled, committing a number plays a static burst on every browse screen.
 
 ## `library`
 
