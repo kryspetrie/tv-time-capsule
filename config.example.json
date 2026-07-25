@@ -63,6 +63,11 @@
     "reset": 114
   },
 
+  "screensaver": {
+    "enabled": false,
+    "timeout_seconds": 300
+  },
+
   "_keymap_reference": {
     "up": "Browse up / volume up during playback (default: Up arrow)",
     "down": "Browse down / volume down during playback (default: Down arrow)",
@@ -78,6 +83,8 @@
     "Rebind in-app with Tab → key configuration. Tab on that screen resets to defaults.",
     "Not configurable here: 0–9 (channel numbers), H (help), Tab (key config), Q (quit), Space (pause during playback)."
   ],
+
+  "_screensaver": "Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",
 
   "_mount_fields": {
     "type": "Required. cifs | smb | nfs | sshfs | sftp | ftp | ftps",

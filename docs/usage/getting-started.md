@@ -92,6 +92,8 @@ Useful flags:
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
 | `--scanlines` | CRT scanline overlay |
 | `--skip-mounts` | Do not mount remote shares from config |
+| `--screensaver` | Enable VHS logo screensaver after idle timeout |
+| `--screensaver-timeout SEC` | Idle seconds before screensaver (overrides config) |
 
 ## Display behaviour
 

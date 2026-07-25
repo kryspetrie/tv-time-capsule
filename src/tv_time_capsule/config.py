@@ -160,6 +160,10 @@ def _default_config() -> dict[str, Any]:
         "media_paths": [DEFAULT_MEDIA_ROOT],
         "mounts": [],
         "keymap": {},
+        "screensaver": {
+            "enabled": False,
+            "timeout_seconds": 300,
+        },
     }
 
 
@@ -175,7 +179,23 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(keymap, dict):
         keymap = {}
     expanded = [os.path.expanduser(os.path.expandvars(p)) for p in paths]
-    return {"media_paths": expanded, "mounts": mounts, "keymap": keymap}
+    screensaver = raw.get("screensaver") or {}
+    if not isinstance(screensaver, dict):
+        screensaver = {}
+    try:
+        timeout_s = int(screensaver.get("timeout_seconds", 300))
+    except (TypeError, ValueError):
+        timeout_s = 300
+    timeout_s = max(10, timeout_s)
+    return {
+        "media_paths": expanded,
+        "mounts": mounts,
+        "keymap": keymap,
+        "screensaver": {
+            "enabled": bool(screensaver.get("enabled", False)),
+            "timeout_seconds": timeout_s,
+        },
+    }
 
 
 def load_config() -> dict[str, Any]:
@@ -185,6 +205,7 @@ def load_config() -> dict[str, Any]:
       - media_paths: list[str]
       - mounts: list[dict]  (optional remote CIFS/NFS/SSHFS/FTP mounts)
       - keymap: dict[str, int]  (optional custom key bindings)
+      - screensaver: dict with enabled (bool) and timeout_seconds (int)
     """
     global _active_config_path
     default = _default_config()

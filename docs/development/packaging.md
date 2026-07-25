@@ -9,7 +9,7 @@
 ## Important `pyproject.toml` bits
 
 - `packages = [{ include = "tv_time_capsule", from = "src" }]`  
-- `include` ships `src/tv_time_capsule/assets/*` (font) into sdist/wheel  
+- `include` ships `src/tv_time_capsule/assets/*` (font, VHS screensaver bitmap) into sdist/wheel  
 - Dependencies: pygame, numpy, Pillow, keyring  
 - Scripts: `tv-time-capsule`, `tv-time-capsule-secrets`  
 

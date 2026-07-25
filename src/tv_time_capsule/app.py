@@ -37,6 +37,7 @@ from .player import (
     is_pi,
     np_frombuffer,
 )
+from .screensaver import VHS_LOGO_PATH, VHSScreensaver
 from .state import (
     clear_resume_ep,
     reset_episode_progress,
@@ -58,7 +59,15 @@ class TVTimeCapsule:
     PLAYING = 5
     CONFIRM_EXIT = 6
 
-    def __init__(self, media_paths, fullscreen=True, force_43=False, scanlines=False):
+    def __init__(
+        self,
+        media_paths,
+        fullscreen=True,
+        force_43=False,
+        scanlines=False,
+        screensaver=None,
+        screensaver_timeout=None,
+    ):
         pygame.init()
 
         # Probe whether pygame.font works. On Python 3.14+ it fails with a
@@ -159,6 +168,22 @@ class TVTimeCapsule:
             save_config(self.config)
             save_state(self.state)
         self.keymap = load_keymap(self.config)
+        ss_cfg = self.config.get("screensaver") or {}
+        if screensaver is not None:
+            self._screensaver_enabled = bool(screensaver)
+        else:
+            self._screensaver_enabled = bool(ss_cfg.get("enabled", False))
+        if screensaver_timeout is not None:
+            timeout_s = max(10, int(screensaver_timeout))
+        else:
+            try:
+                timeout_s = max(10, int(ss_cfg.get("timeout_seconds", 300)))
+            except (TypeError, ValueError):
+                timeout_s = 300
+        self._screensaver_timeout_ms = timeout_s * 1000
+        self._screensaver = None
+        self._screensaver_active = False
+        self._last_activity_ms = 0
         self.running = True
         self.clock = pygame.time.Clock()
 
@@ -1787,9 +1812,41 @@ class TVTimeCapsule:
 
     # ─── Main loop ─────────────────────────────────────────────────────────
 
+    def _touch_activity(self):
+        """Reset idle timer; leave screensaver on input."""
+        self._last_activity_ms = pygame.time.get_ticks()
+        self._screensaver_active = False
+
+    def _screensaver_idle_views(self):
+        return self.view not in (
+            self.PLAYING,
+            self.KEY_CONFIG,
+            self.KEY_CAPTURE,
+            self.CONFIRM_EXIT,
+        )
+
+    def _enter_screensaver(self):
+        if not self._screensaver_enabled or not VHS_LOGO_PATH.is_file():
+            return
+        if self._screensaver is None:
+            try:
+                self._screensaver = VHSScreensaver(self.sw, self.sh)
+            except FileNotFoundError:
+                self._screensaver_enabled = False
+                return
+        self._screensaver.randomize_color()
+        self._screensaver_active = True
+
+    def _tick_screensaver(self):
+        dt = max(self.clock.get_time(), 1) / 1000.0
+        if self._screensaver.update(dt):
+            self._screensaver.randomize_color()
+        self._screensaver.draw(self.screen)
+
     def run(self):
         # Show controls splash on startup
         self.draw_splash()
+        self._last_activity_ms = pygame.time.get_ticks()
 
         while self.running:
             # ═══════════════════════════════════════════════════════════════════
@@ -1810,6 +1867,7 @@ class TVTimeCapsule:
                         self.running = False
                         break
                     elif event.type == pygame.KEYDOWN:
+                        self._touch_activity()
                         km = self.keymap
                         # Skip transport keys that were held to *start* playback
                         if pygame.time.get_ticks() < self._play_input_grace_until:
@@ -1868,11 +1926,32 @@ class TVTimeCapsule:
             # BROWSING MODE: menu navigation
             # ═══════════════════════════════════════════════════════════════════
 
+            if self._screensaver_active:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
+                    elif event.type == pygame.KEYDOWN:
+                        self._touch_activity()
+                if self.running:
+                    self._tick_screensaver()
+                    self.present()
+                    self.clock.tick(60)
+                continue
+
+            if (
+                self._screensaver_enabled
+                and self._screensaver_idle_views()
+                and pygame.time.get_ticks() - self._last_activity_ms >= self._screensaver_timeout_ms
+            ):
+                self._enter_screensaver()
+                continue
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
 
                 elif event.type == pygame.KEYDOWN:
+                    self._touch_activity()
                     # Key capture mode
                     if self.view == self.KEY_CAPTURE:
                         if event.key == pygame.K_ESCAPE:

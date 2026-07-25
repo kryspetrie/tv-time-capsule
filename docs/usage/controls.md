@@ -37,3 +37,7 @@ clears the bookmark and marks it watched (`*`).
 | Esc | Stop and return to menu |
 
 Custom key maps are stored in the active `config.json` under the `keymap` key (pygame key codes). An empty `keymap` object uses the defaults above. See [Configuration](configuration.md#where-the-app-looks-for-configjson).
+
+## Screensaver
+
+When enabled in config (or via `--screensaver`), a bouncing VHS logo appears after the configured idle timeout while browsing menus. **Any key** dismisses it and returns to the menu. See [Configuration → screensaver](configuration.md#screensaver).

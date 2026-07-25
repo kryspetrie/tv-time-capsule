@@ -16,8 +16,9 @@ Package root: `src/tv_time_capsule/`.
 | `config.py` | Paths, colors (`C`), timing constants, config search/load/save |
 | `state.py` | Resume position persistence |
 | `keymap.py` | Default keymap, display names, load from config |
+| `screensaver.py` | Bouncing VHS logo idle screensaver (2× pixelated scale, multiply tint) |
 | `fonts.py` | VCR OSD Mono + pygame.font / freetype compatibility |
-| `assets/` | Bundled `vcr_osd_mono.ttf` (packaged as package data) |
+| `assets/` | Bundled `vcr_osd_mono.ttf`, `vhs.bmp` (packaged as package data) |
 
 ## Console scripts
 

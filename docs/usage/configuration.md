@@ -106,6 +106,28 @@ See [`config.example.json`](../../config.example.json) in the repo root for ever
 }
 ```
 
+## `screensaver`
+
+Optional idle screensaver: a greyscale VHS logo (`assets/vhs.bmp`) bounces on a black screen like a DVD screensaver. The logo is drawn at **2×** its source size with **nearest-neighbor scaling** (crisp, pixelated edges). On each edge bounce it picks a new random **multiply** tint color. **Any key** returns to the menu. Applies while browsing menus only (not during video playback, key configuration, or exit confirm).
+
+The bundled asset is a 32-bit BMP so pygame can load it even when extended image formats (PNG/GIF) are unavailable.
+
+```json
+{
+  "screensaver": {
+    "enabled": true,
+    "timeout_seconds": 300
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Turn screensaver on |
+| `timeout_seconds` | `300` | Menu inactivity before start (minimum 10) |
+
+CLI overrides for one run: `--screensaver` and `--screensaver-timeout SEC`.
+
 ## Precedence
 
 ### Config file search

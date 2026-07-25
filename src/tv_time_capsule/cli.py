@@ -59,6 +59,17 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Do not mount remote shares from the config file",
     )
+    parser.add_argument(
+        "--screensaver",
+        action="store_true",
+        help="Enable the bouncing VHS logo screensaver after idle timeout",
+    )
+    parser.add_argument(
+        "--screensaver-timeout",
+        type=int,
+        metavar="SEC",
+        help="Seconds of menu inactivity before the screensaver starts (default: config or 300)",
+    )
     args = parser.parse_args(argv)
 
     save_default_config()
@@ -101,6 +112,8 @@ def main(argv: list[str] | None = None) -> None:
         fullscreen=not args.windowed,
         force_43=args.force_43,
         scanlines=args.scanlines,
+        screensaver=True if args.screensaver else None,
+        screensaver_timeout=args.screensaver_timeout,
     )
 
     if not app.player_cmd and not app.player:
