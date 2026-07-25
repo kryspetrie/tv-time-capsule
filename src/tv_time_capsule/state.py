@@ -229,3 +229,14 @@ def clear_resume_ep(state, show, season=None):
     if changed:
         save_state(state)
     return changed
+
+
+def watch_summary(state: dict | None = None) -> dict:
+    """Return watch progress only — excludes legacy ``keymap`` and other non-show keys."""
+    raw = dict(state if state is not None else load_state())
+    raw.pop("keymap", None)
+    return {
+        show: data
+        for show, data in raw.items()
+        if isinstance(data, dict)
+    }

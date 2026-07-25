@@ -60,11 +60,27 @@ Each video file is one “episode”. The UI still uses show/season/episode lang
 
 ## Thumbnails
 
+Lookup order:
+
+1. Explicit names below (`thumbnail.png`, episode stem, etc.)
+2. **Poster / NFO** — `poster.jpg`, `folder.jpg`, `cover.jpg`, or `<thumb>` path in `tvshow.nfo` / `movie.nfo` / `{episode}.nfo`
+3. Text title (no image)
+
 | Level | Typical filenames |
 |-------|-------------------|
-| Show | `thumbnail.png`, `show.png`, or `<Show Name>.png` |
-| Season | `s01.png` or `<folder name>.png` next to the season folder (e.g. `Action.png`) |
-| Episode | same stem as the video, e.g. `s01e01.png` |
+| Show | `thumbnail.png`, `show.png`, `<Show Name>.png`, **`poster.jpg`**, **`tvshow.nfo`** |
+| Season | `s01.png`, `<folder name>.png`, or **`folder.jpg`** inside the season folder |
+| Episode | same stem as the video (e.g. `s01e01.png`), or **`s01e01.nfo`** with `<title>` |
+
+**NFO example** (Kodi / Jellyfin style):
+
+```xml
+<?xml version="1.0"?>
+<tvshow>
+  <title>Bluey</title>
+  <thumb>poster.jpg</thumb>
+</tvshow>
+```
 
 Supported image extensions: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`.
 
@@ -75,6 +91,21 @@ Supported image extensions: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`.
 ## Multiple roots
 
 Shows with the **same folder name** across roots are merged (episodes combined, sorted by number). Configure multiple roots in [configuration](configuration.md) or pass multiple `--media-dir` flags.
+
+## Channel lineup
+
+By default, shows appear alphabetically and channel numbers match list position (1, 2, 3…). Override order and numbers in config — see [Configuration → channels](configuration.md#channels):
+
+```json
+{
+  "channels": {
+    "order": ["Bluey", "Mister Rogers"],
+    "numbers": { "Bluey": 1 }
+  }
+}
+```
+
+Shows not listed in `order` append alphabetically after the ordered ones.
 
 ## Sample library (for testing)
 

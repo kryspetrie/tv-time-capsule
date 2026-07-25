@@ -53,6 +53,31 @@ Check ffmpeg/ffplay are installed and numpy is available in the venv/pipx enviro
 
 Or manually: `sudo apt install ffmpeg` / `brew install ffmpeg`.
 
+## Choppy video on Raspberry Pi
+
+- Set `"hw_decode": "auto"` in `playback` (default) — uses V4L2 for H.264 when available  
+- `"hw_decode": "off"` forces software decode (slower but works for all codecs)  
+- `"hw_decode": "on"` always tries hardware decode (may fail on non-H.264 files)  
+- Supported on Pi 3/4/5 with Raspberry Pi OS ffmpeg builds that expose `v4l2m2m`  
+- VP9 / HEVC / most MKV codecs may still need software decode or remux to H.264  
+
+Check what ffmpeg offers on the device:
+
+```bash
+ffmpeg -hide_banner -hwaccels
+journalctl -u tv-time-capsule -e | grep -E 'play |stall|hwaccel'
+```
+
+## Playback stalls / black screen during video
+
+The in-app watchdog auto-retries once, then shows **PLAYBACK STALLED** (Enter to retry, Esc to go back). Events are logged to stderr / journal.
+
+```bash
+journalctl -u tv-time-capsule -e
+```
+
+If the service exits unexpectedly, systemd restarts it (`Restart=on-failure`, 5s delay).
+
 ## Desktop shortcut asks “Execute?”
 
 Re-run `./scripts/install-desktop-shortcut.sh` so the `.desktop` file is marked trusted, or right-click → Allow Launching (Pi Desktop).

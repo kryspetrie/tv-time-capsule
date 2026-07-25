@@ -91,9 +91,12 @@ Useful flags:
 | `--windowed` | Run in a window instead of fullscreen (handy for testing) |
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
 | `--scanlines` | CRT scanline overlay |
+| `--channel-snow` | Fine B&W TV snow when tuning; CRT collapse on exit |
 | `--skip-mounts` | Do not mount remote shares from config |
 | `--screensaver` | Enable VHS logo screensaver after idle timeout |
 | `--screensaver-timeout SEC` | Idle seconds before screensaver (overrides config) |
+| `--admin` | Web admin UI at http://127.0.0.1:8765/ (see [Web admin](web-admin.md)) |
+| `--admin-port PORT` | Port for `--admin` (default 8765) |
 
 ## Display behaviour
 

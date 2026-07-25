@@ -7,6 +7,12 @@ import re
 from pathlib import Path
 
 from .config import VIDEO_EXTENSIONS
+from .metadata import (
+    find_folder_poster,
+    resolve_episode_art,
+    resolve_episode_title,
+    resolve_show_thumbnail,
+)
 
 
 def parse_season_episode(filename):
@@ -119,6 +125,8 @@ def discover_shows(media_paths):
             has_season_folders = len(subdir_videos) == len(video_files)
 
             show_thumb = find_thumbnail(show_dir, ["thumbnail", "show", entry])
+            if not show_thumb:
+                show_thumb = resolve_show_thumbnail(show_dir, entry)
 
             if has_season_folders:
                 seasons = {}
@@ -138,6 +146,8 @@ def discover_shows(media_paths):
                             continue
 
                         season_thumb = find_thumbnail(show_dir, [f"s{season_num:02d}", d])
+                        if not season_thumb:
+                            season_thumb = find_folder_poster(season_dir)
                         episodes = _parse_episodes(s_videos, season_num, season_dir)
                         season_entry: dict = {
                             "episodes": episodes,
@@ -239,7 +249,11 @@ def _parse_episodes(video_files, season_num, base_dir):
             ep_num = max(existing_nums) + 1
 
         thumbnail = find_video_thumbnail(vf)
-        name = parse_episode_name(os.path.basename(vf))
+        if not thumbnail:
+            thumbnail = resolve_episode_art(vf)
+        name = resolve_episode_title(
+            vf, parse_episode_name(os.path.basename(vf))
+        )
 
         episodes.append(
             {

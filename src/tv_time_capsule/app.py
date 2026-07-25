@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import warnings
 
 import pygame
 
+from .admin_api import (
+    effective_media_paths,
+    library_summary,
+    library_tree_from_shows,
+    scan_paths,
+    verify_media_path,
+    verify_mount_entry,
+)
+from .analog_artifacts import AnalogArtifacts
+from .channel_fx import FX_DURATION_MS, ChannelChangeFX
+from .channels import build_channel_lineup, show_at_channel
 from .config import (
     C,
     CHANNEL_ERROR_MS,
+    config_file,
     load_config,
+    parse_config,
     save_config,
     CHANNEL_FLASH_MS,
-    CHANNEL_PENDING_MS,
     CHANNEL_TIMEOUT_MS,
     MARQUEE_DELAY_MS,
     MARQUEE_END_PAUSE_MS,
@@ -27,7 +40,9 @@ from .config import (
     STACK_VISIBLE,
 )
 from .fonts import enable_freetype_fallback, make_font
-from .keymap import KEY_ACTIONS, DEFAULT_KEYMAP, key_display_name, load_keymap
+from .gamepad import GamepadHandler
+from .keymap import KEY_ACTIONS, DEFAULT_KEYMAP, key_display_name, keymap_for_display, load_keymap
+from .log import LOG
 from .media import discover_shows
 from .player import (
     EmbeddedPlayer,
@@ -38,6 +53,7 @@ from .player import (
     np_frombuffer,
 )
 from .screensaver import VHS_LOGO_PATH, VHSScreensaver
+from .test_patterns import is_show_list_test_dial, pattern_asset_path
 from .state import (
     clear_resume_ep,
     reset_episode_progress,
@@ -47,7 +63,9 @@ from .state import (
     save_state,
     set_episode_position,
     set_resume_ep,
+    watch_summary,
 )
+from .web_admin import AdminServer, DeferredAdminBridge, start_admin_if_enabled
 
 
 class TVTimeCapsule:
@@ -64,9 +82,18 @@ class TVTimeCapsule:
         media_paths,
         fullscreen=True,
         force_43=False,
-        scanlines=False,
+        scanlines=None,
         screensaver=None,
         screensaver_timeout=None,
+        admin=None,
+        admin_port=None,
+        admin_bridge=None,
+        admin_server=None,
+        admin_local_only=False,
+        channel_snow=None,
+        shutdown_collapse=None,
+        analog_artifacts=None,
+        analog_artifact_rate=None,
     ):
         pygame.init()
 
@@ -82,7 +109,23 @@ class TVTimeCapsule:
 
         self.fullscreen = fullscreen
         self.force_43 = force_43
-        self.scanlines = scanlines
+        self._scanlines_override = scanlines
+        self._screensaver_override = screensaver
+        self._screensaver_timeout_override = screensaver_timeout
+        self._channel_snow_override = channel_snow
+        self._shutdown_collapse_override = shutdown_collapse
+        self._analog_artifacts_override = analog_artifacts
+        self._analog_artifact_rate_override = analog_artifact_rate
+
+        self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
+        self.state = load_state()
+        self.config = load_config()
+
+        ui_cfg_pre = self.config.get("ui") or {}
+        if scanlines is not None:
+            self.scanlines = bool(scanlines)
+        else:
+            self.scanlines = bool(ui_cfg_pre.get("scanlines", False))
 
         # Logical canvas — all UI/video is drawn at this size. SCALED asks SDL
         # to GPU-scale it to the real window/desktop, which avoids a per-frame
@@ -160,14 +203,50 @@ class TVTimeCapsule:
         # Pre-render the scanline overlay (lazy — only if enabled)
         self._scanline_surf = None
 
-        self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
-        self.state = load_state()
-        self.config = load_config()
-        if "keymap" in self.state and not self.config.get("keymap"):
-            self.config["keymap"] = self.state.pop("keymap")
-            save_config(self.config)
+        if "keymap" in self.state:
+            if not self.config.get("keymap"):
+                self.config["keymap"] = self.state.pop("keymap")
+                save_config(self.config)
+            else:
+                self.state.pop("keymap", None)
             save_state(self.state)
         self.keymap = load_keymap(self.config)
+        pb_cfg = self.config.get("playback") or {}
+        self._autoplay_mode = pb_cfg.get("autoplay", "off")
+        self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
+        self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
+        ui_cfg = self.config.get("ui") or {}
+        snow = (
+            bool(channel_snow)
+            if channel_snow is not None
+            else bool(ui_cfg.get("channel_snow", False))
+        )
+        shutdown = (
+            bool(shutdown_collapse)
+            if shutdown_collapse is not None
+            else bool(ui_cfg.get("shutdown_collapse", False))
+        )
+        self._channel_fx = ChannelChangeFX(
+            snow=snow,
+            shutdown=shutdown,
+            audio=ui_cfg.get("channel_snow_audio", snow),
+        )
+        if analog_artifacts is not None:
+            artifacts_on = bool(analog_artifacts)
+        else:
+            artifacts_on = bool(ui_cfg.get("analog_artifacts", False))
+        if analog_artifact_rate is not None:
+            artifact_rate = float(analog_artifact_rate)
+        else:
+            artifact_rate = float(ui_cfg.get("analog_artifact_rate", 12))
+        self._analog_artifacts = AnalogArtifacts(
+            enabled=artifacts_on,
+            rate_per_minute=artifact_rate,
+        )
+        self._show_list_test_pattern: str | None = None
+        gp_cfg = self.config.get("gamepad") or {}
+        self._gamepad = GamepadHandler(enabled=gp_cfg.get("enabled", True))
+        self._gamepad_count = self._gamepad.init()
         ss_cfg = self.config.get("screensaver") or {}
         if screensaver is not None:
             self._screensaver_enabled = bool(screensaver)
@@ -198,8 +277,9 @@ class TVTimeCapsule:
         self.channel_flash_time = 0
         self.channel_error = ""
         self.channel_error_time = 0
-        self.channel_pending = 0
-        self.channel_pending_time = 0
+        self._confirm_exit_yes = False
+        self._in_channel_tune = False
+        self._deferred_splash = None
 
         # Playback state
         self.playing_show = None
@@ -211,9 +291,30 @@ class TVTimeCapsule:
         self.progress_overlay_timer = 0
 
         self.shows = discover_shows(self.media_paths)
-        self.show_names = sorted(self.shows.keys())
+        self.show_names: list[str] = []
+        self._show_channel: dict[str, int] = {}
+        self._channel_show: dict[int, str] = {}
+        self._apply_channel_lineup()
         self.cur_show = None
         self.cur_season = None
+
+        lib_cfg = self.config.get("library") or {}
+        self._rescan_interval_ms = int(lib_cfg.get("rescan_interval_seconds", 0)) * 1000
+        self._rescan_long_press_ms = int(lib_cfg.get("rescan_long_press_ms", 800))
+        self._last_rescan_ms = pygame.time.get_ticks()
+        self._rescan_banner_until = 0
+        self._reset_hold_start = 0
+        self._reset_rescan_fired = False
+
+        self._playback_stalled = False
+        self._stall_auto_retry_done = False
+        self._stall_resume_pos = 0.0
+        self._pending_admin_rescan = False
+        self._admin_server: AdminServer | None = admin_server
+        self._admin_bridge: DeferredAdminBridge | None = admin_bridge
+        self._admin_enabled_override = admin
+        self._admin_port_override = admin_port
+        self._admin_local_only = bool(admin_local_only)
 
         self._img_cache = {}
         self._img_cache_order = []  # LRU tracking for Pi memory limits
@@ -228,6 +329,87 @@ class TVTimeCapsule:
         self._play_input_grace_until = 0
 
         pygame.key.set_repeat(400, 130)
+
+        if self._admin_bridge is not None:
+            self._admin_bridge.attach(self)
+        elif self._admin_server is None:
+            self._start_admin_server()
+
+    def _apply_channel_lineup(self):
+        """Order ``show_names`` and rebuild channel maps from config."""
+        channels_cfg = self.config.get("channels") or {}
+        ordered, show_to_ch, ch_to_show = build_channel_lineup(
+            self.shows.keys(), channels_cfg
+        )
+        self.show_names = ordered
+        self._show_channel = show_to_ch
+        self._channel_show = ch_to_show
+
+    def _display_channel(self, show_name: str) -> int:
+        return self._show_channel.get(show_name, 0)
+
+    def _rescan_library(self) -> bool:
+        """Re-scan media roots. Safe only while not playing video."""
+        if self.view == self.PLAYING:
+            return False
+
+        prev_show = None
+        if self.show_names and 0 <= self.cursor < len(self.show_names):
+            prev_show = self.show_names[self.cursor]
+
+        self.shows = discover_shows(self.media_paths)
+        self._apply_channel_lineup()
+
+        if not self.show_names:
+            self.cursor = 0
+        elif prev_show and prev_show in self.show_names:
+            self.cursor = self.show_names.index(prev_show)
+        else:
+            self.cursor = min(self.cursor, len(self.show_names) - 1)
+
+        self._duration_cache.clear()
+        self._img_cache.clear()
+        self._img_cache_order.clear()
+        self._last_rescan_ms = pygame.time.get_ticks()
+        self._rescan_banner_until = self._last_rescan_ms + 1500
+        return True
+
+    def _draw_rescan_banner(self):
+        if pygame.time.get_ticks() >= self._rescan_banner_until:
+            return
+        self._draw_popup_banner("Updating channels...")
+
+    def _tick_reset_hold(self):
+        """Long-press reset key triggers library rescan."""
+        if self._reset_hold_start <= 0 or self._reset_rescan_fired:
+            return
+        if self.view == self.PLAYING:
+            return
+        reset_key = self.keymap.get("reset", DEFAULT_KEYMAP["reset"])
+        if not pygame.key.get_pressed()[reset_key]:
+            return
+        now = pygame.time.get_ticks()
+        if now - self._reset_hold_start >= self._rescan_long_press_ms:
+            self._reset_rescan_fired = True
+            if self._rescan_library():
+                self.channel_error = "Library updated"
+                self.channel_error_time = now
+
+    def _tick_periodic_rescan(self):
+        if self._pending_admin_rescan:
+            self._pending_admin_rescan = False
+            if self.view != self.PLAYING:
+                if self._rescan_library():
+                    self.channel_error = "Library updated"
+                    self.channel_error_time = pygame.time.get_ticks()
+            return
+        if self._rescan_interval_ms <= 0:
+            return
+        if self.view != self.SHOW_LIST:
+            return
+        now = pygame.time.get_ticks()
+        if now - self._last_rescan_ms >= self._rescan_interval_ms:
+            self._rescan_library()
 
     # ─── Scanline overlay ────────────────────────────────────────────────
 
@@ -306,6 +488,16 @@ class TVTimeCapsule:
         except Exception:
             self._img_cache[key] = None
             return None
+
+    def _blit_fullscreen_asset(self, path) -> bool:
+        """Scale an asset to the full logical canvas (640x480)."""
+        img = self._load_image_surface(str(path))
+        if img is None:
+            return False
+        if img.get_size() != (self.sw, self.sh):
+            img = pygame.transform.scale(img, (self.sw, self.sh))
+        self.screen.blit(img, (0, 0))
+        return True
 
     @staticmethod
     def _load_image_surface(path):
@@ -400,6 +592,100 @@ class TVTimeCapsule:
             if self._scanline_surf is None:
                 self._scanline_surf = self._make_scanlines()
             self.screen.blit(self._scanline_surf, (0, 0))
+
+    def _apply_analog_artifacts(self) -> None:
+        if self.view == self.SHOW_LIST:
+            self._analog_artifacts.tick()
+            self._analog_artifacts.apply(self.screen)
+
+    def _clear_show_list_test_pattern(self) -> None:
+        self._show_list_test_pattern = None
+
+    def _commit_show_list_test_pattern(self, dial: str) -> bool:
+        """Show a secret test pattern for dial codes 0 / 00 / 000."""
+        path = pattern_asset_path(dial)
+        if path is None:
+            self.channel_error = f"Ch {dial} Not Found"
+            self.channel_error_time = pygame.time.get_ticks()
+            return False
+        self._show_list_test_pattern = dial
+        self._animate_channel_snow_burst()
+        return True
+
+    def _apply_channel_fx(self):
+        """Brief static burst when tuning channels (if enabled)."""
+        if self._channel_fx.is_active():
+            self._channel_fx.draw(self.screen)
+
+    def _trigger_channel_change_fx(self):
+        self._channel_fx.trigger()
+
+    def _draw_browse_content(self) -> None:
+        """Menu layers only — no snow, channel overlay, or rescan banner."""
+        if self.view == self.SHOW_LIST:
+            self.draw_show_browser()
+        elif self.view == self.SEASON_SELECT:
+            self.draw_season_browser()
+        elif self.view == self.EPISODE_SELECT:
+            self.draw_episode_browser()
+
+    def _blit_now_playing_content(
+        self, show, season, episode, channel, resume_secs=None
+    ) -> None:
+        """Now-playing splash artwork without blocking or snow."""
+        self.screen.fill(C.BLACK)
+
+        ep_num = episode["number"]
+        ep_name = episode.get("name") or ""
+
+        ch = str(channel)
+        ch_surf = self.font_lg.render(ch, True, C.GREEN)
+        self.screen.blit(ch_surf, (self.sw - ch_surf.get_width() - 40, 30))
+
+        label = f"S-{season:02d} - E-{ep_num:02d}"
+        s = self.font_md.render(label, True, C.WHITE)
+        self.screen.blit(s, s.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 40))
+
+        if ep_name:
+            n = self.font_md.render(ep_name, True, C.BLUE)
+            self.screen.blit(n, n.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 10))
+
+        if resume_secs and resume_secs > 0:
+            mins = int(resume_secs) // 60
+            secs = int(resume_secs) % 60
+            sn = self.font_sm.render(f"RESUME  {mins}:{secs:02d}", True, C.GREEN)
+        else:
+            sn = self.font_sm.render(show.upper(), True, C.DIM)
+        self.screen.blit(sn, sn.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 55))
+
+    def _draw_channel_tune_frame(self) -> None:
+        """Destination screen drawn under a channel-change snow burst."""
+        deferred = self._deferred_splash
+        if self.view == self.PLAYING and deferred is not None:
+            self._blit_now_playing_content(*deferred)
+        elif self.view == self.CONFIRM_EXIT:
+            self.draw_confirm_exit()
+        elif self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
+            self.draw_key_config(capturing=(self.view == self.KEY_CAPTURE))
+        else:
+            self._draw_browse_content()
+            if self.view == self.SHOW_LIST:
+                self._apply_analog_artifacts()
+
+    def _animate_channel_snow_burst(self) -> None:
+        """Run a fixed-length static burst so every tune feels the same."""
+        if not self._channel_fx.snow_enabled:
+            return
+        self._channel_fx.trigger()
+        start = pygame.time.get_ticks()
+        while pygame.time.get_ticks() - start < FX_DURATION_MS:
+            pygame.event.pump()
+            self._draw_channel_tune_frame()
+            self._channel_fx.draw(self.screen)
+            self.draw_channel_overlay()
+            self._draw_rescan_banner()
+            self.present()
+            self.clock.tick(60)
 
     def _draw_footer(self, *hints):
         """Draw a consistent footer bar with spaced hint segments."""
@@ -568,6 +854,49 @@ class TVTimeCapsule:
             lines.append(current_line)
         return lines if lines else [text]
 
+    def _draw_popup_banner(
+        self,
+        message: str,
+        *,
+        alpha: int = 255,
+        color=C.GREEN,
+        font=None,
+        max_width: int | None = None,
+    ) -> None:
+        """Centered message box with word wrap for transient warnings."""
+        font = font or self.font_sm
+        pad_x, pad_y = 24, 16
+        line_gap = 4
+        max_w = max_width if max_width is not None else self.sw - 80
+        lines = self._wrap_text(message, font, max_w)
+        line_h = font.get_linesize()
+        text_w = max(font.size(line)[0] for line in lines)
+        text_h = line_h * len(lines) + line_gap * max(0, len(lines) - 1)
+        box_w = min(self.sw - 40, text_w + pad_x * 2)
+        box_h = text_h + pad_y * 2
+        box_x = (self.sw - box_w) // 2
+        box_y = (self.sh - box_h) // 2
+
+        bg_surf = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        bg_surf.fill((0, 10, 5, min(220, alpha)))
+        pygame.draw.rect(
+            bg_surf,
+            (*color[:3], min(alpha, 200)),
+            (0, 0, box_w, box_h),
+            2,
+            border_radius=6,
+        )
+        self.screen.blit(bg_surf, (box_x, box_y))
+
+        y = box_y + pad_y
+        for line in lines:
+            surf = font.render(line, True, color)
+            if alpha < 255:
+                surf.set_alpha(alpha)
+            x = box_x + (box_w - surf.get_width()) // 2
+            self.screen.blit(surf, (x, y))
+            y += line_h + line_gap
+
     def seasons_for_show(self, show):
         return sorted(self.shows.get(show, {}).get('seasons', {}).keys())
 
@@ -599,13 +928,12 @@ class TVTimeCapsule:
     # ─── Main draw dispatch ──────────────────────────────────────────────
 
     def draw(self):
-        if self.view == self.SHOW_LIST:
-            self.draw_show_browser()
-        elif self.view == self.SEASON_SELECT:
-            self.draw_season_browser()
-        elif self.view == self.EPISODE_SELECT:
-            self.draw_episode_browser()
+        self._draw_browse_content()
+        self._apply_channel_fx()
         self.draw_channel_overlay()
+        self._draw_rescan_banner()
+        if self.view == self.SHOW_LIST:
+            self._apply_analog_artifacts()
 
     # ─── Channel overlay ─────────────────────────────────────────────────
 
@@ -622,23 +950,7 @@ class TVTimeCapsule:
                     fade_progress = (elapsed - CHANNEL_ERROR_MS // 2) / (CHANNEL_ERROR_MS // 2)
                     alpha = int(255 * (1.0 - fade_progress))
 
-                err_surf = self.font_lg.render(self.channel_error, True, C.GREEN)
-                box_w = err_surf.get_width() + 60
-                box_h = err_surf.get_height() + 30
-                box_x = (self.sw - box_w) // 2
-                box_y = self.sh // 2 - box_h // 2
-
-                bg_surf = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-                bg_surf.fill((0, 10, 5, min(220, alpha)))
-                pygame.draw.rect(bg_surf, (*C.GREEN[:3], min(alpha, 200)),
-                                 (0, 0, box_w, box_h), 2, border_radius=6)
-                self.screen.blit(bg_surf, (box_x, box_y))
-
-                if alpha < 255:
-                    err_surf.set_alpha(alpha)
-                self.screen.blit(err_surf,
-                                (box_x + (box_w - err_surf.get_width()) // 2,
-                                 box_y + (box_h - err_surf.get_height()) // 2))
+                self._draw_popup_banner(self.channel_error, alpha=alpha)
                 return
             else:
                 self.channel_error = ""
@@ -722,10 +1034,21 @@ class TVTimeCapsule:
             self._apply_scanlines()
             return
 
+        test_dial = self._show_list_test_pattern
+        if test_dial:
+            pattern_path = pattern_asset_path(test_dial)
+            if pattern_path and self._blit_fullscreen_asset(pattern_path):
+                self._apply_scanlines()
+                return
+            t = self.font_md.render("TEST PATTERN NOT FOUND", True, C.DIM)
+            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+            self._apply_scanlines()
+            return
+
         idx = self.cursor % len(shows)
         show_name = shows[idx]
         show_data = self.shows[show_name]
-        ch_num = idx + 1
+        ch_num = self._display_channel(show_name)
 
         # ── Header ──
         header_h = self._draw_header(show_name.upper(), ch_num=ch_num)
@@ -761,7 +1084,7 @@ class TVTimeCapsule:
             pygame.draw.rect(self.screen, (14, 20, 35), (0, down_y, self.sw, nav_h))
         pygame.draw.line(self.screen, (25, 40, 70), (0, down_y), (self.sw, down_y), 1)
 
-        # ── Central content: thumbnail or wrapped show title ──
+        # ── Central content: test pattern, thumbnail, or wrapped show title ──
         n_total = self._count_total_eps(show_data)
         seasons = self.seasons_for_show(show_name)
         if len(seasons) > 1:
@@ -769,9 +1092,9 @@ class TVTimeCapsule:
         else:
             info = f"{n_total} episodes"
 
-        thumb = self.load_image(show_data.get('thumbnail'),
-                                 (self.sw - 80, content_h - 40))
-        if thumb:
+        if thumb := self.load_image(
+            show_data.get("thumbnail"), (self.sw - 80, content_h - 40)
+        ):
             tx = (self.sw - thumb.get_width()) // 2
             ty = content_y + (content_h - thumb.get_height() - 20) // 2
             self.screen.blit(thumb, (tx, ty))
@@ -806,7 +1129,7 @@ class TVTimeCapsule:
             self.screen.blit(it, it.get_rect(centerx=self.sw // 2, top=it_y))
 
         # ── Footer ──
-        self._draw_footer("\u25b2 Up", "\u25bc Down", "> Play", "#ch", "H Help")
+        self._draw_footer("\u25b2 Up", "\u25bc Down", "> Play", "#ch", "H Help", "Hold R Scan")
         self._apply_scanlines()
 
     # ─── Season browser ──────────────────────────────────────────────────
@@ -1109,6 +1432,10 @@ class TVTimeCapsule:
         self.draw_progress_overlay()
         self.draw_volume_overlay()
         self.draw_pause_overlay()
+        if self._playback_stalled:
+            self.draw_stall_overlay()
+
+        self._apply_channel_fx()
 
     # ─── Progress overlay (during playback) ─────────────────────────────────
 
@@ -1256,22 +1583,30 @@ class TVTimeCapsule:
         start = pygame.time.get_ticks()
         duration = 10000  # 10 seconds
 
-        # Build control lines - ASCII only, no unicode arrows
+        # Build control lines
         km = self.keymap
         lines = [
             ("NAVIGATION", None),
-            ("browse shows", f"{key_display_name(km.get('up','Up'))}/{key_display_name(km.get('down','Down'))}  up / down"),
-            ("enter / select", f"{key_display_name(km.get('right','Right'))} or {key_display_name(km.get('select','Enter'))}"),
-            ("go back", f"{key_display_name(km.get('left','Left'))} or {key_display_name(km.get('back','Esc'))}"),
-            ("reset watch status", key_display_name(km.get("reset", "R"))),
+            ("browse shows", f"{key_display_name(km.get('up', DEFAULT_KEYMAP['up']))}/{key_display_name(km.get('down', DEFAULT_KEYMAP['down']))}  up / down"),
+            ("enter / select", f"{key_display_name(km.get('right', DEFAULT_KEYMAP['right']))} or {key_display_name(km.get('select', DEFAULT_KEYMAP['select']))}"),
+            ("go back", f"{key_display_name(km.get('left', DEFAULT_KEYMAP['left']))} or {key_display_name(km.get('back', DEFAULT_KEYMAP['back']))}"),
+            ("reset watch status", f"tap {key_display_name(km.get('reset', DEFAULT_KEYMAP['reset']))}  |  hold to rescan"),
             ("rebind keys", "Tab"),
             ("CHANNELS", None),
             ("jump to channel", "type any number  (auto-enters after 1.5s)"),
             ("DURING PLAYBACK", None),
-            ("volume up / down", f"{key_display_name(km.get('up','Up'))}/{key_display_name(km.get('down','Down'))}"),
-            ("seek +/-10s", f"{key_display_name(km.get('left','Left'))}/{key_display_name(km.get('right','Right'))}"),
+            ("volume up / down", f"{key_display_name(km.get('up', DEFAULT_KEYMAP['up']))}/{key_display_name(km.get('down', DEFAULT_KEYMAP['down']))}"),
+            ("seek +/-10s", f"{key_display_name(km.get('left', DEFAULT_KEYMAP['left']))}/{key_display_name(km.get('right', DEFAULT_KEYMAP['right']))}"),
             ("pause / stop", "Space or Enter / Esc"),
         ]
+        if self._gamepad_count > 0:
+            lines.append(("GAMEPAD", None))
+            lines.append(
+                ("navigate", "D-pad / left stick"),
+            )
+            lines.append(
+                ("select / back", "A / B  (or Start / Back)"),
+            )
 
         footer_hint_y = self.sh - 18
         divider_y = self.sh - 36
@@ -1360,35 +1695,9 @@ class TVTimeCapsule:
 
     def draw_now_playing(self, show, season, episode, channel, resume_secs=None):
         """Splash screen before video plays. Green accent."""
-        self.screen.fill(C.BLACK)
-
-        ep_num = episode['number']
-        ep_name = episode.get('name') or ''
-
-        # Channel number (green, upper right) — matches the episode page
-        ch = str(channel)
-        ch_surf = self.font_lg.render(ch, True, C.GREEN)
-        self.screen.blit(ch_surf, (self.sw - ch_surf.get_width() - 40, 30))
-
-        # Episode number (white)
-        label = f"S-{season:02d} - E-{ep_num:02d}"
-        s = self.font_md.render(label, True, C.WHITE)
-        self.screen.blit(s, s.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 40))
-
-        # Episode name (blue)
-        if ep_name:
-            n = self.font_md.render(ep_name, True, C.BLUE)
-            self.screen.blit(n, n.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 10))
-
-        # Resume cue or show name
-        if resume_secs and resume_secs > 0:
-            mins = int(resume_secs) // 60
-            secs = int(resume_secs) % 60
-            sn = self.font_sm.render(f"RESUME  {mins}:{secs:02d}", True, C.GREEN)
-        else:
-            sn = self.font_sm.render(show.upper(), True, C.DIM)
-        self.screen.blit(sn, sn.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 55))
-
+        self._blit_now_playing_content(
+            show, season, episode, channel, resume_secs=resume_secs
+        )
         self.present()
         # Pump/clear events while waiting so held keys (and key-repeat KEYDOWNs)
         # do not pile up and immediately pause/seek when playback begins.
@@ -1402,6 +1711,40 @@ class TVTimeCapsule:
         pygame.event.clear()
 
     # ─── Key configuration ────────────────────────────────────────────────
+
+    def _key_to_browse_action(self, key):
+        """Map a pygame key code to a browse action, or None."""
+        km = self.keymap
+        if key == km.get("up", pygame.K_UP):
+            return "up"
+        if key == km.get("down", pygame.K_DOWN):
+            return "down"
+        if key == km.get("select", pygame.K_RETURN) or key == km.get("right", pygame.K_RIGHT):
+            return "select"
+        if key == km.get("left", pygame.K_LEFT):
+            return "left"
+        if key == km.get("back", pygame.K_ESCAPE):
+            return "back"
+        return None
+
+    def _key_to_playback_action(self, key):
+        """Map a pygame key code to a playback action, or None."""
+        km = self.keymap
+        if key == km.get("back", pygame.K_ESCAPE):
+            return "back"
+        if key == km.get("up", pygame.K_UP):
+            return "up"
+        if key == km.get("down", pygame.K_DOWN):
+            return "down"
+        if key == km.get("right", pygame.K_RIGHT):
+            return "right"
+        if key == km.get("left", pygame.K_LEFT):
+            return "left"
+        if key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER):
+            return "select"
+        if key == km.get("select", pygame.K_RETURN):
+            return "select"
+        return None
 
     # ─── Confirm exit dialog ────────────────────────────────────────────
 
@@ -1438,20 +1781,64 @@ class TVTimeCapsule:
         # Yes button
         yes_x = btn_start_x
         yes_rect = pygame.Rect(yes_x, btn_y, btn_w, btn_h)
-        pygame.draw.rect(self.screen, C.BG_CARD_SEL, yes_rect, border_radius=6)
-        pygame.draw.rect(self.screen, C.CYAN, yes_rect, 2, border_radius=6)
-        yes_txt = self.font_sm.render("Yes", True, C.BRIGHT)
+        yes_sel = self._confirm_exit_yes
+        pygame.draw.rect(
+            self.screen,
+            C.BG_CARD_SEL if yes_sel else C.BG_CARD,
+            yes_rect,
+            border_radius=6,
+        )
+        pygame.draw.rect(
+            self.screen,
+            C.CYAN if yes_sel else C.DIM,
+            yes_rect,
+            2,
+            border_radius=6,
+        )
+        yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else C.DIM)
         self.screen.blit(yes_txt, yes_txt.get_rect(center=yes_rect.center))
 
         # No button
         no_x = btn_start_x + btn_w + gap
         no_rect = pygame.Rect(no_x, btn_y, btn_w, btn_h)
-        pygame.draw.rect(self.screen, C.BG_CARD, no_rect, border_radius=6)
-        pygame.draw.rect(self.screen, C.DIM, no_rect, 2, border_radius=6)
-        no_txt = self.font_sm.render("No", True, C.DIM)
+        no_sel = not self._confirm_exit_yes
+        pygame.draw.rect(
+            self.screen,
+            C.BG_CARD_SEL if no_sel else C.BG_CARD,
+            no_rect,
+            border_radius=6,
+        )
+        pygame.draw.rect(
+            self.screen,
+            C.CYAN if no_sel else C.DIM,
+            no_rect,
+            2,
+            border_radius=6,
+        )
+        no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else C.DIM)
         self.screen.blit(no_txt, no_txt.get_rect(center=no_rect.center))
 
         self._apply_scanlines()
+
+    def _set_confirm_exit_choice(self, yes: bool) -> None:
+        self._confirm_exit_yes = bool(yes)
+
+    def _activate_confirm_exit_choice(self) -> None:
+        if self._confirm_exit_yes:
+            self.running = False
+        else:
+            self.view = self.SHOW_LIST
+
+    def _process_confirm_exit_action(self, action: str) -> None:
+        # Yes is on the left, No on the right.
+        if action in ("left", "up"):
+            self._set_confirm_exit_choice(True)
+        elif action in ("right", "down"):
+            self._set_confirm_exit_choice(False)
+        elif action == "select":
+            self._activate_confirm_exit_choice()
+        elif action == "back":
+            self.view = self.SHOW_LIST
 
     # ─── Key configuration ────────────────────────────────────────────────
 
@@ -1567,6 +1954,8 @@ class TVTimeCapsule:
     # ─── Navigation ────────────────────────────────────────────────────────
 
     def move_cursor(self, direction):
+        if self.view == self.SHOW_LIST:
+            self._clear_show_list_test_pattern()
         total = self.total_items()
         if not total:
             return
@@ -1579,7 +1968,23 @@ class TVTimeCapsule:
             self.cursor = new_cursor
             self._marquee_key = None  # restart marquee delay on the new row
 
+    def _channel_tune(self, apply) -> None:
+        """Apply navigation first, then snow — destination sits under the burst."""
+        self._in_channel_tune = True
+        self._deferred_splash = None
+        try:
+            apply()
+            self._animate_channel_snow_burst()
+            deferred = self._deferred_splash
+            self._deferred_splash = None
+            if deferred is not None and self.view == self.PLAYING:
+                self.draw_now_playing(*deferred)
+        finally:
+            self._in_channel_tune = False
+
     def select(self):
+        if self.view == self.SHOW_LIST and self._show_list_test_pattern:
+            return
         items = self.current_items()
         if not items or self.cursor >= len(items):
             return
@@ -1648,26 +2053,36 @@ class TVTimeCapsule:
         # On SHOW_LIST, left arrow does nothing — use Escape to quit
 
     def jump_to_channel(self, channel_num):
-        items = self.current_items()
-
         if self.view == self.SHOW_LIST:
-            if 1 <= channel_num <= len(self.show_names):
-                self.cursor = channel_num - 1
+            show_name = show_at_channel(self._channel_show, channel_num)
+            if show_name and show_name in self.show_names:
+                self._clear_show_list_test_pattern()
+                idx = self.show_names.index(show_name)
+
+                def apply():
+                    self.cursor = idx
+                    self.select()
+
+                self._channel_tune(apply)
                 return True
+            if len(self.show_names) == 0:
+                self.channel_error = "No Shows"
+            elif show_name is None:
+                self.channel_error = f"Ch {channel_num} Not Found"
             else:
-                if len(self.show_names) == 0:
-                    self.channel_error = "No Shows"
-                elif channel_num > len(self.show_names):
-                    self.channel_error = f"Ch {channel_num} Not Found"
-                else:
-                    self.channel_error = "Channel Not Found"
-                self.channel_error_time = pygame.time.get_ticks()
-                return False
+                self.channel_error = "Channel Not Found"
+            self.channel_error_time = pygame.time.get_ticks()
+            return False
 
         elif self.view == self.SEASON_SELECT:
             seasons = self.seasons_for_show(self.cur_show)
             if 1 <= channel_num <= len(seasons):
-                self.cursor = channel_num - 1
+
+                def apply():
+                    self.cursor = channel_num - 1
+                    self.select()
+
+                self._channel_tune(apply)
                 return True
             else:
                 self.channel_error = f"Season {channel_num} Not Found"
@@ -1677,7 +2092,12 @@ class TVTimeCapsule:
         elif self.view == self.EPISODE_SELECT:
             episodes = self.current_items()
             if 1 <= channel_num <= len(episodes):
-                self.cursor = channel_num - 1
+
+                def apply():
+                    self.cursor = channel_num - 1
+                    self.select()
+
+                self._channel_tune(apply)
                 return True
             else:
                 self.channel_error = f"Episode {channel_num} Not Found"
@@ -1685,6 +2105,296 @@ class TVTimeCapsule:
                 return False
 
         return False
+
+    def _create_player(self):
+        """Build an EmbeddedPlayer using the best available backend."""
+        player = EmbeddedPlayer(self.canvas_w, self.canvas_h)
+        ffmpeg_path = detect_ffmpeg()
+        ffplay_path = detect_ffplay()
+        omx_cmd = detect_omxplayer() if is_pi() else None
+
+        if ffmpeg_path and np_frombuffer is not None:
+            player.ffmpeg_path = ffmpeg_path
+            player.ffplay_path = ffplay_path
+            self.embedded_player = True
+        elif omx_cmd:
+            if not self._omx_overlay:
+                self._enable_omx_overlay()
+            player.use_omx = True
+            player.omx_cmd = omx_cmd
+            self.embedded_player = True
+        else:
+            return None
+        player.hw_decode_mode = self._hw_decode_mode
+        return player
+
+    def _retry_playback(self, resume_secs=None):
+        """Restart the current episode after a stall."""
+        if not self.playing_episodes or self.playing_episode is None:
+            return False
+        if self.player:
+            self.player.stop()
+            self.player = None
+        self._playback_stalled = False
+        return self._start_current_episode(
+            resume_secs=resume_secs if resume_secs is not None else self.time_pos_if_playing(),
+            show_splash=False,
+        )
+
+    def time_pos_if_playing(self):
+        if self.player:
+            self.player.update_time()
+            return self.player.time_pos
+        return 0.0
+
+    def _handle_playback_stall(self):
+        """Detect freeze; auto-retry once, then prompt the user."""
+        if not self.player or self._playback_stalled:
+            return
+
+        pos = self.time_pos_if_playing()
+        path = self.player.filepath
+        LOG.warning("playback stall detected path=%s pos=%.1fs", path, pos)
+
+        if not self._stall_auto_retry_done and path:
+            self._stall_auto_retry_done = True
+            LOG.info("auto-retry playback path=%s pos=%.1fs", path, pos)
+            if self._retry_playback(resume_secs=pos):
+                return
+            LOG.error("auto-retry failed path=%s", path)
+
+        self._playback_stalled = True
+        self._stall_resume_pos = pos
+        if self.player:
+            self.player.stalled = True
+            self.player.stop()
+            self.player = None
+
+    def draw_stall_overlay(self):
+        """Prompt after watchdog gives up or auto-retry fails."""
+        overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        self.screen.blit(overlay, (0, 0))
+
+        title = self.font_md.render("PLAYBACK STALLED", True, C.GREEN)
+        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 36))
+
+        hint = self.font_sm.render("Enter retry  |  Esc back", True, C.DIM)
+        self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 16))
+
+    def _start_current_episode(self, *, resume_secs=None, show_splash=True):
+        """Start ``playing_episodes[playing_index]``. Returns True on success."""
+        episode = self.playing_episodes[self.playing_index]
+        self.playing_episode = episode
+        self.view = self.PLAYING
+
+        splash_args = (
+            self.playing_show,
+            self.playing_season,
+            episode,
+            self.playing_index + 1,
+            resume_secs,
+        )
+        if show_splash and self._in_channel_tune:
+            self._deferred_splash = splash_args
+        elif show_splash:
+            self.draw_now_playing(*splash_args)
+
+        self.player = self._create_player()
+        if self.player is None:
+            self.channel_error = "NO PLAYER"
+            self.channel_error_time = pygame.time.get_ticks()
+            self.view = self.EPISODE_SELECT
+            return False
+
+        if not self.player.start(episode["path"], resume_pos=resume_secs):
+            self.player = None
+            self.channel_error = "PLAY FAILED"
+            self.channel_error_time = pygame.time.get_ticks()
+            self.view = self.EPISODE_SELECT
+            return False
+
+        pygame.event.clear()
+        self._play_input_grace_until = pygame.time.get_ticks() + PLAY_INPUT_GRACE_MS
+        self.progress_overlay_timer = 0
+        self.volume_overlay_timer = 0
+        self._playback_stalled = False
+        self._stall_auto_retry_done = False
+        return True
+
+    def _resolve_autoplay_target(self):
+        """Return (episodes, index, season) for autoplay, or None."""
+        if self._autoplay_mode == "off":
+            return None
+
+        next_idx = self.playing_index + 1
+        if next_idx < len(self.playing_episodes):
+            return self.playing_episodes, next_idx, self.playing_season
+
+        if self._autoplay_mode != "next_episode":
+            return None
+
+        seasons = self.seasons_for_show(self.playing_show)
+        try:
+            si = seasons.index(self.playing_season)
+        except ValueError:
+            return None
+        if si + 1 >= len(seasons):
+            return None
+        next_season = seasons[si + 1]
+        eps = self.shows[self.playing_show]["seasons"][next_season]["episodes"]
+        if not eps:
+            return None
+        return eps, 0, next_season
+
+    def _draw_up_next_splash(self, episode, season, channel, seconds_left):
+        self.screen.fill(C.BLACK)
+        title = self.font_lg.render("UP NEXT", True, C.GREEN)
+        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=80))
+
+        ep_num = episode["number"]
+        ep_name = episode.get("name") or ""
+        label = f"S-{season:02d} - E-{ep_num:02d}"
+        s = self.font_md.render(label, True, C.WHITE)
+        self.screen.blit(s, s.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 30))
+        if ep_name:
+            n = self.font_md.render(ep_name, True, C.BLUE)
+            self.screen.blit(n, n.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 10))
+
+        ch = self.font_lg.render(str(channel), True, C.GREEN)
+        self.screen.blit(ch, (self.sw - ch.get_width() - 40, 30))
+
+        show = self.font_sm.render(self.playing_show.upper(), True, C.DIM)
+        self.screen.blit(show, show.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 55))
+
+        hint = self.font_sm.render(
+            f"Starting in {seconds_left}s  —  Esc to cancel", True, C.DIM
+        )
+        self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh - 50))
+        self._apply_scanlines()
+
+    def _run_up_next_countdown(self, episode, season, channel):
+        """Countdown before autoplay. Returns True to continue, False if cancelled."""
+        total = self._autoplay_countdown
+        if total <= 0:
+            return True
+
+        start = pygame.time.get_ticks()
+        duration_ms = total * 1000
+        km = self.keymap
+
+        while self.running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    return False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == km.get("back", pygame.K_ESCAPE):
+                        return False
+                action = self._gamepad.event_to_action(event)
+                if action == "back":
+                    return False
+
+            elapsed = pygame.time.get_ticks() - start
+            if elapsed >= duration_ms:
+                return True
+
+            remaining = max(1, (duration_ms - elapsed + 999) // 1000)
+            self._draw_up_next_splash(episode, season, channel, remaining)
+            self.present()
+            self.clock.tick(30)
+
+        return False
+
+    def _handle_episode_finished(self):
+        """Natural end: mark watched, optionally autoplay the next episode."""
+        self._mark_completed()
+
+        target = self._resolve_autoplay_target()
+        if target is None:
+            self.stop_playback(completed=True)
+            return
+
+        episodes, index, season = target
+        episode = episodes[index]
+
+        if not self._run_up_next_countdown(episode, season, index + 1):
+            self.stop_playback(completed=True)
+            return
+
+        if self.player:
+            self.player.stop()
+            self.player = None
+
+        self.playing_episodes = episodes
+        self.playing_index = index
+        self.playing_season = season
+        self.cur_season = season
+
+        pos_ep, pos_secs = get_episode_position(
+            self.state, self.playing_show, season
+        )
+        resume_secs = None
+        if pos_ep is not None and episode["number"] == pos_ep:
+            resume_secs = pos_secs
+
+        if not self._start_current_episode(resume_secs=resume_secs, show_splash=True):
+            self.stop_playback(completed=True)
+
+    def _process_playback_action(self, action):
+        """Handle a logical action during PLAYING. Returns False if playback stopped."""
+        km = self.keymap
+        if action == "back":
+            self.stop_playback()
+            return False
+
+        if pygame.time.get_ticks() < self._play_input_grace_until:
+            if action in ("left", "right", "select"):
+                return True
+
+        if action == "up":
+            if self.player:
+                self.player.adjust_volume(10)
+                self.volume_overlay_timer = pygame.time.get_ticks()
+        elif action == "down":
+            if self.player:
+                self.player.adjust_volume(-10)
+                self.volume_overlay_timer = pygame.time.get_ticks()
+        elif action == "right":
+            if self.player:
+                self.player.seek(PROGRESS_SEEK_S)
+                self.progress_overlay_timer = pygame.time.get_ticks()
+        elif action == "left":
+            if self.player:
+                self.player.seek(-PROGRESS_SEEK_S)
+                self.progress_overlay_timer = pygame.time.get_ticks()
+        elif action == "select":
+            if self.player:
+                self.player.pause()
+                if self.player.paused:
+                    self.progress_overlay_timer = pygame.time.get_ticks()
+        return True
+
+    def _process_browse_action(self, action):
+        """Handle menu navigation from keyboard or gamepad."""
+        km = self.keymap
+        if action == "up":
+            self.move_cursor(-1)
+        elif action == "down":
+            self.move_cursor(1)
+        elif action in ("select", "right"):
+            self.select()
+        elif action == "left":
+            self.go_back()
+        elif action == "back":
+            if self.view == self.SHOW_LIST:
+                if self._show_list_test_pattern:
+                    self._clear_show_list_test_pattern()
+                else:
+                    self._confirm_exit_yes = False
+                    self.view = self.CONFIRM_EXIT
+            else:
+                self.go_back()
 
     def play_from_cursor(self):
         if not self.player_cmd and not self.player:
@@ -1701,12 +2411,9 @@ class TVTimeCapsule:
 
         self.playing_show = self.cur_show
         self.playing_season = self.cur_season
-        self.playing_episode = episodes[start]
         self.playing_episodes = episodes
         self.playing_index = start
-        self.view = self.PLAYING
 
-        # Show splash — channel is the episode's 1-based position on its page
         pos_ep, pos_secs = get_episode_position(
             self.state, self.cur_show, self.cur_season
         )
@@ -1714,47 +2421,8 @@ class TVTimeCapsule:
         if pos_ep is not None and episodes[start]["number"] == pos_ep:
             resume_secs = pos_secs
 
-        self.draw_now_playing(
-            self.cur_show,
-            self.cur_season,
-            episodes[start],
-            start + 1,
-            resume_secs=resume_secs,
-        )
-
-        # Start player
-        self.player = EmbeddedPlayer(self.canvas_w, self.canvas_h)
-        # Set player capabilities based on what's available
-        ffmpeg_path = detect_ffmpeg()
-        ffplay_path = detect_ffplay()
-        omx_cmd = detect_omxplayer() if is_pi() else None
-
-        if ffmpeg_path and np_frombuffer is not None:
-            self.player.ffmpeg_path = ffmpeg_path
-            self.player.ffplay_path = ffplay_path
-            self.embedded_player = True
-        elif omx_cmd:
-            if not self._omx_overlay:
-                self._enable_omx_overlay()
-            self.player.use_omx = True
-            self.player.omx_cmd = omx_cmd
-            self.embedded_player = True
-        else:
-            self.embedded_player = False
-
-        if not self.player.start(episodes[start]['path'], resume_pos=resume_secs):
-            self.player = None
-            self.channel_error = "PLAY FAILED"
-            self.channel_error_time = pygame.time.get_ticks()
-            self.view = self.EPISODE_SELECT
+        if not self._start_current_episode(resume_secs=resume_secs, show_splash=True):
             return
-
-        # Discard any KEYDOWNs that accumulated while the splash ran (held Enter
-        # would otherwise toggle pause; held Right would seek and often exit).
-        pygame.event.clear()
-        self._play_input_grace_until = pygame.time.get_ticks() + PLAY_INPUT_GRACE_MS
-        self.progress_overlay_timer = 0
-        self.volume_overlay_timer = 0
 
     def _next_up_index(self, episodes, resume, pos_ep=None):
         """Index of the in-progress episode, else first uncompleted, else last."""
@@ -1843,6 +2511,277 @@ class TVTimeCapsule:
             self._screensaver.randomize_color()
         self._screensaver.draw(self.screen)
 
+    def _apply_runtime_config(self) -> None:
+        """Apply reloadable settings from ``self.config`` without restarting."""
+        ui_cfg = self.config.get("ui") or {}
+        snow = (
+            bool(self._channel_snow_override)
+            if self._channel_snow_override is not None
+            else bool(ui_cfg.get("channel_snow", False))
+        )
+        shutdown = (
+            bool(self._shutdown_collapse_override)
+            if self._shutdown_collapse_override is not None
+            else bool(ui_cfg.get("shutdown_collapse", False))
+        )
+        self._channel_fx.configure(
+            snow=snow,
+            shutdown=shutdown,
+            audio=ui_cfg.get("channel_snow_audio", snow),
+        )
+
+        if self._scanlines_override is None:
+            self.scanlines = bool(ui_cfg.get("scanlines", False))
+            if not self.scanlines:
+                self._scanline_surf = None
+
+        ss_cfg = self.config.get("screensaver") or {}
+        if self._screensaver_override is None:
+            self._screensaver_enabled = bool(ss_cfg.get("enabled", False))
+        if self._screensaver_timeout_override is None:
+            try:
+                timeout_s = max(10, int(ss_cfg.get("timeout_seconds", 300)))
+            except (TypeError, ValueError):
+                timeout_s = 300
+            self._screensaver_timeout_ms = timeout_s * 1000
+
+        pb_cfg = self.config.get("playback") or {}
+        self._autoplay_mode = pb_cfg.get("autoplay", "off")
+        self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
+        self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
+
+        gp_cfg = self.config.get("gamepad") or {}
+        self._gamepad.enabled = bool(gp_cfg.get("enabled", True))
+
+        lib_cfg = self.config.get("library") or {}
+        self._rescan_interval_ms = int(lib_cfg.get("rescan_interval_seconds", 0)) * 1000
+        self._rescan_long_press_ms = int(lib_cfg.get("rescan_long_press_ms", 800))
+
+        paths = effective_media_paths(self.config)
+        if paths:
+            self.media_paths = paths
+
+        self.keymap = load_keymap(self.config)
+        self._apply_channel_lineup()
+
+        if self._analog_artifacts_override is None:
+            self._analog_artifacts.configure(
+                enabled=bool(ui_cfg.get("analog_artifacts", False)),
+                rate_per_minute=float(ui_cfg.get("analog_artifact_rate", 12)),
+            )
+        else:
+            self._analog_artifacts.configure(enabled=bool(self._analog_artifacts_override))
+        if self._analog_artifact_rate_override is not None:
+            self._analog_artifacts.configure(
+                rate_per_minute=float(self._analog_artifact_rate_override)
+            )
+
+    def _reload_config_from_disk(self) -> None:
+        self.config = load_config()
+        self._apply_runtime_config()
+
+    # ─── Web admin (AdminContext) ────────────────────────────────────────
+
+    def admin_status(self) -> dict:
+        view_names = {
+            self.SHOW_LIST: "show_list",
+            self.SEASON_SELECT: "season_select",
+            self.EPISODE_SELECT: "episode_select",
+            self.PLAYING: "playing",
+        }
+        return {
+            "shows": len(self.show_names),
+            "view": view_names.get(self.view, "other"),
+            "playing": self.view == self.PLAYING,
+            "current_show": self.cur_show,
+        }
+
+    def admin_shows(self) -> list[str]:
+        return list(self.show_names)
+
+    def admin_channels(self) -> dict:
+        ch = self.config.get("channels") or {}
+        return {
+            "order": list(ch.get("order") or []),
+            "numbers": dict(ch.get("numbers") or {}),
+            "shows": self.admin_shows(),
+        }
+
+    def admin_save_channels(self, order: list[str], numbers: dict[str, int]) -> None:
+        self.config.setdefault("channels", {})
+        self.config["channels"]["order"] = order
+        self.config["channels"]["numbers"] = numbers
+        save_config(self.config)
+        self._apply_channel_lineup()
+        LOG.info("admin saved channel lineup (%d shows)", len(order))
+
+    def admin_request_rescan(self) -> tuple[bool, str]:
+        if self.view == self.PLAYING:
+            return False, "playback active — stop video first or use the TV"
+        self._pending_admin_rescan = True
+        LOG.info("admin queued library rescan")
+        return True, "Rescan queued"
+
+    def admin_watch_summary(self) -> dict:
+        return watch_summary(self.state)
+
+    def admin_keymap(self) -> dict:
+        return {"bindings": keymap_for_display(self.keymap)}
+
+    def admin_library(self) -> dict:
+        summary = library_summary(self.shows)
+        return {
+            **summary,
+            "tree": library_tree_from_shows(self.shows),
+            "media_paths": list(self.media_paths),
+        }
+
+    def admin_config_get(self) -> dict:
+        return {"path": config_file(), "config": self.config}
+
+    def admin_config_save(self, raw: dict) -> tuple[bool, str]:
+        try:
+            if not isinstance(raw, dict):
+                return False, "config must be a JSON object"
+            parsed = parse_config(raw)
+            save_config(parsed)
+            self._reload_config_from_disk()
+            return True, f"Saved to {config_file()}"
+        except (TypeError, ValueError, KeyError) as exc:
+            return False, str(exc)
+
+    def admin_config_reload(self) -> tuple[bool, str]:
+        try:
+            self._reload_config_from_disk()
+            return True, f"Reloaded from {config_file()}"
+        except OSError as exc:
+            return False, str(exc)
+
+    def admin_settings(self) -> dict:
+        ui_cfg = self.config.get("ui") or {}
+        ss_cfg = self.config.get("screensaver") or {}
+        return {
+            "channel_snow": self._channel_fx.snow_enabled,
+            "shutdown_collapse": self._channel_fx.shutdown_enabled,
+            "channel_snow_audio": self._channel_fx.audio_enabled,
+            "scanlines": self.scanlines,
+            "analog_artifacts": self._analog_artifacts.enabled,
+            "analog_artifact_rate": self._analog_artifacts.rate_per_minute,
+            "screensaver": self._screensaver_enabled,
+            "screensaver_timeout_seconds": self._screensaver_timeout_ms // 1000,
+            "cli_overrides": {
+                "channel_snow": self._channel_snow_override is not None,
+                "shutdown_collapse": self._shutdown_collapse_override is not None,
+                "scanlines": self._scanlines_override is not None,
+                "analog_artifacts": self._analog_artifacts_override is not None,
+                "screensaver": self._screensaver_override is not None,
+                "screensaver_timeout": self._screensaver_timeout_override is not None,
+            },
+        }
+
+    def admin_update_settings(self, patch: dict) -> tuple[bool, str]:
+        if not isinstance(patch, dict):
+            return False, "settings must be a JSON object"
+
+        ui_cfg = dict(self.config.get("ui") or {})
+        ss_cfg = dict(self.config.get("screensaver") or {})
+
+        if "channel_snow" in patch and self._channel_snow_override is None:
+            ui_cfg["channel_snow"] = bool(patch["channel_snow"])
+        if "shutdown_collapse" in patch and self._shutdown_collapse_override is None:
+            ui_cfg["shutdown_collapse"] = bool(patch["shutdown_collapse"])
+        if "channel_snow_audio" in patch:
+            ui_cfg["channel_snow_audio"] = bool(patch["channel_snow_audio"])
+        if "scanlines" in patch and self._scanlines_override is None:
+            ui_cfg["scanlines"] = bool(patch["scanlines"])
+        if "analog_artifacts" in patch and self._analog_artifacts_override is None:
+            ui_cfg["analog_artifacts"] = bool(patch["analog_artifacts"])
+        if "analog_artifact_rate" in patch:
+            try:
+                ui_cfg["analog_artifact_rate"] = max(
+                    0.0, min(60.0, float(patch["analog_artifact_rate"]))
+                )
+            except (TypeError, ValueError):
+                return False, "invalid analog_artifact_rate"
+        if "screensaver" in patch and self._screensaver_override is None:
+            ss_cfg["enabled"] = bool(patch["screensaver"])
+        if "screensaver_timeout_seconds" in patch and self._screensaver_timeout_override is None:
+            try:
+                ss_cfg["timeout_seconds"] = max(10, int(patch["screensaver_timeout_seconds"]))
+            except (TypeError, ValueError):
+                return False, "invalid screensaver_timeout_seconds"
+
+        self.config["ui"] = ui_cfg
+        self.config["screensaver"] = ss_cfg
+        save_config(self.config)
+        self._apply_runtime_config()
+        return True, "Settings updated"
+
+    def admin_verify_path(self, path: str) -> dict:
+        return verify_media_path(path)
+
+    def admin_verify_mount(self, index: int) -> dict:
+        mounts = list(self.config.get("mounts") or [])
+        if index < 0 or index >= len(mounts):
+            return {"ok": False, "error": "mount index out of range"}
+        entry = mounts[index]
+        if not isinstance(entry, dict):
+            return {"ok": False, "error": "invalid mount entry"}
+        result = verify_mount_entry(entry)
+        result["index"] = index
+        return result
+
+    def admin_scan_library(
+        self, paths: list[str] | None = None, *, apply: bool = False
+    ) -> dict:
+        scan_list = [p for p in (paths or self.media_paths) if p]
+        result = scan_paths(scan_list)
+        if apply and result.get("ok") and self.view != self.PLAYING:
+            self.shows = discover_shows(scan_list)
+            self._apply_channel_lineup()
+            self._duration_cache.clear()
+            self._img_cache.clear()
+            self._img_cache_order.clear()
+            summary = library_summary(self.shows)
+            result.update(summary)
+            result["tree"] = library_tree_from_shows(self.shows)
+            result["applied"] = True
+            result["message"] = (
+                f"Applied: {summary['shows']} show(s), {summary['episodes']} episode(s)"
+            )
+        else:
+            result["applied"] = False
+        return result
+
+    def admin_update_paths(self, patch: dict) -> tuple[bool, str]:
+        if not isinstance(patch, dict):
+            return False, "body must be a JSON object"
+        if "media_paths" in patch:
+            paths = patch["media_paths"]
+            if not isinstance(paths, list):
+                return False, "media_paths must be a list"
+            self.config["media_paths"] = [str(p) for p in paths if str(p).strip()]
+        if "mounts" in patch:
+            mounts = patch["mounts"]
+            if not isinstance(mounts, list):
+                return False, "mounts must be a list"
+            self.config["mounts"] = mounts
+        save_config(self.config)
+        self._apply_runtime_config()
+        return True, "Paths updated"
+
+    def _start_admin_server(self) -> None:
+        admin_cfg = dict(self.config.get("admin") or {})
+        if self._admin_enabled_override is not None:
+            admin_cfg["enabled"] = bool(self._admin_enabled_override)
+        if self._admin_port_override is not None:
+            admin_cfg["port"] = int(self._admin_port_override)
+        self._admin_server = start_admin_if_enabled(
+            self,
+            admin_cfg,
+            local_only=self._admin_local_only,
+        )
+
     def run(self):
         # Show controls splash on startup
         self.draw_splash()
@@ -1853,64 +2792,61 @@ class TVTimeCapsule:
             # PLAYBACK MODE: embedded video rendering
             # ═══════════════════════════════════════════════════════════════════
             if self.view == self.PLAYING:
-                # Check if video finished naturally (no autoplay).
-                # Mark the episode completed only when it actually ends.
-                if self.player and self.player.is_finished():
-                    self._mark_completed()
-                    self.stop_playback(completed=True)
+                if self._playback_stalled:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            self.running = False
+                            break
+                        action = None
+                        if event.type == pygame.KEYDOWN:
+                            self._touch_activity()
+                            action = self._key_to_playback_action(event.key)
+                        else:
+                            action = self._gamepad.event_to_action(event)
+                        if action == "back":
+                            self._playback_stalled = False
+                            self._stall_auto_retry_done = False
+                            self.stop_playback()
+                            break
+                        if action == "select":
+                            self._stall_auto_retry_done = False
+                            if self._retry_playback(resume_secs=self._stall_resume_pos):
+                                continue
+                            self.channel_error = "RETRY FAILED"
+                            self.channel_error_time = pygame.time.get_ticks()
+                            self._playback_stalled = False
+                            self.stop_playback()
+                            break
+                    self.screen.fill(C.BLACK)
+                    self.draw_stall_overlay()
+                    self.present()
+                    self.clock.tick(30)
                     continue
 
-                # Process keyboard events — ONLY playback controls here
+                if self.player and self.player.is_finished():
+                    self._handle_episode_finished()
+                    continue
+
+                if self.player and self.player.check_stall():
+                    self._handle_playback_stall()
+                    if self._playback_stalled:
+                        continue
+
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         self.stop_playback()
                         self.running = False
                         break
-                    elif event.type == pygame.KEYDOWN:
+                    action = None
+                    if event.type == pygame.KEYDOWN:
                         self._touch_activity()
-                        km = self.keymap
-                        # Skip transport keys that were held to *start* playback
-                        if pygame.time.get_ticks() < self._play_input_grace_until:
-                            if event.key in (
-                                km.get("right", pygame.K_RIGHT),
-                                km.get("left", pygame.K_LEFT),
-                                km.get("select", pygame.K_RETURN),
-                                pygame.K_RETURN,
-                                pygame.K_KP_ENTER,
-                                pygame.K_SPACE,
-                            ):
-                                continue
-
-                        if event.key == km.get("back", pygame.K_ESCAPE):
-                            # Stop playback and return to episode list
-                            self.stop_playback()
-                            break
-
-                        elif event.key == km.get("up", pygame.K_UP):
-                            if self.player:
-                                self.player.adjust_volume(10)
-                                self.volume_overlay_timer = pygame.time.get_ticks()
-
-                        elif event.key == km.get("down", pygame.K_DOWN):
-                            if self.player:
-                                self.player.adjust_volume(-10)
-                                self.volume_overlay_timer = pygame.time.get_ticks()
-
-                        elif event.key == km.get("right", pygame.K_RIGHT):
-                            if self.player:
-                                self.player.seek(PROGRESS_SEEK_S)
-                                self.progress_overlay_timer = pygame.time.get_ticks()
-
-                        elif event.key == km.get("left", pygame.K_LEFT):
-                            if self.player:
-                                self.player.seek(-PROGRESS_SEEK_S)
-                                self.progress_overlay_timer = pygame.time.get_ticks()
-
-                        elif event.key == pygame.K_SPACE or event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                            if self.player:
-                                self.player.pause()
-                                if self.player.paused:
-                                    self.progress_overlay_timer = pygame.time.get_ticks()
+                        action = self._key_to_playback_action(event.key)
+                    else:
+                        action = self._gamepad.event_to_action(event)
+                        if action:
+                            self._touch_activity()
+                    if action and not self._process_playback_action(action):
+                        break
 
                 # Update time position for progress bar
                 if self.player and self.player.is_playing():
@@ -1952,10 +2888,8 @@ class TVTimeCapsule:
 
                 elif event.type == pygame.KEYDOWN:
                     self._touch_activity()
-                    # Key capture mode
                     if self.view == self.KEY_CAPTURE:
                         if event.key == pygame.K_ESCAPE:
-                            # Cancel capture without rebinding
                             self.view = self.KEY_CONFIG
                             continue
                         if event.key == pygame.K_TAB:
@@ -1967,7 +2901,6 @@ class TVTimeCapsule:
                         self.view = self.KEY_CONFIG
                         continue
 
-                    # Key config screen
                     elif self.view == self.KEY_CONFIG:
                         if event.key == pygame.K_ESCAPE:
                             self.exit_key_config()
@@ -1981,24 +2914,31 @@ class TVTimeCapsule:
                             self.reset_keymap()
                         continue
 
-                    # Confirm exit screen
                     elif self.view == self.CONFIRM_EXIT:
-                        if event.key == pygame.K_ESCAPE:
+                        km = self.keymap
+                        left = km.get("left", pygame.K_LEFT)
+                        right = km.get("right", pygame.K_RIGHT)
+                        up = km.get("up", pygame.K_UP)
+                        down = km.get("down", pygame.K_DOWN)
+                        if event.key == pygame.K_ESCAPE or event.key == km.get(
+                            "back", pygame.K_ESCAPE
+                        ):
                             self.view = self.SHOW_LIST
+                        elif event.key in (left, pygame.K_LEFT):
+                            self._set_confirm_exit_choice(True)
+                        elif event.key in (right, pygame.K_RIGHT):
+                            self._set_confirm_exit_choice(False)
+                        elif event.key in (up, pygame.K_UP, down, pygame.K_DOWN):
+                            self._confirm_exit_yes = not self._confirm_exit_yes
                         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                            self.running = False
+                            self._activate_confirm_exit_choice()
                         continue
 
-                    # Channel number input
                     if pygame.K_0 <= event.key <= pygame.K_9 or pygame.K_KP0 <= event.key <= pygame.K_KP9:
                         if pygame.K_0 <= event.key <= pygame.K_9:
                             digit = event.key - pygame.K_0
                         else:
                             digit = event.key - pygame.K_KP0
-
-                        # Cancel any pending auto-select
-                        self.channel_pending = 0
-                        self.channel_pending_time = 0
 
                         self.channel_digits += str(digit)
                         self.channel_timer = pygame.time.get_ticks()
@@ -2008,75 +2948,102 @@ class TVTimeCapsule:
                         self.channel_digits = ""
                         self.channel_timer = 0
 
-                    # Cancel pending auto-select on any other key
-                    self.channel_pending = 0
-                    self.channel_pending_time = 0
-
-                    # Normal navigation
-                    km = self.keymap
                     if event.key == pygame.K_TAB:
                         self.enter_key_config()
                         continue
 
                     if event.key == pygame.K_h:
-                        # Re-open the controls / help splash on demand
                         self.draw_splash()
                         continue
 
-                    if event.key == km.get("up", pygame.K_UP):
-                        self.move_cursor(-1)
-                    elif event.key == km.get("down", pygame.K_DOWN):
-                        self.move_cursor(1)
-                    elif event.key == km.get("select", pygame.K_RETURN) or event.key == km.get("right", pygame.K_RIGHT):
-                        self.select()
-                    elif event.key == km.get("left", pygame.K_LEFT):
-                        self.go_back()
-                    elif event.key == km.get("reset", pygame.K_r):
-                        self.reset_watch_status()
-                    elif event.key == km.get("back", pygame.K_ESCAPE):
-                        if self.view == self.SHOW_LIST:
-                            self.view = self.CONFIRM_EXIT
-                        else:
-                            self.go_back()
-                    elif event.key == pygame.K_q:
+                    if event.key == pygame.K_q:
                         self.running = False
+                        continue
+
+                    reset_key = self.keymap.get("reset", DEFAULT_KEYMAP["reset"])
+                    if event.key == reset_key:
+                        self._reset_hold_start = pygame.time.get_ticks()
+                        self._reset_rescan_fired = False
+                        continue
+
+                    action = self._key_to_browse_action(event.key)
+                    if action:
+                        self._process_browse_action(action)
+
+                elif event.type == pygame.KEYUP:
+                    reset_key = self.keymap.get("reset", DEFAULT_KEYMAP["reset"])
+                    if event.key == reset_key:
+                        if self._reset_hold_start and not self._reset_rescan_fired:
+                            self.reset_watch_status()
+                        self._reset_hold_start = 0
+                        self._reset_rescan_fired = False
+
+                elif event.type in (
+                    pygame.JOYBUTTONDOWN,
+                    pygame.JOYHATMOTION,
+                    pygame.JOYAXISMOTION,
+                ):
+                    action = self._gamepad.event_to_action(event)
+                    if not action:
+                        continue
+                    self._touch_activity()
+                    if self.view == self.CONFIRM_EXIT:
+                        self._process_confirm_exit_action(action)
+                        continue
+                    if self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
+                        if action == "back" and self.view == self.KEY_CONFIG:
+                            self.exit_key_config()
+                        continue
+                    self._process_browse_action(action)
 
             # Channel timeout — first highlight, then auto-select after delay
             if self.channel_digits and self.channel_timer > 0:
                 now = pygame.time.get_ticks()
                 if now - self.channel_timer >= CHANNEL_TIMEOUT_MS:
-                    channel = int(self.channel_digits) if self.channel_digits else 0
-                    if channel > 0:
-                        success = self.jump_to_channel(channel)
-                        if success:
-                            self.channel_flash = self.channel_digits
+                    digits = self.channel_digits
+                    if self.view == self.SHOW_LIST and is_show_list_test_dial(digits):
+                        if self._commit_show_list_test_pattern(digits):
+                            self.channel_flash = digits
                             self.channel_flash_time = now
-                            # Start pending auto-select timer
-                            self.channel_pending = channel
-                            self.channel_pending_time = now
+                    elif digits:
+                        if self._show_list_test_pattern:
+                            self._clear_show_list_test_pattern()
+                        channel = int(digits)
+                        if channel > 0:
+                            success = self.jump_to_channel(channel)
+                            if success:
+                                self.channel_flash = digits
+                                self.channel_flash_time = now
                     self.channel_digits = ""
                     self.channel_timer = 0
 
-            # Pending auto-select: after brief highlight, actually enter
-            if self.channel_pending > 0 and self.channel_pending_time > 0:
-                now = pygame.time.get_ticks()
-                if now - self.channel_pending_time >= CHANNEL_PENDING_MS:
-                    self.select()
-                    self.channel_pending = 0
-                    self.channel_pending_time = 0
+            self._tick_reset_hold()
+            self._tick_periodic_rescan()
+
+            if self.view == self.PLAYING:
+                continue
 
             if self.view == self.CONFIRM_EXIT:
                 self.draw_confirm_exit()
+                self._apply_channel_fx()
                 self.present()
             elif self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
                 self.draw_key_config(capturing=(self.view == self.KEY_CAPTURE))
+                self._apply_channel_fx()
             else:
                 self.draw()
                 self.present()
             self.clock.tick(30)
 
         # Clean up any active player
+        shutdown_snapshot = None
+        if self._channel_fx.shutdown_enabled:
+            shutdown_snapshot = self.screen.copy()
         if self.player:
             self.player.stop()
+        if shutdown_snapshot is not None:
+            self._channel_fx.play_shutdown(self.screen, shutdown_snapshot)
+        if self._admin_server:
+            self._admin_server.stop()
         pygame.quit()
 

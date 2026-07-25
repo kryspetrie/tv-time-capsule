@@ -8,7 +8,10 @@ Package root: `src/tv_time_capsule/`.
 | `__main__.py` | `python -m tv_time_capsule` |
 | `cli.py` | Argparse entry: config, mounts, discovery, launch app |
 | `app.py` | `TVTimeCapsule` — pygame UI, navigation, overlays, event loop |
-| `player.py` | `EmbeddedPlayer` — ffmpeg raw RGB + ffplay audio; omxplayer fallback |
+| `player.py` | `EmbeddedPlayer` — ffmpeg raw RGB + ffplay audio; Pi hwaccel; stall watchdog |
+| `metadata.py` | NFO parsing, poster.jpg / folder.jpg discovery |
+| `web_admin.py` | Local HTTP admin (channels, rescan, logs) |
+| `log.py` | stderr / journal logging + ring buffer for admin |
 | `media.py` | Show/season/episode discovery, filename parsing, folder season labels |
 | `mounts.py` | Mount/unmount helpers for remote stores |
 | `secrets.py` | Keyring get/set + resolve helpers |
@@ -16,6 +19,9 @@ Package root: `src/tv_time_capsule/`.
 | `config.py` | Paths, colors (`C`), timing constants, config search/load/save |
 | `state.py` | Resume position persistence |
 | `keymap.py` | Default keymap, display names, load from config |
+| `gamepad.py` | USB controller → logical navigation actions |
+| `channels.py` | Custom show order and display channel numbers |
+| `channel_fx.py` | Optional CRT snow burst on channel changes |
 | `screensaver.py` | Bouncing VHS logo idle screensaver (2× pixelated scale, multiply tint) |
 | `fonts.py` | VCR OSD Mono + pygame.font / freetype compatibility |
 | `assets/` | Bundled `vcr_osd_mono.ttf`, `vhs.bmp` (packaged as package data) |

@@ -12,16 +12,16 @@ The app loads the **first existing file** in this order:
 
 `$XDG_CONFIG_HOME` replaces `~/.config` when set.
 
-**Development:** copy the example into the repo root and edit it there:
+**Development:** you can copy the example into the repo root, or skip that step — if no config file exists anywhere in the search order, the app creates one automatically on first launch (`./config.json` in a checkout).
 
 ```bash
-cp config.example.json config.json
+cp config.example.json config.json   # optional — richer defaults and comments
 poetry run tv-time-capsule --windowed
 ```
 
 Key rebinding and in-app saves write back to whichever file was loaded.
 
-**Installed (pipx):** use the user config directory:
+**Installed (pipx):** the app creates `~/.config/tv-time-capsule/config.json` on first run if missing. To start from the annotated example instead:
 
 ```bash
 mkdir -p ~/.config/tv-time-capsule
@@ -40,7 +40,7 @@ Credentials and temporary mount password files always live under `~/.config/tv-t
 
 **Full annotated example** (all settings, mount types, key codes): [`config.example.json`](../../config.example.json) in the repo root.
 
-On first run with no config file anywhere in the search path, a minimal default is written to the default location for your install type (`./config.json` in a checkout, otherwise `~/.config/tv-time-capsule/config.json`):
+On first run with **no config file anywhere in the search path**, `load_config()` writes a minimal default to the appropriate location (`$TV_TIME_CAPSULE_CONFIG` when set, else `./config.json` in a checkout, else `~/.config/tv-time-capsule/config.json`):
 
 ```json
 {
@@ -127,6 +127,138 @@ The bundled asset is a 32-bit BMP so pygame can load it even when extended image
 | `timeout_seconds` | `300` | Menu inactivity before start (minimum 10) |
 
 CLI overrides for one run: `--screensaver` and `--screensaver-timeout SEC`.
+
+## `playback`
+
+Controls automatic advance to the next episode when one finishes naturally (Esc still stops immediately).
+
+```json
+{
+  "playback": {
+    "autoplay": "next_in_season_only",
+    "autoplay_countdown_seconds": 5
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `autoplay` | `next_in_season_only` | `off`, `next_episode` (includes next season), or `next_in_season_only` |
+| `autoplay_countdown_seconds` | `5` | “Up next” wait before starting (0 = instant). **Esc** cancels during countdown |
+| `hw_decode` | `auto` | Pi hardware H.264 decode: `auto`, `on`, or `off` |
+
+## `ui`
+
+CRT-style feedback when tuning channels or quitting.
+
+```json
+{
+  "ui": {
+    "channel_snow": false,
+    "shutdown_collapse": false,
+    "channel_snow_audio": false,
+    "scanlines": false
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `channel_snow` | Fine B&W TV snow burst when tuning channels |
+| `shutdown_collapse` | CRT vertical collapse animation on quit |
+| `channel_snow_audio` | Quiet white-noise static during channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
+| `scanlines` | Semi-transparent CRT scanline overlay |
+
+CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`
+
+| `analog_artifacts` | Random brief static, horizontal line tear, and vertical roll on the show browser |
+| `analog_artifact_rate` | Glitches per minute on the show browser (default `12`; `0` disables timing even if enabled) |
+
+**Secret test patterns** (show browser only): dial `0`, `00`, or `000` to display your own `colorbars.png`, `grid.png`, and `indianhead.png` from `src/tv_time_capsule/assets/` full screen. The app does not generate these files.
+
+Legacy `channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` if the new keys are absent.
+
+## `gamepad`
+
+USB game controllers (SDL mapping). Enabled by default when a controller is connected.
+
+```json
+{
+  "gamepad": {
+    "enabled": true
+  }
+}
+```
+
+| Control | Action |
+|---------|--------|
+| D-pad / left stick | Navigate menus; volume / seek during playback |
+| A / Start | Select / pause-resume |
+| B / Back | Back / stop |
+
+See [Controls → Gamepad](controls.md#gamepad).
+
+## `channels`
+
+Customize show browse order and cable-style channel numbers on the **show list**.
+
+```json
+{
+  "channels": {
+    "order": ["Bluey", "Mister Rogers", "Movies"],
+    "numbers": { "Bluey": 1, "Movies": 9 }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `order` | Show folder names in priority order. Unknown names are skipped. |
+| `numbers` | Optional fixed channel numbers. Other shows use their 1-based position in the ordered lineup. |
+
+Typing a channel number on the show list jumps to the matching show (gaps are allowed — e.g. channel 9 without a channel 8).
+
+## `library`
+
+Hot-rescan without restarting the app.
+
+```json
+{
+  "library": {
+    "rescan_interval_seconds": 1800,
+    "rescan_long_press_ms": 800
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `rescan_interval_seconds` | `0` | Rescan while idle on the show list (`0` = off) |
+| `rescan_long_press_ms` | `800` | Hold **R** (reset key) to rescan; tap **R** still resets watch status |
+
+CLI one-shot scan (mounts + discovery, no UI): `tv-time-capsule --rescan-only`
+
+## `admin`
+
+Local web UI for channel order, library rescan, logs, and watch summary. See [Web admin](web-admin.md).
+
+```json
+{
+  "admin": {
+    "enabled": true,
+    "port": 8765,
+    "bind": "0.0.0.0"
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Start HTTP admin on app launch |
+| `port` | `8765` | TCP port |
+| `bind` | `0.0.0.0` | Listen address (`127.0.0.1` = local only) |
+
+No authentication — only enable on a home LAN you trust.
 
 ## Precedence
 

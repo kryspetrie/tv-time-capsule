@@ -122,6 +122,10 @@ MARQUEE_END_PAUSE_MS = 700
 # Ignore leftover KEYDOWNs from the play-start key (held during splash)
 PLAY_INPUT_GRACE_MS = 350
 
+AUTOPLAY_MODES = ("off", "next_episode", "next_in_season_only")
+CHANNEL_FX_MODES = ("off", "visual", "visual+audio")
+HW_DECODE_MODES = ("auto", "on", "off")
+
 
 class C:
     """Vintage TV palette (white/blue primary, green overlays)."""
@@ -155,6 +159,120 @@ class C:
     NEXT_UP = (40, 100, 60)
 
 
+def _parse_playback(raw: dict | None) -> dict[str, Any]:
+    pb = raw or {}
+    if not isinstance(pb, dict):
+        pb = {}
+    mode = str(pb.get("autoplay", "next_in_season_only")).lower()
+    if mode not in AUTOPLAY_MODES:
+        mode = "next_in_season_only"
+    try:
+        countdown = int(pb.get("autoplay_countdown_seconds", 5))
+    except (TypeError, ValueError):
+        countdown = 5
+    countdown = max(0, min(30, countdown))
+    hw = str(pb.get("hw_decode", "auto")).lower()
+    if hw not in HW_DECODE_MODES:
+        hw = "auto"
+    return {
+        "autoplay": mode,
+        "autoplay_countdown_seconds": countdown,
+        "hw_decode": hw,
+    }
+
+
+def _parse_ui(raw: dict | None) -> dict[str, Any]:
+    ui = raw or {}
+    if not isinstance(ui, dict):
+        ui = {}
+    legacy = str(ui.get("channel_change_effects", "off")).lower()
+    channel_snow = bool(ui.get("channel_snow", False))
+    shutdown_collapse = bool(ui.get("shutdown_collapse", False))
+    if "channel_snow_audio" in ui:
+        channel_snow_audio = bool(ui.get("channel_snow_audio"))
+    else:
+        channel_snow_audio = channel_snow
+    if legacy in CHANNEL_FX_MODES and legacy != "off":
+        if "channel_snow" not in ui:
+            channel_snow = True
+        if legacy == "visual+audio":
+            channel_snow_audio = True
+    analog_artifacts = bool(ui.get("analog_artifacts", False))
+    try:
+        analog_rate = float(ui.get("analog_artifact_rate", 12))
+    except (TypeError, ValueError):
+        analog_rate = 12.0
+    analog_rate = max(0.0, min(60.0, analog_rate))
+    return {
+        "channel_snow": channel_snow,
+        "shutdown_collapse": shutdown_collapse,
+        "channel_snow_audio": channel_snow_audio,
+        "scanlines": bool(ui.get("scanlines", False)),
+        "analog_artifacts": analog_artifacts,
+        "analog_artifact_rate": analog_rate,
+    }
+
+
+def _parse_gamepad(raw: dict | None) -> dict[str, Any]:
+    gp = raw or {}
+    if not isinstance(gp, dict):
+        gp = {}
+    return {"enabled": bool(gp.get("enabled", True))}
+
+
+def _parse_channels(raw: dict | None) -> dict[str, Any]:
+    ch = raw or {}
+    if not isinstance(ch, dict):
+        ch = {}
+    order = ch.get("order") or []
+    if not isinstance(order, list):
+        order = []
+    numbers = ch.get("numbers") or {}
+    if not isinstance(numbers, dict):
+        numbers = {}
+    return {
+        "order": [str(n) for n in order],
+        "numbers": numbers,
+    }
+
+
+def _parse_library(raw: dict | None) -> dict[str, Any]:
+    lib = raw or {}
+    if not isinstance(lib, dict):
+        lib = {}
+    try:
+        interval = int(lib.get("rescan_interval_seconds", 0))
+    except (TypeError, ValueError):
+        interval = 0
+    interval = max(0, interval)
+    try:
+        long_press = int(lib.get("rescan_long_press_ms", 800))
+    except (TypeError, ValueError):
+        long_press = 800
+    long_press = max(300, min(3000, long_press))
+    return {
+        "rescan_interval_seconds": interval,
+        "rescan_long_press_ms": long_press,
+    }
+
+
+def _parse_admin(raw: dict | None) -> dict[str, Any]:
+    admin = raw or {}
+    if not isinstance(admin, dict):
+        admin = {}
+    try:
+        port = int(admin.get("port", 8765))
+    except (TypeError, ValueError):
+        port = 8765
+    port = max(1024, min(65535, port))
+    bind = str(admin.get("bind", "0.0.0.0")).strip() or "0.0.0.0"
+    return {
+        "enabled": bool(admin.get("enabled", False)),
+        "port": port,
+        "bind": bind,
+    }
+
+
 def _default_config() -> dict[str, Any]:
     return {
         "media_paths": [DEFAULT_MEDIA_ROOT],
@@ -163,6 +281,35 @@ def _default_config() -> dict[str, Any]:
         "screensaver": {
             "enabled": False,
             "timeout_seconds": 300,
+        },
+        "playback": {
+            "autoplay": "next_in_season_only",
+            "autoplay_countdown_seconds": 5,
+            "hw_decode": "auto",
+        },
+        "ui": {
+            "channel_snow": False,
+            "shutdown_collapse": False,
+            "channel_snow_audio": False,
+            "scanlines": False,
+            "analog_artifacts": False,
+            "analog_artifact_rate": 12,
+        },
+        "gamepad": {
+            "enabled": True,
+        },
+        "channels": {
+            "order": [],
+            "numbers": {},
+        },
+        "library": {
+            "rescan_interval_seconds": 0,
+            "rescan_long_press_ms": 800,
+        },
+        "admin": {
+            "enabled": False,
+            "port": 8765,
+            "bind": "0.0.0.0",
         },
     }
 
@@ -195,18 +342,29 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
             "enabled": bool(screensaver.get("enabled", False)),
             "timeout_seconds": timeout_s,
         },
+        "playback": _parse_playback(raw.get("playback")),
+        "ui": _parse_ui(raw.get("ui")),
+        "gamepad": _parse_gamepad(raw.get("gamepad")),
+        "channels": _parse_channels(raw.get("channels")),
+        "library": _parse_library(raw.get("library")),
+        "admin": _parse_admin(raw.get("admin")),
     }
 
 
-def load_config() -> dict[str, Any]:
-    """Load config from the first existing file in :func:`config_search_paths`.
+def parse_config(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize a raw config dict (same rules as load_config)."""
+    return _parse_config(raw)
 
-    Returns dict with:
-      - media_paths: list[str]
-      - mounts: list[dict]  (optional remote CIFS/NFS/SSHFS/FTP mounts)
-      - keymap: dict[str, int]  (optional custom key bindings)
-      - screensaver: dict with enabled (bool) and timeout_seconds (int)
-    """
+
+def _config_create_path() -> str:
+    """Path where a new config should be written when none exists."""
+    env = os.environ.get("TV_TIME_CAPSULE_CONFIG")
+    if env:
+        return os.path.expanduser(env)
+    return default_config_file()
+
+
+def load_config() -> dict[str, Any]:
     global _active_config_path
     default = _default_config()
 
@@ -220,7 +378,9 @@ def load_config() -> dict[str, Any]:
         except (json.JSONDecodeError, OSError):
             return default
 
-    _active_config_path = default_config_file()
+    dest = _config_create_path()
+    _active_config_path = dest
+    save_config(default, path=dest)
     return default
 
 
@@ -239,4 +399,4 @@ def save_default_config() -> None:
     """Write a default config file if none exists in the search path."""
     if any(os.path.isfile(p) for p in config_search_paths()):
         return
-    save_config(_default_config(), path=default_config_file())
+    save_config(_default_config(), path=_config_create_path())

@@ -15,6 +15,11 @@ How to install, configure, and run TV Time Capsule on a desktop or Raspberry Pi.
 9. [Networking](networking.md) — Wi‑Fi in kiosk, NetworkManager  
 10. [Autostart & login](autostart.md) — systemd, auto-login, desktop icon  
 11. [Troubleshooting](troubleshooting.md) — common failures  
+12. [Web admin](web-admin.md) — configure from phone/browser on LAN  
+
+## Configure from your phone
+
+Enable the [web admin](web-admin.md) (`admin.enabled: true`), then open `http://<pi-ip>:8765/` to reorder channels, rescan after USB copies, and view watch progress — no keyboard on the TV required.
 
 ## License
 

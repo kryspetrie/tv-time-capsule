@@ -68,6 +68,74 @@
     "timeout_seconds": 300
   },
 
+  "playback": {
+    "autoplay": "next_in_season_only",
+    "autoplay_countdown_seconds": 5,
+    "hw_decode": "auto"
+  },
+
+  "ui": {
+    "channel_snow": false,
+    "shutdown_collapse": false,
+    "channel_snow_audio": false,
+    "scanlines": false,
+    "analog_artifacts": false,
+    "analog_artifact_rate": 12
+  },
+
+  "gamepad": {
+    "enabled": true
+  },
+
+  "channels": {
+    "order": ["Bluey", "Mister Rogers", "Movies"],
+    "numbers": { "Bluey": 1, "Movies": 9 }
+  },
+
+  "library": {
+    "rescan_interval_seconds": 0,
+    "rescan_long_press_ms": 800
+  },
+
+  "admin": {
+    "enabled": false,
+    "port": 8765,
+    "bind": "0.0.0.0"
+  },
+
+  "_channels": {
+    "order": "Show folder names in desired browse / priority order (unknown names skipped)",
+    "numbers": "Optional fixed channel numbers; unlisted shows use 1-based position in the ordered lineup"
+  },
+
+  "_library": {
+    "rescan_interval_seconds": "Periodic rescan while idle on the show list (0 = off)",
+    "rescan_long_press_ms": "Hold R (reset key) this long to rescan without restarting"
+  },
+
+  "_admin": {
+    "enabled": "Local web UI — see docs/usage/web-admin.md",
+    "port": "Default 8765",
+    "bind": "0.0.0.0 for LAN phones; 127.0.0.1 for SSH tunnel only"
+  },
+
+  "_playback": {
+    "autoplay": "off | next_episode | next_in_season_only — advance after an episode ends naturally",
+    "autoplay_countdown_seconds": "Seconds before the next episode starts (0 = instant). Esc cancels during countdown.",
+    "hw_decode": "auto | on | off — Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"
+  },
+
+  "_ui": {
+    "channel_snow": "Fine B&W snow burst when tuning channels (CLI: --channel-snow)",
+    "shutdown_collapse": "CRT vertical collapse on quit (CLI: --shutdown-collapse)",
+    "channel_snow_audio": "Quiet white-noise static with channel snow (defaults on when channel_snow is true; set false to mute)",
+    "scanlines": "CRT scanline overlay (CLI: --scanlines)",
+    "analog_artifacts": "Random brief static, line tear, and vertical roll on the show browser (CLI: --analog-artifacts)",
+    "analog_artifact_rate": "Glitches per minute on the show browser when analog_artifacts is on (default 12; 0 = off)"
+  },
+
+  "_gamepad": "USB controllers via SDL. D-pad / left stick to navigate; A or Start to select; B or Back to go back. Set enabled false to disable.",
+
   "_keymap_reference": {
     "up": "Browse up / volume up during playback (default: Up arrow)",
     "down": "Browse down / volume down during playback (default: Down arrow)",

@@ -47,6 +47,8 @@ Environment overrides:
 2. Edit `~/.config/tv-time-capsule/config.json` as the service user  
 3. Reboot (or `sudo systemctl start tv-time-capsule`)  
 
+After adding files on USB or NAS without rebooting, **hold R** on the show list to rescan, or run `tv-time-capsule --rescan-only` to validate paths from SSH.
+
 ## Display notes
 
 - You need a **display** (HDMI or composite), not necessarily a full desktop session  

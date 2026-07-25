@@ -11,6 +11,8 @@ import time
 
 import pygame
 
+from .log import LOG
+
 try:
     import numpy as _numpy_mod
 
@@ -46,6 +48,121 @@ def detect_omxplayer():
 
 def is_pi():
     return os.path.exists("/proc/device-tree/model")
+
+
+HW_DECODE_MODES = ("auto", "on", "off")
+STALL_THRESHOLD_S = 8.0
+STALL_START_GRACE_S = 12.0
+_H264_CODEC_NAMES = frozenset({"h264", "avc1", "avc", "h264_v4l2m2m"})
+
+
+def probe_hwaccel(ffmpeg_path: str) -> str | None:
+    """Return a usable Pi hwaccel name (v4l2m2m preferred) or None."""
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-hwaccels"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        text = result.stdout.lower()
+        if "v4l2m2m" in text:
+            return "v4l2m2m"
+        if "drm" in text:
+            return "drm"
+    except Exception:
+        pass
+    return None
+
+
+def get_video_codec(filepath: str) -> str | None:
+    """Return the first video stream codec name, or None."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "quiet",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=nw=1",
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("codec_name="):
+                return line.split("=", 1)[1].strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+def resolve_hwaccel(
+    mode: str,
+    ffmpeg_path: str | None,
+    filepath: str | None,
+) -> str | None:
+    """Pick hwaccel for this file, or None for software decode."""
+    if not ffmpeg_path or not filepath:
+        return None
+    mode = (mode or "auto").lower()
+    if mode == "off" or not is_pi():
+        return None
+    hw = probe_hwaccel(ffmpeg_path)
+    if not hw:
+        return None
+    if mode == "on":
+        return hw
+    codec = get_video_codec(filepath)
+    if codec and codec in _H264_CODEC_NAMES:
+        return hw
+    return None
+
+
+def build_ffmpeg_decode_cmd(
+    ffmpeg_path: str,
+    filepath: str,
+    width: int,
+    height: int,
+    *,
+    resume_pos: float | None = None,
+    hwaccel: str | None = None,
+) -> list[str]:
+    """Build an ffmpeg command that outputs raw RGB24 to stdout."""
+    cmd = [ffmpeg_path]
+    if resume_pos and resume_pos > 0:
+        cmd.extend(["-ss", str(resume_pos)])
+    if hwaccel:
+        cmd.extend(["-hwaccel", hwaccel])
+    cmd.extend(["-i", filepath])
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+    )
+    cmd.extend(
+        [
+            "-vf",
+            vf,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-an",
+            "-loglevel",
+            "quiet",
+            "-",
+        ]
+    )
+    return cmd
 
 
 def get_video_info(filepath):
@@ -133,6 +250,12 @@ class EmbeddedPlayer:
         self._pause_event = threading.Event()  # Frame thread blocks on this when paused
         self._pause_event.set()  # Start un-blocked
 
+        self.hw_decode_mode = "auto"
+        self._hwaccel: str | None = None
+        self._playback_started_at = 0.0
+        self._last_frame_at = 0.0
+        self.stalled = False
+
         # Omxplayer fallback state
         self.omx_proc = None
         self.omx_cmd = None
@@ -159,28 +282,16 @@ class EmbeddedPlayer:
         W, H = self.canvas_w, self.canvas_h
         frame_size = W * H * 3
 
-        # Build FFmpeg command for raw RGB24 output
-        cmd = [
+        self._hwaccel = resolve_hwaccel(
+            self.hw_decode_mode, self.ffmpeg_path, filepath
+        )
+        cmd = build_ffmpeg_decode_cmd(
             self.ffmpeg_path,
-            "-i",
             filepath,
-        ]
-        if resume_pos and resume_pos > 0:
-            cmd.extend(["-ss", str(resume_pos)])
-        cmd.extend(
-            [
-                "-vf",
-                f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-an",  # No audio from FFmpeg — we play audio separately
-                "-loglevel",
-                "quiet",
-                "-",
-            ]
+            W,
+            H,
+            resume_pos=resume_pos,
+            hwaccel=self._hwaccel,
         )
 
         try:
@@ -188,7 +299,34 @@ class EmbeddedPlayer:
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_size
             )
         except Exception as e:
-            print(f"Failed to start ffmpeg: {e}")
+            LOG.error("Failed to start ffmpeg: %s", e)
+            self.proc = None
+            return False
+
+        if self._hwaccel and self.proc.poll() is not None:
+            LOG.warning("hwaccel %s failed immediately; retrying software decode", self._hwaccel)
+            self._hwaccel = None
+            cmd = build_ffmpeg_decode_cmd(
+                self.ffmpeg_path,
+                filepath,
+                W,
+                H,
+                resume_pos=resume_pos,
+                hwaccel=None,
+            )
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=frame_size,
+                )
+            except Exception as e:
+                LOG.error("Failed to start ffmpeg (software): %s", e)
+                self.proc = None
+                return False
+
+        if self.proc.poll() is not None:
             self.proc = None
             return False
 
@@ -218,8 +356,17 @@ class EmbeddedPlayer:
         self.running = True
         resume = float(resume_pos or 0)
         self.time_pos = max(0.0, resume)
-        # Anchor wall-clock so progress/bookmarks include the skipped prefix.
         self.start_time = time.monotonic() - self.time_pos
+        self._playback_started_at = time.monotonic()
+        self._last_frame_at = 0.0
+        self.stalled = False
+
+        LOG.info(
+            "play start path=%s resume=%.1fs hwaccel=%s",
+            os.path.basename(filepath),
+            self.time_pos,
+            self._hwaccel or "software",
+        )
 
         # Start frame-reading thread
         self.thread = threading.Thread(target=self._read_frames, daemon=True)
@@ -287,6 +434,7 @@ class EmbeddedPlayer:
 
                 with self.frame_lock:
                     self.current_frame = surf
+                self._last_frame_at = time.monotonic()
 
                 # Sleep only until this frame's scheduled time — no fixed
                 # per-frame delay, so decode time doesn't accumulate as drift.
@@ -354,6 +502,15 @@ class EmbeddedPlayer:
         self.finished = True
         self.paused = False
 
+    def check_stall(self, threshold: float = STALL_THRESHOLD_S) -> bool:
+        """True when playback appears frozen (no frames while not paused)."""
+        if self.use_omx or not self.running or self.finished or self.paused:
+            return False
+        now = time.monotonic()
+        if self._last_frame_at <= 0:
+            return (now - self._playback_started_at) > STALL_START_GRACE_S
+        return (now - self._last_frame_at) > threshold
+
     def get_frame(self):
         """Get the latest decoded frame as a pygame Surface, or None."""
         with self.frame_lock:
@@ -374,8 +531,11 @@ class EmbeddedPlayer:
 
     def stop(self):
         """Stop playback and clean up all processes."""
+        if self.filepath and self.running:
+            LOG.info("play stop path=%s pos=%.1fs", os.path.basename(self.filepath), self.time_pos)
         self.running = False
         self.finished = False
+        self.stalled = False
         self._pause_event.set()  # Unblock frame thread so it can exit
 
         # Kill FFmpeg
@@ -538,30 +698,22 @@ class EmbeddedPlayer:
 
         filepath = self.filepath
         self._shutdown_decoders()
-        # Keep the last decoded frame on screen while the new stream buffers.
         self.time_pos = new_pos
 
-        # Restart from new position
+        LOG.info("seek path=%s to=%.1fs", os.path.basename(filepath), new_pos)
+
         W, H = self.canvas_w, self.canvas_h
         frame_size = W * H * 3
-        cmd = [
+        hw = resolve_hwaccel(self.hw_decode_mode, self.ffmpeg_path, filepath)
+        self._hwaccel = hw
+        cmd = build_ffmpeg_decode_cmd(
             self.ffmpeg_path,
-            "-ss",
-            str(new_pos),
-            "-i",
             filepath,
-            "-vf",
-            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-an",
-            "-loglevel",
-            "quiet",
-            "-",
-        ]
+            W,
+            H,
+            resume_pos=new_pos,
+            hwaccel=hw,
+        )
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_size
@@ -570,6 +722,29 @@ class EmbeddedPlayer:
             self.proc = None
             self.finished = True
             return
+
+        if hw and self.proc.poll() is not None:
+            LOG.warning("hwaccel seek failed; retrying software decode")
+            self._hwaccel = None
+            cmd = build_ffmpeg_decode_cmd(
+                self.ffmpeg_path,
+                filepath,
+                W,
+                H,
+                resume_pos=new_pos,
+                hwaccel=None,
+            )
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=frame_size,
+                )
+            except Exception:
+                self.proc = None
+                self.finished = True
+                return
 
         # Restart audio from seek position
         if self.ffplay_path:
@@ -595,6 +770,9 @@ class EmbeddedPlayer:
         self.running = True
         self.finished = False
         self.start_time = time.monotonic() - new_pos
+        self._playback_started_at = time.monotonic()
+        self._last_frame_at = 0.0
+        self.stalled = False
         self.pause_offset = 0
         self.pause_start = 0
         self.paused = False
