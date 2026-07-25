@@ -36,6 +36,34 @@ def parse_episode_name(filename):
     return name if name else None
 
 
+def folder_season_info(folder_name: str, next_auto: int) -> tuple[int, str | None]:
+    """Map a season subfolder to (season_number, menu_label).
+
+    Returns a display label when the folder name is not a conventional season
+    pattern (e.g. ``Action`` → label ``Action``; ``s01`` → label ``None``).
+    """
+    se = parse_season_episode(folder_name)
+    if se[0] is not None:
+        return se[0], None
+
+    m = re.match(r"^[sS](\d+)$", folder_name)
+    if m:
+        return int(m.group(1)), None
+
+    m = re.match(r"^season\s*(\d+)$", folder_name, re.I)
+    if m:
+        return int(m.group(1)), None
+
+    if re.fullmatch(r"\d+", folder_name):
+        return int(folder_name), None
+
+    m = re.search(r"(\d+)", folder_name)
+    if m:
+        return int(m.group(1)), None
+
+    return next_auto, folder_name
+
+
 def find_thumbnail(dir_path, names, video_stem=None):
     img_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
     for name in names:
@@ -97,12 +125,9 @@ def discover_shows(media_paths):
                 for root, dirs, files in os.walk(show_dir):
                     for d in sorted(dirs):
                         season_dir = os.path.join(root, d)
-                        se = parse_season_episode(d)
-                        if se[0] is not None:
-                            season_num = se[0]
-                        else:
-                            m = re.search(r"(\d+)", d)
-                            season_num = int(m.group(1)) if m else len(seasons) + 1
+                        season_num, season_label = folder_season_info(
+                            d, len(seasons) + 1
+                        )
 
                         s_videos = [
                             os.path.join(season_dir, f)
@@ -114,10 +139,13 @@ def discover_shows(media_paths):
 
                         season_thumb = find_thumbnail(show_dir, [f"s{season_num:02d}", d])
                         episodes = _parse_episodes(s_videos, season_num, season_dir)
-                        seasons[season_num] = {
+                        season_entry: dict = {
                             "episodes": episodes,
                             "thumbnail": season_thumb,
                         }
+                        if season_label:
+                            season_entry["label"] = season_label
+                        seasons[season_num] = season_entry
 
                 if not seasons:
                     seasons[1] = {

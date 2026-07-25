@@ -17,20 +17,17 @@ poetry install
 ## Run
 
 ```bash
-poetry run tv-time-capsule --media-dir ./media
+cp config.example.json config.json   # dev config in repo root (optional)
+poetry run tv-time-capsule --windowed --media-dir sample/media-a
 poetry run tv-time-capsule --help
 poetry run tv-time-capsule-secrets --help
 
 # or:
 poetry shell
-tv-time-capsule --media-dir ./media
+tv-time-capsule --windowed --media-dir sample/media-a
 ```
 
-Use `--windowed` during development so the app does not take over the screen:
-
-```bash
-poetry run tv-time-capsule --windowed --media-dir sample/media-a
-```
+From a checkout, `./config.json` is used automatically when present (before `~/.config/...`). See [Configuration](../usage/configuration.md#where-the-app-looks-for-configjson).
 
 ## Project layout (high level)
 

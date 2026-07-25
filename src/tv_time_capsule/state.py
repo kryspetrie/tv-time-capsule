@@ -149,6 +149,57 @@ def clear_episode_position(state, show, season, ep=None) -> bool:
     return True
 
 
+def reset_episode_progress(state, show, season, ep_num) -> bool:
+    """Clear bookmark and watched progress for a single episode."""
+    try:
+        ep_num = int(ep_num)
+        season = int(season)
+    except (TypeError, ValueError):
+        return False
+
+    show_state = state.get(show)
+    if not isinstance(show_state, dict):
+        return False
+
+    key = f"s{season:02d}"
+    entry = show_state.get(key)
+    if not isinstance(entry, dict):
+        return False
+
+    changed = False
+    try:
+        if entry.get("pos_ep") is not None and int(entry["pos_ep"]) == ep_num:
+            entry.pop("pos_ep", None)
+            entry.pop("pos", None)
+            changed = True
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        resume = int(entry.get("ep", 0) or 0)
+    except (TypeError, ValueError):
+        resume = 0
+
+    if ep_num <= resume:
+        new_resume = max(0, ep_num - 1)
+        if new_resume != resume:
+            if new_resume == 0:
+                entry.pop("ep", None)
+            else:
+                entry["ep"] = new_resume
+            entry["ts"] = datetime.now().isoformat()
+            changed = True
+
+    if not entry or all(k == "ts" for k in entry):
+        show_state.pop(key, None)
+        if not show_state:
+            state.pop(show, None)
+
+    if changed:
+        save_state(state)
+    return changed
+
+
 def clear_resume_ep(state, show, season=None):
     """Clear watched/resume progress for a season, or every season of a show.
 

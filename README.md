@@ -31,7 +31,7 @@ Or on a Raspberry Pi appliance:
 ./scripts/set-mode.sh kiosk --reboot
 ```
 
-Config lives at `~/.config/tv-time-capsule/config.json`. See [Getting started](docs/usage/getting-started.md) and [Configuration](docs/usage/configuration.md).
+Config is loaded from the first match in the [search order](docs/usage/configuration.md#where-the-app-looks-for-configjson): `$TV_TIME_CAPSULE_CONFIG`, then `./config.json` in a dev checkout, then `~/.config/tv-time-capsule/config.json` when installed. Start from [`config.example.json`](config.example.json). See [Getting started](docs/usage/getting-started.md) and [Configuration](docs/usage/configuration.md).
 
 ## License
 

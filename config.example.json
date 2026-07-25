@@ -1,0 +1,105 @@
+{
+  "_about": "Example TV Time Capsule configuration. Copy to ~/.config/tv-time-capsule/config.json and edit paths, mounts, and keys. Keys starting with _ are documentation only and are ignored by the app.",
+
+  "media_paths": [
+    "/media/usb",
+    "~/Videos/kids",
+    "./sample/media-a",
+    "/mnt/tv/nas-kids",
+    "/mnt/tv/nfs-media",
+    "/mnt/tv/ssh-media",
+    "/mnt/tv/ftp-media"
+  ],
+
+  "mounts": [
+    {
+      "_example": "Samba / CIFS — password in OS keychain (see docs/usage/secrets.md)",
+      "type": "cifs",
+      "source": "//nas.local/KidsShows",
+      "mountpoint": "/mnt/tv/nas-kids",
+      "username": "media",
+      "keyring": "nas-kids",
+      "options": ["uid=1000", "gid=1000", "vers=3.0"]
+    },
+    {
+      "_example": "Samba / CIFS — credentials file instead of keychain",
+      "type": "cifs",
+      "source": "//192.168.1.10/FamilyVideos",
+      "mountpoint": "/mnt/tv/nas-family",
+      "credentials": "~/.config/tv-time-capsule/nas.cred",
+      "options": ["uid=1000", "gid=1000", "vers=3.0", "iocharset=utf8"]
+    },
+    {
+      "_example": "NFS export",
+      "type": "nfs",
+      "source": "nas.local:/export/media",
+      "mountpoint": "/mnt/tv/nfs-media",
+      "options": ["rw", "sync"]
+    },
+    {
+      "_example": "SSHFS — prefer key-based auth",
+      "type": "sshfs",
+      "source": "pi@fileserver:/home/shared/media",
+      "mountpoint": "/mnt/tv/ssh-media",
+      "identity_file": "~/.ssh/id_rsa",
+      "options": ["allow_other", "default_permissions"]
+    },
+    {
+      "_example": "FTP via curlftpfs",
+      "type": "ftp",
+      "source": "ftp://nas.local/media",
+      "mountpoint": "/mnt/tv/ftp-media",
+      "credentials": "~/.config/tv-time-capsule/ftp.cred"
+    }
+  ],
+
+  "keymap": {
+    "up": 1073741906,
+    "down": 1073741905,
+    "left": 1073741904,
+    "right": 1073741903,
+    "select": 13,
+    "back": 27,
+    "reset": 114
+  },
+
+  "_keymap_reference": {
+    "up": "Browse up / volume up during playback (default: Up arrow)",
+    "down": "Browse down / volume down during playback (default: Down arrow)",
+    "left": "Back / seek backward 10s during playback (default: Left arrow)",
+    "right": "Select / seek forward 10s during playback (default: Right arrow)",
+    "select": "Select / play / pause-resume (default: Enter)",
+    "back": "Back / stop playback (default: Escape)",
+    "reset": "Reset watch status for current show/season (default: R)"
+  },
+
+  "_keymap_notes": [
+    "Values are pygame key codes (integers). Omit an action or use an empty keymap object {} to keep defaults.",
+    "Rebind in-app with Tab → key configuration. Tab on that screen resets to defaults.",
+    "Not configurable here: 0–9 (channel numbers), H (help), Tab (key config), Q (quit), Space (pause during playback)."
+  ],
+
+  "_mount_fields": {
+    "type": "Required. cifs | smb | nfs | sshfs | sftp | ftp | ftps",
+    "source": "Required. Share URL or remote path",
+    "mountpoint": "Required. Local directory (created if needed)",
+    "options": "Optional. Array of mount options or comma-separated string",
+    "credentials": "Optional. Path to username/password file",
+    "username": "Optional. Share username",
+    "password": "Optional. Literal password (discouraged — use keyring or credentials file)",
+    "keyring": "Optional. OS keychain item name for the password",
+    "password_keyring": "Optional. Alias for keyring",
+    "username_keyring": "Optional. OS keychain item name for the username",
+    "domain": "Optional. CIFS domain / workgroup",
+    "identity_file": "Optional. SSH private key for sshfs"
+  },
+
+  "_setup": [
+    "Development: cp config.example.json config.json  (repo root; auto-discovered)",
+    "Installed (pipx): cp config.example.json ~/.config/tv-time-capsule/config.json",
+    "Override any install: export TV_TIME_CAPSULE_CONFIG=/path/to/config.json",
+    "Remove unused entries from media_paths and delete mount blocks you do not need.",
+    "Mountpoints are scanned automatically even if omitted from media_paths.",
+    "See docs/usage/configuration.md and docs/usage/remote-mounts.md."
+  ]
+}

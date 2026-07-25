@@ -57,11 +57,24 @@ pipx install --force git+ssh://git@github.com/kryspetrie/tv-time-capsule.git
 
 ## First run
 
-With no flags, the app loads `~/.config/tv-time-capsule/config.json` (created on first run) and scans `media_paths`:
+With no flags, the app loads the first matching config file (see [Configuration](configuration.md#where-the-app-looks-for-configjson)) and scans `media_paths`:
 
 ```bash
 tv-time-capsule
 ```
+
+For a full starting point — media folders, network mounts, key bindings — copy the repo example:
+
+```bash
+# Development (repo root — picked up automatically):
+cp config.example.json config.json
+
+# Installed app (pipx / production):
+mkdir -p ~/.config/tv-time-capsule
+cp config.example.json ~/.config/tv-time-capsule/config.json
+```
+
+Edit paths and remove mount blocks you do not need. See [Configuration](configuration.md#where-the-app-looks-for-configjson).
 
 Override media directories for one run (repeatable):
 

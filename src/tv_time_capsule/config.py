@@ -9,8 +9,77 @@ from typing import Any
 DEFAULT_MEDIA_ROOT = "/media/usb"
 STATE_DIR = os.path.expanduser("~/.local/share/tv-time-capsule")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
-CONFIG_DIR = os.path.expanduser("~/.config/tv-time-capsule")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+
+def user_config_dir() -> str:
+    """XDG config directory for tv-time-capsule (secrets, credentials)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "tv-time-capsule")
+
+
+# Credentials, temp CIFS cred files, etc. — always under the user config dir.
+CONFIG_DIR = user_config_dir()
+
+_active_config_path: str | None = None
+
+
+def dev_repo_root() -> str | None:
+    """Return the git checkout root when running from an editable/local install."""
+    path = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(12):
+        if os.path.isfile(os.path.join(path, "pyproject.toml")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return None
+
+
+def config_search_paths() -> list[str]:
+    """Ordered list of config.json paths to try (first match wins)."""
+    paths: list[str] = []
+
+    env = os.environ.get("TV_TIME_CAPSULE_CONFIG")
+    if env:
+        paths.append(os.path.expanduser(env))
+
+    repo = dev_repo_root()
+    if repo:
+        repo_config = os.path.join(repo, "config.json")
+        if repo_config not in paths:
+            paths.append(repo_config)
+
+    xdg_config = os.path.join(user_config_dir(), "config.json")
+    if xdg_config not in paths:
+        paths.append(xdg_config)
+
+    return paths
+
+
+def default_config_file() -> str:
+    """Path used when creating a new config (dev checkout vs installed app)."""
+    repo = dev_repo_root()
+    if repo:
+        return os.path.join(repo, "config.json")
+    return os.path.join(user_config_dir(), "config.json")
+
+
+def resolve_config_file() -> str:
+    """Return the config file to load, or the default path if none exists yet."""
+    for path in config_search_paths():
+        if os.path.isfile(path):
+            return path
+    return default_config_file()
+
+
+def config_file() -> str:
+    """Active config path (resolved on first use)."""
+    global _active_config_path
+    if _active_config_path is None:
+        _active_config_path = resolve_config_file()
+    return _active_config_path
+
 
 # Virtual canvas: 640x480 is a true 4:3 frame with square pixels, matching
 # the aspect ratio of a CRT television.
@@ -39,7 +108,7 @@ CHANNEL_ERROR_MS = 1500
 CHANNEL_PENDING_MS = 500
 
 # How many items visible in the season/episode stack
-STACK_VISIBLE = 4
+STACK_VISIBLE = 5
 
 # Overlay display durations
 OVERLAY_SHOW_MS = 3000
@@ -90,39 +159,63 @@ def _default_config() -> dict[str, Any]:
     return {
         "media_paths": [DEFAULT_MEDIA_ROOT],
         "mounts": [],
+        "keymap": {},
     }
 
 
+def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
+    default = _default_config()
+    paths = raw.get("media_paths") or []
+    if not paths:
+        paths = list(default["media_paths"])
+    mounts = raw.get("mounts") or []
+    if not isinstance(mounts, list):
+        mounts = []
+    keymap = raw.get("keymap") or {}
+    if not isinstance(keymap, dict):
+        keymap = {}
+    expanded = [os.path.expanduser(os.path.expandvars(p)) for p in paths]
+    return {"media_paths": expanded, "mounts": mounts, "keymap": keymap}
+
+
 def load_config() -> dict[str, Any]:
-    """Load config from ~/.config/tv-time-capsule/config.json.
+    """Load config from the first existing file in :func:`config_search_paths`.
 
     Returns dict with:
       - media_paths: list[str]
       - mounts: list[dict]  (optional remote CIFS/NFS/SSHFS/FTP mounts)
+      - keymap: dict[str, int]  (optional custom key bindings)
     """
+    global _active_config_path
     default = _default_config()
-    if not os.path.isfile(CONFIG_FILE):
-        return default
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        paths = cfg.get("media_paths") or []
-        if not paths:
-            paths = list(default["media_paths"])
-        mounts = cfg.get("mounts") or []
-        if not isinstance(mounts, list):
-            mounts = []
-        # Expand ~ in media paths; keep entries even if not mounted yet
-        expanded = [os.path.expanduser(os.path.expandvars(p)) for p in paths]
-        return {"media_paths": expanded, "mounts": mounts}
-    except (json.JSONDecodeError, OSError):
-        return default
+
+    for path in config_search_paths():
+        if not os.path.isfile(path):
+            continue
+        _active_config_path = path
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return _parse_config(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            return default
+
+    _active_config_path = default_config_file()
+    return default
+
+
+def save_config(cfg: dict[str, Any], path: str | None = None) -> None:
+    """Write config to the active config file (or ``path`` if given)."""
+    global _active_config_path
+    dest = path or config_file()
+    _active_config_path = dest
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
 
 
 def save_default_config() -> None:
-    """Write a default config file if none exists."""
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    if not os.path.isfile(CONFIG_FILE):
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(_default_config(), f, indent=2)
-            f.write("\n")
+    """Write a default config file if none exists in the search path."""
+    if any(os.path.isfile(p) for p in config_search_paths()):
+        return
+    save_config(_default_config(), path=default_config_file())

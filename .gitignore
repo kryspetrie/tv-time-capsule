@@ -1,3 +1,6 @@
+# Local dev config (see config.example.json)
+config.json
+
 # Python
 __pycache__/
 *.pyc

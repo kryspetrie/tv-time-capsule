@@ -128,8 +128,9 @@ def key_display_name(keycode):
     return KEY_NAMES.get(keycode, f"Key({keycode})")
 
 
-def load_keymap(state):
-    saved = state.get("keymap", {})
+def load_keymap(config):
+    """Build keymap from config, falling back to defaults."""
+    saved = config.get("keymap", {})
     km = dict(DEFAULT_KEYMAP)
     for action in DEFAULT_KEYMAP:
         if action in saved:

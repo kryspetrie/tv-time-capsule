@@ -10,7 +10,7 @@ Default bindings (rebindable in-app via **Tab**):
 | → / Enter | Select / Play |
 | ← / Esc | Back / Stop |
 | 0–9 | Type channel number (auto-commits after ~1.5s) |
-| R | Reset watch status for the current show/season |
+| R | Reset watch status (show, season, or episode — see below) |
 | H | Help / controls screen |
 | Tab | Key configuration |
 | Q | Quit |
@@ -23,9 +23,9 @@ clears the bookmark and marks it watched (`*`).
 **Reset watch status** clears the `*` watched marks, in-progress bookmarks, and
 “next up” (`>`) pointer for the current context:
 
-- Show list → whole show  
+- Show list → entire series (all seasons)  
 - Season list → highlighted season  
-- Episode list → current season  
+- Episode list → highlighted episode only  
 
 ## During playback
 
@@ -36,4 +36,4 @@ clears the bookmark and marks it watched (`*`).
 | Space / Enter | Pause / resume |
 | Esc | Stop and return to menu |
 
-Custom key maps are stored in the watch-state file under `~/.local/share/tv-time-capsule/`.
+Custom key maps are stored in the active `config.json` under the `keymap` key (pygame key codes). An empty `keymap` object uses the defaults above. See [Configuration](configuration.md#where-the-app-looks-for-configjson).

@@ -8,7 +8,7 @@ import sys
 import pygame
 
 from .app import TVTimeCapsule
-from .config import CONFIG_FILE, load_config, save_default_config
+from .config import config_file, load_config, save_default_config
 from .media import discover_shows
 from .mounts import ensure_mounts, mountpoints_from_config
 from .player import detect_ffmpeg, np_frombuffer
@@ -32,7 +32,8 @@ def main(argv: list[str] | None = None) -> None:
         metavar="DIR",
         help=(
             "Media directory to scan (may be repeated). "
-            "If omitted, uses media_paths from ~/.config/tv-time-capsule/config.json"
+            "If omitted, uses media_paths from the active config file "
+            "(see config search order in docs/usage/configuration.md)"
         ),
     )
     parser.add_argument(
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None) -> None:
     if not shows:
         print(f"No shows found in: {', '.join(media_paths)}")
         print("Expected: <media-dir>/Show Name/s01/s01e01.mp4")
-        print(f"Configure paths / mounts in: {CONFIG_FILE}")
+        print(f"Configure paths / mounts in: {config_file()}")
         sys.exit(1)
 
     total_eps = sum(

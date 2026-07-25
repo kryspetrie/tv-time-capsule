@@ -9,13 +9,13 @@ Package root: `src/tv_time_capsule/`.
 | `cli.py` | Argparse entry: config, mounts, discovery, launch app |
 | `app.py` | `TVTimeCapsule` — pygame UI, navigation, overlays, event loop |
 | `player.py` | `EmbeddedPlayer` — ffmpeg raw RGB + ffplay audio; omxplayer fallback |
-| `media.py` | Show/season/episode discovery and filename parsing |
+| `media.py` | Show/season/episode discovery, filename parsing, folder season labels |
 | `mounts.py` | Mount/unmount helpers for remote stores |
 | `secrets.py` | Keyring get/set + resolve helpers |
 | `secrets_cli.py` | `tv-time-capsule-secrets` console script |
-| `config.py` | Paths, colors (`C`), timing constants, load/save config |
+| `config.py` | Paths, colors (`C`), timing constants, config search/load/save |
 | `state.py` | Resume position persistence |
-| `keymap.py` | Default keymap and display names |
+| `keymap.py` | Default keymap, display names, load from config |
 | `fonts.py` | VCR OSD Mono + pygame.font / freetype compatibility |
 | `assets/` | Bundled `vcr_osd_mono.ttf` (packaged as package data) |
 

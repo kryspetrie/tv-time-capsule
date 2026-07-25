@@ -11,6 +11,8 @@ import pygame
 from .config import (
     C,
     CHANNEL_ERROR_MS,
+    load_config,
+    save_config,
     CHANNEL_FLASH_MS,
     CHANNEL_PENDING_MS,
     CHANNEL_TIMEOUT_MS,
@@ -37,6 +39,7 @@ from .player import (
 )
 from .state import (
     clear_resume_ep,
+    reset_episode_progress,
     get_episode_position,
     get_resume_ep,
     load_state,
@@ -150,7 +153,12 @@ class TVTimeCapsule:
 
         self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
         self.state = load_state()
-        self.keymap = load_keymap(self.state)
+        self.config = load_config()
+        if "keymap" in self.state and not self.config.get("keymap"):
+            self.config["keymap"] = self.state.pop("keymap")
+            save_config(self.config)
+            save_state(self.state)
+        self.keymap = load_keymap(self.config)
         self.running = True
         self.clock = pygame.time.Clock()
 
@@ -368,20 +376,43 @@ class TVTimeCapsule:
                 self._scanline_surf = self._make_scanlines()
             self.screen.blit(self._scanline_surf, (0, 0))
 
-    def _draw_footer(self, text):
-        """Draw a consistent footer bar at the bottom of the screen."""
+    def _draw_footer(self, *hints):
+        """Draw a consistent footer bar with spaced hint segments."""
         bar_h = 34
         fy = self.sh - bar_h
+        gap = 28
         pygame.draw.rect(self.screen, C.BG_FOOTER, (0, fy, self.sw, bar_h))
         pygame.draw.line(self.screen, C.BLUE, (0, fy), (self.sw, fy), 1)
-        # Truncate if text is too wide for the screen
+
+        segments = [h for h in hints if h]
+        if not segments:
+            return
+
+        surfaces = [self.font_sm.render(text, True, C.DIM) for text in segments]
+        total_w = sum(s.get_width() for s in surfaces) + gap * (len(surfaces) - 1)
         max_w = self.sw - 32
-        t = self.font_sm.render(text, True, C.DIM)
-        if t.get_width() > max_w:
-            while self.font_sm.size(text + "...")[0] > max_w and len(text) > 3:
-                text = text[:-1]
-            t = self.font_sm.render(text + "...", True, C.DIM)
-        self.screen.blit(t, t.get_rect(centerx=self.sw // 2, centery=fy + bar_h // 2))
+
+        while total_w > max_w and gap > 12:
+            gap -= 4
+            total_w = sum(s.get_width() for s in surfaces) + gap * (len(surfaces) - 1)
+
+        if total_w > max_w:
+            # Drop trailing hints until it fits, then truncate the last one if needed.
+            while surfaces and total_w > max_w:
+                surfaces.pop()
+                total_w = sum(s.get_width() for s in surfaces) + gap * max(0, len(surfaces) - 1)
+            if surfaces:
+                text = segments[len(surfaces) - 1]
+                while self.font_sm.size(text + "...")[0] > max_w and len(text) > 3:
+                    text = text[:-1]
+                surfaces[-1] = self.font_sm.render(text + "...", True, C.DIM)
+                total_w = surfaces[-1].get_width()
+
+        x = (self.sw - total_w) // 2
+        cy = fy + bar_h // 2
+        for surf in surfaces:
+            self.screen.blit(surf, surf.get_rect(left=x, centery=cy))
+            x += surf.get_width() + gap
 
     def _draw_header(self, left_text, right_text="", ch_num=None):
         """Draw a consistent header bar at the top of the screen."""
@@ -400,6 +431,94 @@ class TVTimeCapsule:
                                   (bar_h - rt.get_height()) // 2))
 
         return bar_h
+
+    def _draw_nav_bar(self, y, label, direction, active):
+        """Full-width up/down navigation strip (matches show browser)."""
+        nav_h = 28
+        if active and label:
+            pygame.draw.rect(self.screen, C.BG_CARD, (0, y, self.sw, nav_h))
+            arrow = "\u25b2" if direction == "up" else "\u25bc"
+            max_w = self.sw - 32
+            text = f"{arrow}  {label}"
+            surf = self.font_sm.render(text, True, C.CYAN)
+            if surf.get_width() > max_w:
+                while self.font_sm.size(text + "...")[0] > max_w and len(text) > 4:
+                    text = text[:-1]
+                surf = self.font_sm.render(text + "...", True, C.CYAN)
+            self.screen.blit(surf, surf.get_rect(left=16, centery=y + nav_h // 2))
+        else:
+            pygame.draw.rect(self.screen, (14, 20, 35), (0, y, self.sw, nav_h))
+        if direction == "up":
+            pygame.draw.line(self.screen, (25, 40, 70), (0, y + nav_h), (self.sw, y + nav_h), 1)
+        else:
+            pygame.draw.line(self.screen, (25, 40, 70), (0, y), (self.sw, y), 1)
+        return nav_h
+
+    def _stack_browser_layout(self):
+        """Shared vertical layout for season/episode stack browsers."""
+        nav_h = 28
+        footer_h = 34
+        header_h = 48
+        up_y = header_h
+        down_y = self.sh - footer_h - nav_h
+        stack_top = up_y + nav_h + 4
+        stack_bottom = down_y - 4
+        stack_h = max(40, stack_bottom - stack_top)
+        gap = 4
+        item_h = min(70, (stack_h - (STACK_VISIBLE - 1) * gap) // STACK_VISIBLE)
+        return {
+            "nav_h": nav_h,
+            "footer_h": footer_h,
+            "up_y": up_y,
+            "down_y": down_y,
+            "stack_top": stack_top,
+            "stack_bottom": stack_bottom,
+            "item_h": item_h,
+            "gap": gap,
+        }
+
+    def _stack_first_visible(self, cursor, total):
+        """Start index of the current page (fixed pages of STACK_VISIBLE, no scroll)."""
+        if total <= STACK_VISIBLE:
+            return 0
+        return (cursor // STACK_VISIBLE) * STACK_VISIBLE
+
+    def _stack_page_size(self, first_visible, total):
+        """How many cards are on this page (may be fewer than STACK_VISIBLE on the last page)."""
+        return min(STACK_VISIBLE, total - first_visible)
+
+    def _stack_page_nav(self, first_visible, total):
+        """Labels for page-up / page-down nav bars on stack browsers."""
+        items_above = first_visible
+        items_below = max(0, total - (first_visible + STACK_VISIBLE))
+        up_label = f"Previous {STACK_VISIBLE}" if items_above > 0 else ""
+        down_label = (
+            f"Next {min(STACK_VISIBLE, items_below)}" if items_below > 0 else ""
+        )
+        return up_label, down_label, items_above > 0, items_below > 0
+
+    def _move_cursor_stack(self, direction, total):
+        """Step within a page; at the page edge, flip to the next/previous page."""
+        first_visible = self._stack_first_visible(self.cursor, total)
+        page_top = first_visible
+        page_bottom = first_visible + self._stack_page_size(first_visible, total) - 1
+
+        if direction > 0:
+            if self.cursor >= total - 1:
+                return
+            if self.cursor >= page_bottom:
+                self.cursor = first_visible + STACK_VISIBLE
+            else:
+                self.cursor += 1
+        else:
+            if self.cursor <= 0:
+                return
+            if self.cursor <= page_top:
+                self.cursor = first_visible - 1
+            else:
+                self.cursor -= 1
+
+        self._marquee_key = None
 
     # ─── Navigation helpers ───────────────────────────────────────────────
 
@@ -427,13 +546,21 @@ class TVTimeCapsule:
     def seasons_for_show(self, show):
         return sorted(self.shows.get(show, {}).get('seasons', {}).keys())
 
+    def season_display_name(self, show, season_num):
+        """Season menu title — folder name or ``Season N``."""
+        season_data = self.shows.get(show, {}).get("seasons", {}).get(season_num, {})
+        label = season_data.get("label")
+        if label:
+            return str(label)
+        return f"Season {season_num}"
+
     def current_items(self):
         if self.view == self.SHOW_LIST:
             return [{'name': n, 'data': self.shows[n]} for n in self.show_names]
         elif self.view == self.SEASON_SELECT:
             show = self.shows.get(self.cur_show, {})
             seasons = sorted(show.get('seasons', {}).keys())
-            return [{'name': f'Season {s}', 'number': s,
+            return [{'name': self.season_display_name(self.cur_show, s), 'number': s,
                      'data': show['seasons'][s]} for s in seasons]
         else:
             show = self.shows.get(self.cur_show, {})
@@ -654,7 +781,7 @@ class TVTimeCapsule:
             self.screen.blit(it, it.get_rect(centerx=self.sw // 2, top=it_y))
 
         # ── Footer ──
-        self._draw_footer("ENTER play  #ch  H help")
+        self._draw_footer("\u25b2 Up", "\u25bc Down", "> Play", "#ch", "H Help")
         self._apply_scanlines()
 
     # ─── Season browser ──────────────────────────────────────────────────
@@ -673,24 +800,20 @@ class TVTimeCapsule:
             return
 
         # Header — channel number reflects the highlighted item on THIS page
-        header_h = self._draw_header(f"{self.cur_show.upper()}",
-                                     ch_num=str(self.cursor + 1))
+        self._draw_header(f"{self.cur_show.upper()}",
+                          ch_num=str(self.cursor + 1))
 
-        # Stack area
-        footer_h = 30
-        stack_top = header_h + 10
-        stack_bottom = self.sh - footer_h - 10
-        stack_h = stack_bottom - stack_top
-        item_h = min(70, (stack_h - (STACK_VISIBLE - 1) * 4) // STACK_VISIBLE)
-        gap = 4
+        layout = self._stack_browser_layout()
+        stack_top = layout["stack_top"]
+        stack_bottom = layout["stack_bottom"]
+        item_h = layout["item_h"]
+        gap = layout["gap"]
 
-        first_visible = max(0, self.cursor - STACK_VISIBLE + 1)
-        first_visible = min(first_visible, max(0, total - STACK_VISIBLE))
-
-        # Up arrow
-        if first_visible > 0:
-            arr = self.font_sm.render("\u25b2 more above", True, C.DIM)
-            self.screen.blit(arr, arr.get_rect(centerx=self.sw // 2, top=stack_top - 2))
+        first_visible = self._stack_first_visible(self.cursor, total)
+        up_label, down_label, up_active, down_active = self._stack_page_nav(
+            first_visible, total
+        )
+        self._draw_nav_bar(layout["up_y"], up_label, "up", up_active)
 
         for i in range(STACK_VISIBLE):
             item_idx = first_visible + i
@@ -721,8 +844,8 @@ class TVTimeCapsule:
             self.screen.blit(ch_surf, (rect.x + 14,
                                        rect.y + (rect.height - ch_surf.get_height()) // 2))
 
-            # Season label
-            s_label = f"Season {season_num}"
+            # Season label — folder name (e.g. Action) or Season N
+            s_label = self.season_display_name(self.cur_show, season_num)
             sl = self.font_md.render(s_label, True, C.BRIGHT if selected else C.WHITE)
             sl_x = rect.x + 100
             # Truncate if too wide
@@ -754,13 +877,13 @@ class TVTimeCapsule:
             self.screen.blit(it, (rect.right - it.get_width() - 14,
                                    rect.y + (rect.height - it.get_height()) // 2))
 
-        # Down arrow
-        if first_visible + STACK_VISIBLE < total:
-            arr = self.font_sm.render("\u25bc more below", True, C.DIM)
-            self.screen.blit(arr, arr.get_rect(centerx=self.sw // 2, top=stack_top + STACK_VISIBLE * (item_h + gap)))
+        self._draw_nav_bar(layout["down_y"], down_label, "down", down_active)
 
         # Footer
-        self._draw_footer("Up/Dn >open <back #ch R=reset H")
+        self._draw_footer(
+            "\u25b2 Up", "\u25bc Down", "> Open", "< Back",
+            "#ch", "R Reset",
+        )
         self._apply_scanlines()
 
     # ─── Episode browser ─────────────────────────────────────────────────
@@ -780,31 +903,27 @@ class TVTimeCapsule:
             return
 
         # Header — channel number reflects the highlighted episode on THIS page
-        header_h = self._draw_header(
+        self._draw_header(
             f"{self.cur_show.upper()}  -  S-{self.cur_season:02d}",
             ch_num=str(self.cursor + 1))
 
-        # Stack area
-        footer_h = 30
-        stack_top = header_h + 10
-        stack_bottom = self.sh - footer_h - 10
-        stack_h = stack_bottom - stack_top
-        item_h = min(70, (stack_h - (STACK_VISIBLE - 1) * 4) // STACK_VISIBLE)
-        gap = 4
+        layout = self._stack_browser_layout()
+        stack_top = layout["stack_top"]
+        stack_bottom = layout["stack_bottom"]
+        item_h = layout["item_h"]
+        gap = layout["gap"]
+
+        first_visible = self._stack_first_visible(self.cursor, total)
+        up_label, down_label, up_active, down_active = self._stack_page_nav(
+            first_visible, total
+        )
+        self._draw_nav_bar(layout["up_y"], up_label, "up", up_active)
 
         resume = get_resume_ep(self.state, self.cur_show, self.cur_season)
         pos_ep, pos_secs = get_episode_position(
             self.state, self.cur_show, self.cur_season
         )
         next_up = next((e['number'] for e in episodes if e['number'] > resume), None)
-
-        first_visible = max(0, self.cursor - STACK_VISIBLE + 1)
-        first_visible = min(first_visible, max(0, total - STACK_VISIBLE))
-
-        # Up arrow
-        if first_visible > 0:
-            arr = self.font_sm.render("\u25b2 more above", True, C.DIM)
-            self.screen.blit(arr, arr.get_rect(centerx=self.sw // 2, top=stack_top - 2))
 
         for i in range(STACK_VISIBLE):
             item_idx = first_visible + i
@@ -923,13 +1042,13 @@ class TVTimeCapsule:
                 self.screen.blit(st, (rect.right - ec.get_width() - st.get_width() - 22,
                                        rect.y + (rect.height - st.get_height()) // 2))
 
-        # Down arrow
-        if first_visible + STACK_VISIBLE < total:
-            arr = self.font_sm.render("\u25bc more below", True, C.DIM)
-            self.screen.blit(arr, arr.get_rect(centerx=self.sw // 2, top=stack_top + STACK_VISIBLE * (item_h + gap)))
+        self._draw_nav_bar(layout["down_y"], down_label, "down", down_active)
 
         # Footer
-        self._draw_footer("Up/Dn >play <back #ch R=reset H")
+        self._draw_footer(
+            "\u25b2 Up", "\u25bc Down", "> Play", "< Back",
+            "#ch", "R Reset",
+        )
         self._apply_scanlines()
 
     # ── Playback drawing (embedded video) ─────────────────────────────────
@@ -1086,6 +1205,27 @@ class TVTimeCapsule:
 
     # ─── Splash screen ────────────────────────────────────────────────────
 
+    def _splash_help_content_height(self, lines, section_gap):
+        """Total height of the help menu text block (matches draw layout)."""
+        y = 0
+        first_section = True
+        for label, detail in lines:
+            if detail is None:
+                if not first_section:
+                    y += section_gap
+                first_section = False
+                y += self.font_sm.render(label, True, C.CYAN).get_height() + 6
+            else:
+                lt = self.font_sm.render(label, True, C.WHITE)
+                dt = self.font_sm.render(detail, True, C.GREEN)
+                left_x = 70
+                right_x = self.sw - dt.get_width() - 70
+                if right_x < left_x + lt.get_width() + 20:
+                    y += lt.get_height() + 3 + dt.get_height() + 3
+                else:
+                    y += max(lt.get_height(), dt.get_height()) + 4
+        return y
+
     def draw_splash(self):
         """Show a 10-second controls splash screen. Dismissable by any key."""
         start = pygame.time.get_ticks()
@@ -1098,20 +1238,28 @@ class TVTimeCapsule:
             ("browse shows", f"{key_display_name(km.get('up','Up'))}/{key_display_name(km.get('down','Down'))}  up / down"),
             ("enter / select", f"{key_display_name(km.get('right','Right'))} or {key_display_name(km.get('select','Enter'))}"),
             ("go back", f"{key_display_name(km.get('left','Left'))} or {key_display_name(km.get('back','Esc'))}"),
-            ("", None),
+            ("reset watch status", key_display_name(km.get("reset", "R"))),
+            ("rebind keys", "Tab"),
             ("CHANNELS", None),
             ("jump to channel", "type any number  (auto-enters after 1.5s)"),
-            ("", None),
             ("DURING PLAYBACK", None),
             ("volume up / down", f"{key_display_name(km.get('up','Up'))}/{key_display_name(km.get('down','Down'))}"),
             ("seek +/-10s", f"{key_display_name(km.get('left','Left'))}/{key_display_name(km.get('right','Right'))}"),
-            ("pause / resume", "Space or Enter"),
-            ("stop & return", f"{key_display_name(km.get('back','Esc'))}"),
-            ("", None),
-            ("SETTINGS", None),
-            ("reset watch status", f"{key_display_name(km.get('reset','R'))}  (clear * / next-up marks)"),
-            ("key configuration", "Tab"),
+            ("pause / stop", "Space or Enter / Esc"),
         ]
+
+        footer_hint_y = self.sh - 18
+        divider_y = self.sh - 36
+        content_region_top = 62
+        content_region_bottom = divider_y - 10
+        section_gap = 20
+        min_top_pad = 24
+
+        help_height = self._splash_help_content_height(lines, section_gap)
+        slack = content_region_bottom - content_region_top - help_height
+        y_start = content_region_top + max(min_top_pad, slack // 2)
+        if y_start + help_height > content_region_bottom:
+            y_start = max(content_region_top, content_region_bottom - help_height)
 
         while self.running:
             for event in pygame.event.get():
@@ -1131,50 +1279,53 @@ class TVTimeCapsule:
 
             # Title
             title = self.font_lg.render("TV TIME CAPSULE", True, C.BRIGHT)
-            self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=40))
+            self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=28))
 
             # Divider under title
-            pygame.draw.line(self.screen, C.BLUE, (40, 75), (self.sw - 40, 75), 1)
+            pygame.draw.line(self.screen, C.BLUE, (40, 56), (self.sw - 40, 56), 1)
 
-            # Control lines
-            y = 92
+            # Control lines — vertically centered in the region below the title
+            y = y_start
+            content_max_y = content_region_bottom
+            first_section = True
             for label, detail in lines:
+                if y >= content_max_y:
+                    break
                 if detail is None:
-                    if label:
-                        # Section header
-                        hdr = self.font_md.render(label, True, C.CYAN)
-                        self.screen.blit(hdr, (50, y))
-                        y += hdr.get_height() + 2
-                    else:
-                        y += 8
+                    if not first_section:
+                        y += section_gap
+                    first_section = False
+                    hdr = self.font_sm.render(label, True, C.CYAN)
+                    if y + hdr.get_height() > content_max_y:
+                        break
+                    self.screen.blit(hdr, (50, y))
+                    y += hdr.get_height() + 6
                 else:
-                    # Key line: label on left, detail on right.
                     lt = self.font_sm.render(label, True, C.WHITE)
                     dt = self.font_sm.render(detail, True, C.GREEN)
-                    max_y = self.sh - 80
-                    if y + max(lt.get_height(), dt.get_height()) + 4 > max_y:
+                    row_h = max(lt.get_height(), dt.get_height()) + 4
+                    if y + row_h > content_max_y:
                         break
                     left_x = 70
                     right_x = self.sw - dt.get_width() - 70
                     if right_x < left_x + lt.get_width() + 20:
-                        # Columns would collide — drop the detail to its own line
-                        self.screen.blit(lt, (left_x, y + 2))
-                        y += lt.get_height() + 2
-                        if y + dt.get_height() + 4 > max_y:
+                        self.screen.blit(lt, (left_x, y))
+                        y += lt.get_height() + 3
+                        if y + dt.get_height() > content_max_y:
                             break
-                        self.screen.blit(dt, (max(20, self.sw - dt.get_width() - 70), y + 2))
-                        y += dt.get_height() + 4
+                        self.screen.blit(dt, (max(20, self.sw - dt.get_width() - 70), y))
+                        y += dt.get_height() + 3
                     else:
-                        self.screen.blit(lt, (left_x, y + 2))
-                        self.screen.blit(dt, (right_x, y + 2))
-                        y += max(lt.get_height(), dt.get_height()) + 4
+                        self.screen.blit(lt, (left_x, y))
+                        self.screen.blit(dt, (right_x, y))
+                        y += row_h
 
-            # Divider above footer
-            pygame.draw.line(self.screen, C.BLUE, (40, self.sh - 70), (self.sw - 40, self.sh - 70), 1)
+            # Divider above footer — below content, not through it
+            pygame.draw.line(self.screen, C.BLUE, (40, divider_y), (self.sw - 40, divider_y), 1)
 
             # Countdown + dismiss hint
             hint = self.font_sm.render(f"Press any key to continue...  {remaining}s", True, C.DIM)
-            self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh - 35))
+            self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=footer_hint_y))
 
             self._apply_scanlines()
             self.present()
@@ -1348,16 +1499,22 @@ class TVTimeCapsule:
 
     def reset_keymap(self):
         self.keymap = dict(DEFAULT_KEYMAP)
-        self.state["keymap"] = {k: v for k, v in self.keymap.items()}
-        save_state(self.state)
+        self.config["keymap"] = {}
+        save_config(self.config)
 
     def reset_watch_status(self):
         """Clear watched / next-up progress for the current menu context."""
         if self.view == self.EPISODE_SELECT:
             if not self.cur_show or self.cur_season is None:
                 return
-            changed = clear_resume_ep(self.state, self.cur_show, self.cur_season)
-            label = f"S-{self.cur_season:02d} reset"
+            episodes = self.current_items()
+            if not episodes or self.cursor >= len(episodes):
+                return
+            ep_num = episodes[self.cursor]["number"]
+            changed = reset_episode_progress(
+                self.state, self.cur_show, self.cur_season, ep_num
+            )
+            label = f"E-{ep_num:02d} reset"
         elif self.view == self.SEASON_SELECT:
             if not self.cur_show:
                 return
@@ -1366,7 +1523,7 @@ class TVTimeCapsule:
                 return
             season = seasons[self.cursor]
             changed = clear_resume_ep(self.state, self.cur_show, season)
-            label = f"S-{season:02d} reset"
+            label = f"{self.season_display_name(self.cur_show, season)} reset"
         elif self.view == self.SHOW_LIST:
             if not self.show_names or self.cursor >= len(self.show_names):
                 return
@@ -1388,7 +1545,10 @@ class TVTimeCapsule:
         total = self.total_items()
         if not total:
             return
-        # Clamp (no wrap) so the on-screen "more above/below" hints stay accurate.
+        if self.view in (self.SEASON_SELECT, self.EPISODE_SELECT):
+            self._move_cursor_stack(direction, total)
+            return
+        # Clamp (no wrap) on the show browser.
         new_cursor = max(0, min(total - 1, self.cursor + direction))
         if new_cursor != self.cursor:
             self.cursor = new_cursor
@@ -1723,8 +1883,8 @@ class TVTimeCapsule:
                             continue
                         action_id = KEY_ACTIONS[self.config_cursor][0]
                         self.keymap[action_id] = event.key
-                        self.state["keymap"] = {k: v for k, v in self.keymap.items()}
-                        save_state(self.state)
+                        self.config["keymap"] = {k: v for k, v in self.keymap.items()}
+                        save_config(self.config)
                         self.view = self.KEY_CONFIG
                         continue
 

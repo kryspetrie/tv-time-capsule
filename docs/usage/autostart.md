@@ -12,7 +12,7 @@
 ./scripts/disable-autostart.sh --remove
 ```
 
-Omit `--media-dir` to use `~/.config/tv-time-capsule/config.json` for the service user (including `mounts`).
+Omit `--media-dir` to use the service user's config file (typically `~/.config/tv-time-capsule/config.json`, including `mounts`). See [Configuration](configuration.md#where-the-app-looks-for-configjson).
 
 Useful operations:
 
