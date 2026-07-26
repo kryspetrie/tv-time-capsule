@@ -83,24 +83,36 @@ tv-time-capsule --media-dir /path/to/media
 tv-time-capsule --media-dir /usb/shows --media-dir ~/Videos/kids
 ```
 
-Useful flags:
+Useful flags (most features are **on by default** in config — flags override for one run):
 
 | Flag | Meaning |
 |------|---------|
 | `--media-dir DIR` | Scan this directory (repeatable). Overrides config paths for this run. |
-| `--windowed` | Run in a window instead of fullscreen (handy for testing) |
+| `--windowed` | 800×600 resizable window; admin on loopback only; **safe zone 0%** unless `--safe-zone` is set |
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
-| `--scanlines` | **Fun tweak** — CRT scanline overlay |
-| `--channel-snow` | **Fun tweak** — B&W static burst when committing channel numbers |
-| `--shutdown-collapse` | **Fun tweak** — CRT vertical collapse on quit |
-| `--analog-artifacts` | **Fun tweak** — random glitches on the show browser |
-| `--analog-artifact-rate N` | Glitches per minute with `--analog-artifacts` (default: config or 12) |
-| `--safe-zone PCT` | CRT overscan safe zone — uniform inset % on all sides (0–25) |
+| `--scanlines` | **Fun tweak** — CRT scanline overlay (off by default) |
+| `--channel-snow` | Force channel snow on (already default in config) |
+| `--shutdown-collapse` | Force shutdown collapse on (already default in config) |
+| `--analog-artifacts` | Force analog glitches on (already default in config) |
+| `--analog-artifact-rate N` | Glitches per minute with analog artifacts |
+| `--safe-zone PCT` | CRT overscan safe zone — uniform inset % (overrides config; use with `--windowed` to test overscan on a monitor) |
 | `--skip-mounts` | Do not mount remote shares from config |
-| `--screensaver` | **Fun tweak** — VHS logo screensaver after idle timeout |
-| `--screensaver-timeout SEC` | Idle seconds before screensaver (overrides config) |
-| `--admin` | Web admin UI at http://127.0.0.1:8765/ (see [Web admin](web-admin.md)) |
-| `--admin-port PORT` | Port for `--admin` (default 8765) |
+| `--screensaver` | Force screensaver on (already default in config) |
+| `--screensaver-timeout SEC` | Idle seconds before screensaver |
+| `--admin` | Force web admin on (already default in config) |
+| `--admin-port PORT` | Port for admin (default 8765) |
+
+**Typical local dev** (defaults cover the rest):
+
+```bash
+poetry run tv-time-capsule --windowed --media-dir ./media
+```
+
+Test CRT overscan in the window:
+
+```bash
+poetry run tv-time-capsule --windowed --media-dir ./media --safe-zone 10
+```
 
 CRT polish and hidden test patterns: [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md).
 

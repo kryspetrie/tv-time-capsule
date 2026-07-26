@@ -193,6 +193,11 @@ def main(argv: list[str] | None = None) -> None:
         except ValueError:
             parser.error("--safe-zone-offset expects X,Y (pixels)")
 
+    safe_zone_override = args.safe_zone
+    if safe_zone_override is None and args.windowed:
+        # Windowed dev mode: no overscan padding unless --safe-zone is explicit.
+        safe_zone_override = 0.0
+
     app = TVTimeCapsule(
         media_paths,
         fullscreen=not args.windowed,
@@ -209,7 +214,7 @@ def main(argv: list[str] | None = None) -> None:
         shutdown_collapse=True if args.shutdown_collapse else None,
         analog_artifacts=True if args.analog_artifacts else None,
         analog_artifact_rate=args.analog_artifact_rate,
-        safe_zone=args.safe_zone,
+        safe_zone=safe_zone_override,
         safe_zone_offset=safe_zone_offset,
     )
 

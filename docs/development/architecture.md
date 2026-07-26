@@ -35,7 +35,7 @@ CLI (cli.py)
 |------|----------|
 | Active `config.json` | media_paths, mounts, keymap — see [config search order](../usage/configuration.md#where-the-app-looks-for-configjson) |
 | `~/.config/tv-time-capsule/` | user config dir; credentials and temp mount files even in dev |
-| `~/.local/share/tv-time-capsule/state.json` | resume episode, watch progress |
+| `~/.local/share/tv-time-capsule/state.json` | Per-episode watch flags and in-progress bookmarks |
 | OS keyring service `tv-time-capsule` | optional mount passwords |
 
 ## Pi appliance model

@@ -59,6 +59,16 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertFalse(pb["now_playing_splash"])
         self.assertEqual(pb["now_playing_splash_seconds"], 3.0)
 
+    def test_default_config_ui_and_admin(self):
+        cfg = config_mod.parse_config({})
+        self.assertTrue(cfg["ui"]["channel_snow"])
+        self.assertTrue(cfg["ui"]["shutdown_collapse"])
+        self.assertTrue(cfg["ui"]["analog_artifacts"])
+        self.assertEqual(cfg["ui"]["safe_zone"]["top"], 10)
+        self.assertTrue(cfg["screensaver"]["enabled"])
+        self.assertEqual(cfg["screensaver"]["timeout_seconds"], 30)
+        self.assertTrue(cfg["admin"]["enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

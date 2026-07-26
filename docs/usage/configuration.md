@@ -16,8 +16,10 @@ The app loads the **first existing file** in this order:
 
 ```bash
 cp config.example.json config.json   # optional — richer defaults and comments
-poetry run tv-time-capsule --windowed
+poetry run tv-time-capsule --windowed --media-dir ./media
 ```
+
+**Development defaults:** `--windowed` uses **0%** safe zone (full 640×480 UI in the window). Fullscreen / kiosk uses the config default (**10%** on all sides unless you change it). Screensaver, admin, channel snow, analog artifacts, and shutdown collapse are **on** in the default config — no extra CLI flags needed for local dev.
 
 Key rebinding and in-app saves write back to whichever file was loaded.
 
@@ -35,7 +37,8 @@ Credentials and temporary mount password files always live under `~/.config/tv-t
 | File | Purpose |
 |------|---------|
 | Active `config.json` (see table above) | Media paths, remote mounts, key bindings |
-| `~/.local/share/tv-time-capsule/state.json` | Resume positions and watch progress |
+| `~/.local/share/tv-time-capsule/state.json` | Per-episode watch flags, in-progress bookmarks |
+| `~/.local/share/tv-time-capsule/admin.pid` | Previous admin server PID (used to free the port on restart) |
 | `~/.config/tv-time-capsule/` | Credentials files, temp CIFS creds, secrets helpers |
 
 **Full annotated example** (all settings, mount types, key codes): [`config.example.json`](../../config.example.json) in the repo root.
@@ -125,10 +128,10 @@ The bundled asset is a 32-bit BMP so pygame can load it even when extended image
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Turn screensaver on |
-| `timeout_seconds` | `300` | Menu inactivity before start (minimum 10) |
+| `enabled` | `true` | Turn screensaver on |
+| `timeout_seconds` | `30` | Menu inactivity before start (minimum 10) |
 
-CLI overrides for one run: `--screensaver` and `--screensaver-timeout SEC`.
+CLI overrides for one run: `--screensaver` and `--screensaver-timeout SEC` (only needed to force on when disabled in config).
 
 ## `playback`
 
@@ -150,7 +153,7 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 | `autoplay` | `next_in_season_only` | `off`, `next_episode` (includes next season), or `next_in_season_only` |
 | `autoplay_countdown_seconds` | `5` | “Up next” wait before starting (0 = instant). **Esc** cancels during countdown |
 | `now_playing_splash` | `true` | Episode summary (show, season/episode, title) before playback starts |
-| `now_playing_splash_seconds` | `1.5` | How long the summary stays visible (0 = skip) |
+| `now_playing_splash_seconds` | `1.5` | How long the summary stays visible (0 = skip). Skipped after autoplay “Up next” — only manual episode select shows it |
 | `hw_decode` | `auto` | Pi hardware H.264 decode: `auto`, `on`, or `off` |
 
 ## `ui`
@@ -172,15 +175,15 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `channel_snow` | `false` | **Fun tweak** — B&W static burst when committing a channel number (show, season, or episode list). Not arrow keys. |
-| `shutdown_collapse` | `false` | **Fun tweak** — CRT vertical collapse animation on quit |
-| `channel_snow_audio` | `false` | Quiet white-noise with channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
+| `channel_snow` | `true` | **Fun tweak** — B&W static burst when committing a channel number (show, season, or episode list). Not arrow keys. |
+| `shutdown_collapse` | `true` | **Fun tweak** — CRT vertical collapse animation on quit |
+| `channel_snow_audio` | `true` | Quiet white-noise with channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
 | `scanlines` | `false` | **Fun tweak** — Semi-transparent CRT scanline overlay |
-| `analog_artifacts` | `false` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
+| `analog_artifacts` | `true` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
 | `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches) |
-| `safe_zone` | `{ "top": 0, "bottom": 0, "left": 0, "right": 0 }` | CRT overscan inset — see [Safe zone](#safe-zone) |
+| `safe_zone` | `10` on all sides | CRT overscan inset — see [Safe zone](#safe-zone) |
 
-CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`
+CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`. In **`--windowed`** mode the safe zone defaults to **0%** unless you pass `--safe-zone` explicitly (handy for dev on a monitor).
 
 ### Safe zone
 
@@ -194,8 +197,7 @@ When any `safe_zone` margin is greater than zero:
 - **Video** is **full-bleed on the whole window** during playback (including margin areas). The window does not resize when you start an episode.
 - **Playback HUD** (progress, volume, pause, Up Next) still respects safe-zone inset so controls stay title-safe on CRTs.
 - **Secret test patterns** (`0` / `00` / `000`) fill the **entire extended framebuffer**.
-- **Playback overlays** (progress bar, volume, pause) use the 640×480 layout, composited over video in the UI viewport region.
-- **Playback overlays** (progress, volume, pause, Up Next) inset and scale within the 640×480 frame using the same margin percentages so HUD stays title-safe on CRTs.
+- **Screensaver** bounces inside the same title-safe UI inset as menus.
 
 Percentages are of the **UI viewport** — width for left/right padding, height for top/bottom. Maximum 25% per edge.
 
@@ -340,11 +342,36 @@ Local web UI for channel order, library rescan, logs, and watch summary. See [We
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Start HTTP admin on app launch |
+| `enabled` | `true` | Start HTTP admin on app launch |
 | `port` | `8765` | TCP port |
-| `bind` | `0.0.0.0` | Listen address (`127.0.0.1` = local only) |
+| `bind` | `0.0.0.0` | Listen address (`127.0.0.1` = local only; `--windowed` forces loopback) |
 
 No authentication — only enable on a home LAN you trust.
+
+## Watch state (`state.json`)
+
+Progress is stored per show under `~/.local/share/tv-time-capsule/state.json`:
+
+```json
+{
+  "Bluey": {
+    "s01": {
+      "watched": [1, 3, 5],
+      "pos_ep": 2,
+      "pos": 45.0
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `watched` | Episode numbers finished (any order — out-of-order viewing is supported) |
+| `pos_ep` / `pos` | In-progress bookmark (seconds into `pos_ep`) |
+
+Legacy seasons with a single `ep` field (highest completed in order) migrate to `watched` automatically on the next save.
+
+Episode list labels: **NEXT** (first unwatched), **RESUME** (bookmark), **WATCHED** (completed). Season list shows `21 eps` and `E-05 next` when applicable. Tap **R** on an episode to clear its watched flag and bookmark; hold **R** to rescan the library.
 
 ## Precedence
 

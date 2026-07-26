@@ -202,9 +202,10 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
     ui = raw or {}
     if not isinstance(ui, dict):
         ui = {}
+    defaults = _default_config()["ui"]
     legacy = str(ui.get("channel_change_effects", "off")).lower()
-    channel_snow = bool(ui.get("channel_snow", False))
-    shutdown_collapse = bool(ui.get("shutdown_collapse", False))
+    channel_snow = bool(ui.get("channel_snow", defaults["channel_snow"]))
+    shutdown_collapse = bool(ui.get("shutdown_collapse", defaults["shutdown_collapse"]))
     if "channel_snow_audio" in ui:
         channel_snow_audio = bool(ui.get("channel_snow_audio"))
     else:
@@ -214,13 +215,13 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
             channel_snow = True
         if legacy == "visual+audio":
             channel_snow_audio = True
-    analog_artifacts = bool(ui.get("analog_artifacts", False))
+    analog_artifacts = bool(ui.get("analog_artifacts", defaults["analog_artifacts"]))
     try:
         analog_rate = float(ui.get("analog_artifact_rate", 12))
     except (TypeError, ValueError):
         analog_rate = 12.0
     analog_rate = max(0.0, min(60.0, analog_rate))
-    safe_zone = parse_safe_zone(ui.get("safe_zone"))
+    safe_zone = parse_safe_zone(ui.get("safe_zone", defaults["safe_zone"]))
     raw_sz = ui.get("safe_zone")
     safe_zone_offset = parse_safe_zone_offset(raw_sz if isinstance(raw_sz, dict) else None)
     return {
@@ -281,14 +282,15 @@ def _parse_admin(raw: dict | None) -> dict[str, Any]:
     admin = raw or {}
     if not isinstance(admin, dict):
         admin = {}
+    defaults = _default_config()["admin"]
     try:
-        port = int(admin.get("port", 8765))
+        port = int(admin.get("port", defaults["port"]))
     except (TypeError, ValueError):
-        port = 8765
+        port = defaults["port"]
     port = max(1024, min(65535, port))
-    bind = str(admin.get("bind", "0.0.0.0")).strip() or "0.0.0.0"
+    bind = str(admin.get("bind", defaults["bind"])).strip() or defaults["bind"]
     return {
-        "enabled": bool(admin.get("enabled", False)),
+        "enabled": bool(admin.get("enabled", defaults["enabled"])),
         "port": port,
         "bind": bind,
     }
@@ -300,8 +302,8 @@ def _default_config() -> dict[str, Any]:
         "mounts": [],
         "keymap": {},
         "screensaver": {
-            "enabled": False,
-            "timeout_seconds": 300,
+            "enabled": True,
+            "timeout_seconds": 30,
         },
         "playback": {
             "autoplay": "next_in_season_only",
@@ -311,13 +313,13 @@ def _default_config() -> dict[str, Any]:
             "hw_decode": "auto",
         },
         "ui": {
-            "channel_snow": False,
-            "shutdown_collapse": False,
-            "channel_snow_audio": False,
+            "channel_snow": True,
+            "shutdown_collapse": True,
+            "channel_snow_audio": True,
             "scanlines": False,
-            "analog_artifacts": False,
+            "analog_artifacts": True,
             "analog_artifact_rate": 12,
-            "safe_zone": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+            "safe_zone": {"top": 10, "bottom": 10, "left": 10, "right": 10},
         },
         "gamepad": {
             "enabled": True,
@@ -331,7 +333,7 @@ def _default_config() -> dict[str, Any]:
             "rescan_long_press_ms": 800,
         },
         "admin": {
-            "enabled": False,
+            "enabled": True,
             "port": 8765,
             "bind": "0.0.0.0",
         },
@@ -353,17 +355,18 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
     screensaver = raw.get("screensaver") or {}
     if not isinstance(screensaver, dict):
         screensaver = {}
+    ss_defaults = _default_config()["screensaver"]
     try:
-        timeout_s = int(screensaver.get("timeout_seconds", 300))
+        timeout_s = int(screensaver.get("timeout_seconds", ss_defaults["timeout_seconds"]))
     except (TypeError, ValueError):
-        timeout_s = 300
+        timeout_s = ss_defaults["timeout_seconds"]
     timeout_s = max(10, timeout_s)
     return {
         "media_paths": expanded,
         "mounts": mounts,
         "keymap": keymap,
         "screensaver": {
-            "enabled": bool(screensaver.get("enabled", False)),
+            "enabled": bool(screensaver.get("enabled", ss_defaults["enabled"])),
             "timeout_seconds": timeout_s,
         },
         "playback": _parse_playback(raw.get("playback")),
