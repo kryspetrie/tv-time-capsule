@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import tv_time_capsule.config as config_mod
+from tv_time_capsule.config import _parse_playback
 
 
 class ConfigAutoCreateTests(unittest.TestCase):
@@ -43,6 +44,20 @@ class ConfigAutoCreateTests(unittest.TestCase):
                     config_mod._active_config_path = None
                     cfg = config_mod.load_config()
                     self.assertEqual(cfg["media_paths"], ["/custom/path"])
+
+
+class PlaybackConfigTests(unittest.TestCase):
+    def test_now_playing_splash_defaults(self):
+        pb = _parse_playback({})
+        self.assertTrue(pb["now_playing_splash"])
+        self.assertEqual(pb["now_playing_splash_seconds"], 1.5)
+
+    def test_now_playing_splash_can_disable(self):
+        pb = _parse_playback(
+            {"now_playing_splash": False, "now_playing_splash_seconds": 3}
+        )
+        self.assertFalse(pb["now_playing_splash"])
+        self.assertEqual(pb["now_playing_splash_seconds"], 3.0)
 
 
 if __name__ == "__main__":

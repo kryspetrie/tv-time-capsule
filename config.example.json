@@ -71,6 +71,8 @@
   "playback": {
     "autoplay": "next_in_season_only",
     "autoplay_countdown_seconds": 5,
+    "now_playing_splash": true,
+    "now_playing_splash_seconds": 1.5,
     "hw_decode": "auto"
   },
 
@@ -80,7 +82,15 @@
     "channel_snow_audio": false,
     "scanlines": false,
     "analog_artifacts": false,
-    "analog_artifact_rate": 12
+    "analog_artifact_rate": 12,
+    "safe_zone": {
+      "top": 0,
+      "bottom": 0,
+      "left": 0,
+      "right": 0,
+      "offset_x": 0,
+      "offset_y": 0
+    }
   },
 
   "gamepad": {
@@ -122,6 +132,8 @@
   "_playback": {
     "autoplay": "off | next_episode | next_in_season_only — advance after an episode ends naturally",
     "autoplay_countdown_seconds": "Seconds before the next episode starts (0 = instant). Esc cancels during countdown.",
+    "now_playing_splash": "Show episode summary before playback starts (default true)",
+    "now_playing_splash_seconds": "How long the summary stays on screen (default 1.5; 0 = skip even if enabled)",
     "hw_decode": "auto | on | off — Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"
   },
 
@@ -132,6 +144,19 @@
     "scanlines": "FUN TWEAK — CRT scanline overlay. CLI: --scanlines",
     "analog_artifacts": "FUN TWEAK — Random brief static, line tear, and vertical roll on the show browser only. CLI: --analog-artifacts",
     "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches)"
+  },
+
+  "_safe_zone": {
+    "top": "Overscan padding above the 640×480 UI (% of UI height). Extends the framebuffer outward — UI is never scaled.",
+    "bottom": "Padding below the UI (% of UI height — often higher on CRTs, e.g. 8)",
+    "left": "Padding left of the UI (% of UI width)",
+    "right": "Padding right of the UI (% of UI width)",
+    "offset_x": "Optional pixel shift right within the safe area (asymmetric overscan tuning)",
+    "offset_y": "Optional pixel shift down within the safe area",
+    "offset": "Optional shorthand { \"x\": N, \"y\": N } or [x, y] for offset_x/y",
+    "margin": "Optional shorthand — uniform %% on all sides (e.g. 5 or {\"margin\": 5})",
+    "vertical": "Optional shorthand for top and bottom together",
+    "horizontal": "Optional shorthand for left and right together"
   },
 
   "_easter_eggs": {
@@ -153,7 +178,7 @@
   "_keymap_notes": [
     "Values are pygame key codes (integers). Omit an action or use an empty keymap object {} to keep defaults.",
     "Rebind in-app with Tab → key configuration. Tab on that screen resets to defaults.",
-    "Not configurable here: 0–9 (channel numbers), H (help), Tab (key config), Q (quit), Space (pause during playback)."
+    "Not configurable here: 0–9 (channel numbers), H (help), Z (safe zone setup), Tab (key config), Q (quit), Space (pause during playback)."
   ],
 
   "_screensaver": "FUN TWEAK — Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",

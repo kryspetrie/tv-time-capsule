@@ -6,6 +6,8 @@ import json
 import os
 from typing import Any
 
+from .safe_zone import parse_safe_zone, parse_safe_zone_offset, safe_zone_to_config
+
 DEFAULT_MEDIA_ROOT = "/media/usb"
 STATE_DIR = os.path.expanduser("~/.local/share/tv-time-capsule")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -85,6 +87,12 @@ def config_file() -> str:
 # the aspect ratio of a CRT television.
 SCREEN_W = 640
 SCREEN_H = 480
+
+# Default OS window (windowed mode): fixed 4:3, independent of safe-zone framebuffer.
+WINDOW_DEFAULT_W = 800
+WINDOW_DEFAULT_H = 600
+WINDOW_MIN_W = 400
+WINDOW_MIN_H = 300
 
 VIDEO_EXTENSIONS = {
     ".mp4",
@@ -171,12 +179,20 @@ def _parse_playback(raw: dict | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         countdown = 5
     countdown = max(0, min(30, countdown))
+    now_playing_splash = bool(pb.get("now_playing_splash", True))
+    try:
+        splash_seconds = float(pb.get("now_playing_splash_seconds", 1.5))
+    except (TypeError, ValueError):
+        splash_seconds = 1.5
+    splash_seconds = max(0.0, min(30.0, splash_seconds))
     hw = str(pb.get("hw_decode", "auto")).lower()
     if hw not in HW_DECODE_MODES:
         hw = "auto"
     return {
         "autoplay": mode,
         "autoplay_countdown_seconds": countdown,
+        "now_playing_splash": now_playing_splash,
+        "now_playing_splash_seconds": splash_seconds,
         "hw_decode": hw,
     }
 
@@ -203,6 +219,9 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         analog_rate = 12.0
     analog_rate = max(0.0, min(60.0, analog_rate))
+    safe_zone = parse_safe_zone(ui.get("safe_zone"))
+    raw_sz = ui.get("safe_zone")
+    safe_zone_offset = parse_safe_zone_offset(raw_sz if isinstance(raw_sz, dict) else None)
     return {
         "channel_snow": channel_snow,
         "shutdown_collapse": shutdown_collapse,
@@ -210,6 +229,7 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
         "scanlines": bool(ui.get("scanlines", False)),
         "analog_artifacts": analog_artifacts,
         "analog_artifact_rate": analog_rate,
+        "safe_zone": safe_zone_to_config(safe_zone, safe_zone_offset),
     }
 
 
@@ -285,6 +305,8 @@ def _default_config() -> dict[str, Any]:
         "playback": {
             "autoplay": "next_in_season_only",
             "autoplay_countdown_seconds": 5,
+            "now_playing_splash": True,
+            "now_playing_splash_seconds": 1.5,
             "hw_decode": "auto",
         },
         "ui": {
@@ -294,6 +316,7 @@ def _default_config() -> dict[str, Any]:
             "scanlines": False,
             "analog_artifacts": False,
             "analog_artifact_rate": 12,
+            "safe_zone": {"top": 0, "bottom": 0, "left": 0, "right": 0},
         },
         "gamepad": {
             "enabled": True,

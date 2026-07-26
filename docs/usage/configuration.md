@@ -138,7 +138,9 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 {
   "playback": {
     "autoplay": "next_in_season_only",
-    "autoplay_countdown_seconds": 5
+    "autoplay_countdown_seconds": 5,
+    "now_playing_splash": true,
+    "now_playing_splash_seconds": 1.5
   }
 }
 ```
@@ -147,6 +149,8 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 |-------|---------|-------------|
 | `autoplay` | `next_in_season_only` | `off`, `next_episode` (includes next season), or `next_in_season_only` |
 | `autoplay_countdown_seconds` | `5` | “Up next” wait before starting (0 = instant). **Esc** cancels during countdown |
+| `now_playing_splash` | `true` | Episode summary (show, season/episode, title) before playback starts |
+| `now_playing_splash_seconds` | `1.5` | How long the summary stays visible (0 = skip) |
 | `hw_decode` | `auto` | Pi hardware H.264 decode: `auto`, `on`, or `off` |
 
 ## `ui`
@@ -174,8 +178,83 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
 | `scanlines` | `false` | **Fun tweak** — Semi-transparent CRT scanline overlay |
 | `analog_artifacts` | `false` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
 | `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches) |
+| `safe_zone` | `{ "top": 0, "bottom": 0, "left": 0, "right": 0 }` | CRT overscan inset — see [Safe zone](#safe-zone) |
 
-CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`, `--analog-artifact-rate N`
+CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`
+
+### Safe zone
+
+Analog TVs often **overscan** the picture: the outer ~5–10% of the frame is clipped. Title-safe / action-safe margins keep important UI away from those edges.
+
+When any `safe_zone` margin is greater than zero:
+
+- The **logical framebuffer grows** with margin % (e.g. 5% → 704×528), but the **OS window** is separate: **800×600** by default in windowed mode (`--windowed`), resizable with a locked **4:3** aspect ratio.
+- SDL GPU-scales the logical frame into that window (letterboxed as needed).
+- **Menus, splashes, overlays, and screensaver** always render at native **640×480** (no interpolation) and are composited into the padded frame; border pixels use the **same background color** as that screen.
+- **Video** is **full-bleed on the whole window** during playback (including margin areas). The window does not resize when you start an episode.
+- **Playback HUD** (progress, volume, pause, Up Next) still respects safe-zone inset so controls stay title-safe on CRTs.
+- **Secret test patterns** (`0` / `00` / `000`) fill the **entire extended framebuffer**.
+- **Playback overlays** (progress bar, volume, pause) use the 640×480 layout, composited over video in the UI viewport region.
+- **Playback overlays** (progress, volume, pause, Up Next) inset and scale within the 640×480 frame using the same margin percentages so HUD stays title-safe on CRTs.
+
+Percentages are of the **UI viewport** — width for left/right padding, height for top/bottom. Maximum 25% per edge.
+
+```json
+{
+  "ui": {
+    "safe_zone": 5
+  }
+}
+```
+
+Uniform 5% on all sides. Per-edge control:
+
+```json
+{
+  "ui": {
+    "safe_zone": {
+      "top": 5,
+      "bottom": 8,
+      "left": 5,
+      "right": 5
+    }
+  }
+}
+```
+
+Shorthand keys: `margin` or `percent` (uniform), `vertical`, `horizontal`.
+
+**Offset** — shift the 640×480 UI block within the extended frame when overscan is not symmetric. Pixel values; positive `offset_x` moves right, positive `offset_y` moves down.
+
+```json
+{
+  "ui": {
+    "safe_zone": {
+      "top": 5,
+      "bottom": 5,
+      "left": 5,
+      "right": 5,
+      "offset_x": 0,
+      "offset_y": 12
+    }
+  }
+}
+```
+
+CLI one-run override: `--safe-zone 5` (uniform percent), `--safe-zone-offset 0,12` (pixels).
+
+### In-app calibration
+
+Press **Z** from any browse screen to open the safe zone setup view:
+
+- Full-frame black background with a **white rectangle** and diagonal guides showing where menus will draw.
+- **Enter** toggles **ZOOM** (margin size) vs **POSITION** (pixel offset within the frame).
+- **Arrow keys** adjust the active mode (zoom: vertical/horizontal margins; position: move the inset).
+- **Esc** opens a **Save changes?** prompt (Yes / No). Esc again cancels the prompt and returns to editing.
+
+Values are written to `ui.safe_zone` in your config file when you choose Yes.
+
+Typical CRT starting point: **5%** all sides, or **8% bottom** (where many sets clip hardest).
 
 ### Easter egg: secret test patterns
 

@@ -95,6 +95,7 @@ Useful flags:
 | `--shutdown-collapse` | **Fun tweak** — CRT vertical collapse on quit |
 | `--analog-artifacts` | **Fun tweak** — random glitches on the show browser |
 | `--analog-artifact-rate N` | Glitches per minute with `--analog-artifacts` (default: config or 12) |
+| `--safe-zone PCT` | CRT overscan safe zone — uniform inset % on all sides (0–25) |
 | `--skip-mounts` | Do not mount remote shares from config |
 | `--screensaver` | **Fun tweak** — VHS logo screensaver after idle timeout |
 | `--screensaver-timeout SEC` | Idle seconds before screensaver (overrides config) |

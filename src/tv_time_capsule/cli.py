@@ -13,6 +13,7 @@ from .log import setup_logging
 from .media import discover_shows
 from .mounts import ensure_mounts, mountpoints_from_config
 from .player import detect_ffmpeg, np_frombuffer
+from .safe_zone import parse_safe_zone_offset
 from .web_admin import DeferredAdminBridge, start_admin_if_enabled
 
 
@@ -41,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--windowed",
         action="store_true",
-        help="Run in a window instead of fullscreen (useful for testing)",
+        help="Run in an 800×600 resizable window (4:3) instead of fullscreen",
     )
     parser.add_argument(
         "--force-43",
@@ -76,6 +77,17 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         metavar="N",
         help="Analog glitches per minute when --analog-artifacts is on (default: config or 12)",
+    )
+    parser.add_argument(
+        "--safe-zone",
+        type=float,
+        metavar="PCT",
+        help="CRT overscan safe zone: uniform inset %% on all sides (0-25, default: config)",
+    )
+    parser.add_argument(
+        "--safe-zone-offset",
+        metavar="X,Y",
+        help="Pixel shift of UI within the safe zone (+x right, +y down; default: config)",
     )
     parser.add_argument(
         "--skip-mounts",
@@ -171,6 +183,16 @@ def main(argv: list[str] | None = None) -> None:
     # When the server was started above, do not start again inside the app.
     admin_flag = None if admin_server else (True if args.admin else None)
 
+    safe_zone_offset = None
+    if args.safe_zone_offset:
+        try:
+            ox, oy = args.safe_zone_offset.split(",", 1)
+            safe_zone_offset = parse_safe_zone_offset(
+                {"offset_x": ox.strip(), "offset_y": oy.strip()}
+            )
+        except ValueError:
+            parser.error("--safe-zone-offset expects X,Y (pixels)")
+
     app = TVTimeCapsule(
         media_paths,
         fullscreen=not args.windowed,
@@ -187,6 +209,8 @@ def main(argv: list[str] | None = None) -> None:
         shutdown_collapse=True if args.shutdown_collapse else None,
         analog_artifacts=True if args.analog_artifacts else None,
         analog_artifact_rate=args.analog_artifact_rate,
+        safe_zone=args.safe_zone,
+        safe_zone_offset=safe_zone_offset,
     )
 
     if not app.player_cmd and not app.player:

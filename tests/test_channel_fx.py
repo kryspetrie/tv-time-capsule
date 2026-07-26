@@ -96,6 +96,20 @@ class ChannelFxTests(unittest.TestCase):
         draw_tv_shutdown(self.screen, self.snapshot, 0.9)
         draw_tv_shutdown(self.screen, self.snapshot, 1.0)
 
+    def test_shutdown_draw_centered_in_safe_zone_viewport(self):
+        screen = pygame.Surface((704, 528))
+        snapshot = pygame.Surface((704, 528))
+        snapshot.fill((0, 0, 0))
+        ui = pygame.Surface((640, 480))
+        ui.fill((40, 80, 120))
+        snapshot.blit(ui, (32, 24))
+        draw_tv_shutdown(screen, snapshot, 0.5, viewport=(32, 24, 640, 480))
+        # Collapse band should land inside the UI viewport, not at y=0.
+        band_color = screen.get_at((320, 240))[:3]
+        self.assertNotEqual(band_color, (0, 0, 0))
+        margin_color = screen.get_at((10, 10))[:3]
+        self.assertEqual(margin_color, (0, 0, 0))
+
     def test_shutdown_skipped_when_off(self):
         fx = ChannelChangeFX(shutdown=False)
         with patch("pygame.display.flip") as flip:

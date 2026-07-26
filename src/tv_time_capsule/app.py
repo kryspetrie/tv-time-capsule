@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import warnings
+from contextlib import contextmanager
 
 import pygame
 
@@ -38,6 +39,10 @@ from .config import (
     SCREEN_H,
     SCREEN_W,
     STACK_VISIBLE,
+    WINDOW_DEFAULT_H,
+    WINDOW_DEFAULT_W,
+    WINDOW_MIN_H,
+    WINDOW_MIN_W,
 )
 from .fonts import enable_freetype_fallback, make_font
 from .gamepad import GamepadHandler
@@ -53,6 +58,20 @@ from .player import (
     np_frombuffer,
 )
 from .screensaver import VHS_LOGO_PATH, VHSScreensaver
+from .safe_zone import (
+    SafeZoneMargins,
+    SafeZoneOffset,
+    SafeZoneRect,
+    adjust_margins_uniform,
+    clamp_offset,
+    parse_safe_zone,
+    parse_safe_zone_offset,
+    playback_hud_rect,
+    playback_hud_scale,
+    safe_zone_enabled,
+    safe_zone_frame,
+    safe_zone_to_config,
+)
 from .test_patterns import is_show_list_test_dial, pattern_asset_path
 from .state import (
     clear_resume_ep,
@@ -67,6 +86,18 @@ from .state import (
 )
 from .web_admin import AdminServer, DeferredAdminBridge, start_admin_if_enabled
 
+FOOTER_BAR_H = 34
+NAV_BAR_H = 28
+HUD_PAD = 12
+HUD_TOP_BAR_H = 50
+HUD_SCRUB_H = 8
+HUD_SCRUB_TRACK_H = 32
+HUD_SCRUB_DOT_R = 9
+HUD_VOL_BAR_W = 14
+HUD_VOL_BAR_H = 32
+SAFE_ZONE_MARGIN_STEP = 0.5
+SAFE_ZONE_OFFSET_STEP = 2
+
 
 class TVTimeCapsule:
     SHOW_LIST = 0
@@ -76,6 +107,7 @@ class TVTimeCapsule:
     KEY_CAPTURE = 4
     PLAYING = 5
     CONFIRM_EXIT = 6
+    SAFE_ZONE_EDIT = 7
 
     def __init__(
         self,
@@ -94,6 +126,8 @@ class TVTimeCapsule:
         shutdown_collapse=None,
         analog_artifacts=None,
         analog_artifact_rate=None,
+        safe_zone=None,
+        safe_zone_offset=None,
     ):
         pygame.init()
 
@@ -116,10 +150,13 @@ class TVTimeCapsule:
         self._shutdown_collapse_override = shutdown_collapse
         self._analog_artifacts_override = analog_artifacts
         self._analog_artifact_rate_override = analog_artifact_rate
+        self._safe_zone_override = safe_zone
+        self._safe_zone_offset_override = safe_zone_offset
 
         self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
         self.state = load_state()
         self.config = load_config()
+        self._init_safe_zone_state()
 
         ui_cfg_pre = self.config.get("ui") or {}
         if scanlines is not None:
@@ -127,45 +164,13 @@ class TVTimeCapsule:
         else:
             self.scanlines = bool(ui_cfg_pre.get("scanlines", False))
 
-        # Logical canvas — all UI/video is drawn at this size. SCALED asks SDL
-        # to GPU-scale it to the real window/desktop, which avoids a per-frame
-        # CPU transform.scale up to 4K.
-        self.canvas_w = SCREEN_W
-        self.canvas_h = SCREEN_H
-        self.sw = self.canvas_w
-        self.sh = self.canvas_h
-
-        flags = pygame.SCALED
-        if fullscreen:
-            # SCALED + FULLSCREEN → fullscreen-desktop (no mode set). Passing
-            # the logical size (not the desktop size) is what enables GPU
-            # upscaling; a desktop-sized SCALED surface would still force us
-            # to CPU-scale the canvas ourselves.
-            flags |= pygame.FULLSCREEN
-        try:
-            self.display = pygame.display.set_mode(
-                (self.canvas_w, self.canvas_h), flags, vsync=1
-            )
-        except TypeError:
-            # Older pygame without vsync kwarg
-            self.display = pygame.display.set_mode(
-                (self.canvas_w, self.canvas_h), flags
-            )
-
-        self.real_w, self.real_h = pygame.display.get_window_size()
-        # With a logical SCALED surface, SDL letterboxes to preserve 4:3.
-        # Viewport is identity in logical coords; no CPU pillarboxing needed.
-        self.viewport_w = self.canvas_w
-        self.viewport_h = self.canvas_h
-        self.viewport_x = 0
-        self.viewport_y = 0
-
-        # Draw directly to the display surface. Keep a SRCALPHA offscreen
-        # canvas only for the legacy omxplayer overlay path (Pi), where the
-        # hardware video layer must show through transparent pixels.
+        # Logical canvas (safe-zone padded) is drawn offscreen and scaled to the OS window.
+        self.sw = SCREEN_W
+        self.sh = SCREEN_H
         self._omx_overlay = False
+        self.framebuffer: pygame.Surface | None = None
         self.canvas = None
-        self.screen = self.display
+        self._init_display_window()
 
         pygame.display.set_caption("TV Time Capsule")
         pygame.mouse.set_visible(not fullscreen)
@@ -176,8 +181,8 @@ class TVTimeCapsule:
         omx_cmd = detect_omxplayer() if is_pi() else None
 
         if ffmpeg_path and np_frombuffer is not None:
-            # Embedded FFmpeg playback (preferred)
-            self.player = EmbeddedPlayer(self.canvas_w, self.canvas_h)
+            # Embedded FFmpeg playback (video always native 640×480)
+            self.player = EmbeddedPlayer(SCREEN_W, SCREEN_H)
             self.player.ffmpeg_path = ffmpeg_path
             self.player.ffplay_path = ffplay_path
             self.player_cmd = ffmpeg_path
@@ -185,7 +190,7 @@ class TVTimeCapsule:
         elif omx_cmd:
             # Omxplayer fallback on Pi — transparent overlay canvas
             self._enable_omx_overlay()
-            self.player = EmbeddedPlayer(self.canvas_w, self.canvas_h)
+            self.player = EmbeddedPlayer(SCREEN_W, SCREEN_H)
             self.player.use_omx = True
             self.player.omx_cmd = omx_cmd
             self.player_cmd = omx_cmd
@@ -214,6 +219,13 @@ class TVTimeCapsule:
         pb_cfg = self.config.get("playback") or {}
         self._autoplay_mode = pb_cfg.get("autoplay", "off")
         self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
+        self._now_playing_splash = bool(pb_cfg.get("now_playing_splash", True))
+        try:
+            splash_seconds = float(pb_cfg.get("now_playing_splash_seconds", 1.5))
+        except (TypeError, ValueError):
+            splash_seconds = 1.5
+        splash_seconds = max(0.0, min(30.0, splash_seconds))
+        self._now_playing_splash_ms = int(splash_seconds * 1000)
         self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
         ui_cfg = self.config.get("ui") or {}
         snow = (
@@ -262,6 +274,7 @@ class TVTimeCapsule:
         self._screensaver_timeout_ms = timeout_s * 1000
         self._screensaver = None
         self._screensaver_active = False
+        self._ui_layout_depth = 0
         self._last_activity_ms = 0
         self.running = True
         self.clock = pygame.time.Clock()
@@ -278,6 +291,15 @@ class TVTimeCapsule:
         self.channel_error = ""
         self.channel_error_time = 0
         self._confirm_exit_yes = False
+        self._safe_zone_edit_mode = "zoom"
+        self._safe_zone_save_prompt = False
+        self._safe_zone_save_yes = True
+        self._safe_zone_return_view = self.SHOW_LIST
+        self._safe_zone_backup: tuple[SafeZoneMargins, SafeZoneOffset] | None = None
+        self._sz_edit_margins = SafeZoneMargins()
+        self._sz_edit_offset = SafeZoneOffset()
+        self._pending_canvas_size: tuple[int, int] | None = None
+        self._pending_safe_zone_frame = None
         self._in_channel_tune = False
         self._deferred_splash = None
 
@@ -413,11 +435,11 @@ class TVTimeCapsule:
 
     # ─── Scanline overlay ────────────────────────────────────────────────
 
-    def _make_scanlines(self):
+    def _make_scanlines(self, width: int = SCREEN_W, height: int = SCREEN_H):
         """Create a semi-transparent scanline overlay for CRT effect."""
-        surf = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
-        for y in range(0, SCREEN_H, 3):
-            pygame.draw.line(surf, C.SCANLINE, (0, y), (SCREEN_W, y))
+        surf = pygame.Surface((width, height), pygame.SRCALPHA)
+        for y in range(0, height, 3):
+            pygame.draw.line(surf, C.SCANLINE, (0, y), (width, y))
         return surf
 
     # ─── Duration lookup ─────────────────────────────────────────────────
@@ -490,12 +512,13 @@ class TVTimeCapsule:
             return None
 
     def _blit_fullscreen_asset(self, path) -> bool:
-        """Scale an asset to the full logical canvas (640x480)."""
+        """Scale an asset to the full logical canvas (including safe-zone padding)."""
         img = self._load_image_surface(str(path))
         if img is None:
             return False
-        if img.get_size() != (self.sw, self.sh):
-            img = pygame.transform.scale(img, (self.sw, self.sh))
+        target = (self.canvas_w, self.canvas_h)
+        if img.get_size() != target:
+            img = pygame.transform.scale(img, target)
         self.screen.blit(img, (0, 0))
         return True
 
@@ -524,10 +547,9 @@ class TVTimeCapsule:
     # ─── Display setup ───────────────────────────────────────────────────
 
     def _enable_omx_overlay(self):
-        """Use a transparent offscreen canvas so omxplayer's layer shows through."""
+        """Use a transparent framebuffer so omxplayer's layer shows through."""
         self._omx_overlay = True
-        self.canvas = pygame.Surface((self.canvas_w, self.canvas_h), pygame.SRCALPHA)
-        self.screen = self.canvas
+        self._create_framebuffer()
 
     def _marquee_offset(self, key, text_w, avail_w):
         """Pixel offset for a back-and-forth scroll of overflowing text."""
@@ -580,18 +602,304 @@ class TVTimeCapsule:
         self.screen.set_clip(prev)
 
     def present(self):
-        """Push the logical frame to the display. SCALED handles GPU upscaling."""
-        if self._omx_overlay and self.canvas is not None:
-            # Do not fill black — that would cover the hardware video layer.
-            self.display.blit(self.canvas, (0, 0))
+        """Scale the logical framebuffer to the OS window (letterboxed 4:3)."""
+        if self.framebuffer is None:
+            pygame.display.flip()
+            return
+        src = self.framebuffer
+        dst = self.display
+        dw, dh = dst.get_size()
+        sw, sh = src.get_size()
+        x, y, w, h = self._fit_rect(sw, sh, dw, dh)
+        if not self._omx_overlay:
+            dst.fill(C.BLACK)
+        scaled = src if (w, h) == (sw, sh) else pygame.transform.smoothscale(src, (w, h))
+        dst.blit(scaled, (x, y))
         pygame.display.flip()
+
+    def _parse_safe_zone_sources(self) -> tuple[SafeZoneMargins, SafeZoneOffset]:
+        ui_cfg = self.config.get("ui") or {}
+        raw = ui_cfg.get("safe_zone")
+        if self._safe_zone_override is not None:
+            margins = parse_safe_zone(self._safe_zone_override)
+        else:
+            margins = parse_safe_zone(raw)
+        if self._safe_zone_offset_override is not None:
+            offset = self._safe_zone_offset_override
+        elif isinstance(self._safe_zone_override, dict):
+            offset = parse_safe_zone_offset(self._safe_zone_override)
+        else:
+            offset = parse_safe_zone_offset(raw if isinstance(raw, dict) else None)
+        return margins, offset
+
+    def _init_safe_zone_state(self) -> None:
+        margins, offset = self._parse_safe_zone_sources()
+        self._safe_zone_margins = margins
+        self._safe_zone_offset = offset
+        self._safe_zone_enabled = safe_zone_enabled(margins)
+        frame = safe_zone_frame(margins, offset)
+        self._safe_zone_frame = frame
+        self._safe_ui_rect = frame.ui
+        self.canvas_w = frame.canvas_w
+        self.canvas_h = frame.canvas_h
+
+    def _init_display_window(self) -> None:
+        """Create the OS window (fixed 800×600 when windowed) and logical framebuffer."""
+        if self.fullscreen:
+            try:
+                self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN, vsync=1)
+            except TypeError:
+                self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        else:
+            w, h = self._window_size_43(WINDOW_DEFAULT_W, WINDOW_DEFAULT_H)
+            try:
+                self.display = pygame.display.set_mode((w, h), pygame.RESIZABLE, vsync=1)
+            except TypeError:
+                self.display = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+        self.real_w, self.real_h = self.display.get_size()
+        self._create_framebuffer()
+
+    @staticmethod
+    def _window_size_43(width: int, height: int) -> tuple[int, int]:
+        """Clamp a resize request to 4:3."""
+        width = max(WINDOW_MIN_W, width)
+        height = max(WINDOW_MIN_H, height)
+        if width * 3 > height * 4:
+            width = max(WINDOW_MIN_W, int(height * 4 / 3))
+        elif height * 4 > width * 3:
+            height = max(WINDOW_MIN_H, int(width * 3 / 4))
+        return width, height
+
+    @staticmethod
+    def _fit_rect(
+        src_w: int, src_h: int, dst_w: int, dst_h: int
+    ) -> tuple[int, int, int, int]:
+        """Letterbox *src* into *dst*, preserving aspect ratio."""
+        scale = min(dst_w / src_w, dst_h / src_h)
+        w = max(1, int(src_w * scale))
+        h = max(1, int(src_h * scale))
+        x = (dst_w - w) // 2
+        y = (dst_h - h) // 2
+        return x, y, w, h
+
+    def _create_framebuffer(self) -> None:
+        """Recreate the offscreen logical canvas (safe-zone size)."""
+        flags = pygame.SRCALPHA if self._omx_overlay else 0
+        self.framebuffer = pygame.Surface((self.canvas_w, self.canvas_h), flags)
+        self.screen = self.framebuffer
+        if self._omx_overlay:
+            self.canvas = self.framebuffer
+
+    def _on_window_resize(self, width: int, height: int) -> None:
+        """Handle OS window resize — keep 4:3 aspect."""
+        if self.fullscreen:
+            return
+        w, h = self._window_size_43(width, height)
+        if (w, h) == self.display.get_size():
+            return
+        self.display = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+        self.real_w, self.real_h = w, h
+
+    def _handle_window_event(self, event: pygame.event.Event) -> bool:
+        if event.type == pygame.VIDEORESIZE:
+            self._on_window_resize(event.w, event.h)
+            return True
+        return False
+
+    def _resize_framebuffer(self, width: int, height: int) -> None:
+        """Resize the logical canvas when safe-zone margins change (not the OS window)."""
+        self.canvas_w = width
+        self.canvas_h = height
+        self._create_framebuffer()
+        if self.player:
+            self.player.canvas_w = width
+            self.player.canvas_h = height
+        self._scanline_surf = None
+        if self._screensaver is not None:
+            self._screensaver = None
+
+    def _enter_playback_display(self) -> None:
+        """Keep the current canvas size; video is full-bleed on the whole frame."""
+
+    def _exit_playback_display(self) -> None:
+        """Apply any safe-zone resize deferred during playback."""
+        self._flush_pending_canvas_resize()
+
+    def _apply_safe_zone_frame(self, frame) -> None:
+        """Apply parsed safe-zone geometry and resize the display if needed."""
+        old_size = (self.canvas_w, self.canvas_h)
+        self._safe_zone_frame = frame
+        self._safe_ui_rect = frame.ui
+        self.canvas_w = frame.canvas_w
+        self.canvas_h = frame.canvas_h
+        if (self.canvas_w, self.canvas_h) != old_size:
+            self._resize_framebuffer(self.canvas_w, self.canvas_h)
+
+    def _flush_pending_canvas_resize(self) -> None:
+        """Apply a deferred framebuffer resize (e.g. after playback ends)."""
+        if self._pending_safe_zone_frame is None:
+            return
+        frame = self._pending_safe_zone_frame
+        self._pending_safe_zone_frame = None
+        self._pending_canvas_size = None
+        self._apply_safe_zone_frame(frame)
+
+    def _apply_safe_zone_from_config(self) -> None:
+        margins, offset = self._parse_safe_zone_sources()
+        self._safe_zone_margins = margins
+        self._safe_zone_offset = offset
+        self._safe_zone_enabled = safe_zone_enabled(margins)
+        frame = safe_zone_frame(margins, offset)
+        new_size = (frame.canvas_w, frame.canvas_h)
+        old_size = (self.canvas_w, self.canvas_h)
+
+        if new_size != old_size and self.view == self.PLAYING:
+            self._pending_canvas_size = new_size
+            self._pending_safe_zone_frame = frame
+            return
+
+        self._pending_canvas_size = None
+        self._pending_safe_zone_frame = None
+        if new_size == old_size:
+            self._safe_zone_frame = frame
+            self._safe_ui_rect = frame.ui
+            return
+        self._apply_safe_zone_frame(frame)
+
+    def _safe_zone_for_ui(self) -> bool:
+        """Safe zone applies to menus/UI only — never video playback."""
+        if self.view == self.PLAYING:
+            return False
+        if not self._safe_zone_enabled:
+            return False
+        if self.view == self.SHOW_LIST and self._show_list_test_pattern:
+            return False
+        return True
+
+    def _playback_overlay_layout(self) -> tuple[SafeZoneRect, float]:
+        """Title-safe rect and scale for playback HUD (video is full-bleed)."""
+        rect = playback_hud_rect(
+            self.canvas_w,
+            self.canvas_h,
+            self._safe_zone_margins,
+            self._safe_zone_offset,
+        )
+        scale = playback_hud_scale(rect, self.canvas_w, self.canvas_h)
+        return rect, scale
+
+    def _scale_overlay_surface(self, surf: pygame.Surface, scale: float) -> pygame.Surface:
+        if scale >= 0.999:
+            return surf
+        w, h = surf.get_size()
+        return pygame.transform.smoothscale(
+            surf, (max(1, int(w * scale)), max(1, int(h * scale)))
+        )
+
+    def _blit_overlay_text(
+        self,
+        surf: pygame.Surface,
+        x: int,
+        y: int,
+        *,
+        scale: float = 1.0,
+        alpha: int = 255,
+    ) -> pygame.Surface:
+        """Blit label text, scaled to fit the playback safe inset."""
+        if alpha < 255:
+            surf = surf.copy()
+            surf.set_alpha(alpha)
+        surf = self._scale_overlay_surface(surf, scale)
+        self.screen.blit(surf, (x, y))
+        return surf
+
+    def _truncate_overlay_text(self, text: str, font, color, max_w: int, *, scale: float):
+        if max_w <= 8:
+            return font.render("", True, color)
+        surf = font.render(text, True, color)
+        surf = self._scale_overlay_surface(surf, scale)
+        if surf.get_width() <= max_w:
+            return surf
+        trimmed = text
+        while trimmed and self._scale_overlay_surface(
+            font.render(trimmed + "...", True, color), scale
+        ).get_width() > max_w:
+            trimmed = trimmed[:-1]
+        return self._scale_overlay_surface(
+            font.render((trimmed + "...") if trimmed else "...", True, color), scale
+        )
+
+    def _ui_letterbox_color(self) -> tuple[int, int, int]:
+        """Margin fill matching the active screen so the UI appears inset, not framed."""
+        if self._screensaver_active:
+            return C.BLACK
+        if self.view == self.PLAYING:
+            return C.BLACK
+        return C.BG
+
+    @contextmanager
+    def _ui_layout(
+        self,
+        *,
+        letterbox: bool = True,
+        enabled: bool | None = None,
+        bg: tuple[int, int, int] | None = None,
+    ):
+        """Draw UI at native 640×480, composited into the extended frame (no scaling)."""
+        if enabled is None:
+            use = self._safe_zone_for_ui()
+        else:
+            use = bool(enabled) and self._safe_zone_enabled
+        if not use:
+            yield
+            return
+
+        if self._ui_layout_depth:
+            raise RuntimeError("nested _ui_layout is not supported")
+        self._ui_layout_depth += 1
+
+        ui = self._safe_ui_rect
+        root = self.framebuffer
+        saved_screen = self.screen
+        saved_sw = self.sw
+        saved_sh = self.sh
+        margin_color = bg if bg is not None else self._ui_letterbox_color()
+
+        try:
+            ui_buffer = pygame.Surface((SCREEN_W, SCREEN_H))
+            self.screen = ui_buffer
+            self.sw = SCREEN_W
+            self.sh = SCREEN_H
+            if letterbox:
+                root.fill(margin_color)
+                yield
+                root.blit(ui_buffer, (ui.x, ui.y))
+            else:
+                yield
+                saved_screen.blit(ui_buffer, (ui.x, ui.y))
+        finally:
+            self.screen = saved_screen
+            self.sw = saved_sw
+            self.sh = saved_sh
+            self._ui_layout_depth -= 1
+
+    def _shutdown_viewport(self) -> tuple[int, int, int, int] | None:
+        """UI viewport for shutdown FX when the canvas is larger than 640×480."""
+        sw, sh = self.screen.get_size()
+        if (sw, sh) == (SCREEN_W, SCREEN_H):
+            return None
+        if self._safe_zone_enabled and self._safe_ui_rect is not None:
+            ui = self._safe_ui_rect
+            return (ui.x, ui.y, ui.w, ui.h)
+        return None
 
     def _apply_scanlines(self):
         """Overlay CRT scanlines on the current frame (if enabled)."""
-        if self.scanlines:
-            if self._scanline_surf is None:
-                self._scanline_surf = self._make_scanlines()
-            self.screen.blit(self._scanline_surf, (0, 0))
+        if not self.scanlines:
+            return
+        w, h = self.screen.get_size()
+        if self._scanline_surf is None or self._scanline_surf.get_size() != (w, h):
+            self._scanline_surf = self._make_scanlines(w, h)
+        self.screen.blit(self._scanline_surf, (0, 0))
 
     def _apply_analog_artifacts(self) -> None:
         if self.view == self.SHOW_LIST:
@@ -634,29 +942,48 @@ class TVTimeCapsule:
     ) -> None:
         """Now-playing splash artwork without blocking or snow."""
         self.screen.fill(C.BLACK)
+        rect = SafeZoneRect(0, 0, self.sw, self.sh)
+        scale = min(rect.w / SCREEN_W, rect.h / SCREEN_H)
+        pad = max(6, int(12 * scale))
 
         ep_num = episode["number"]
         ep_name = episode.get("name") or ""
 
-        ch = str(channel)
-        ch_surf = self.font_lg.render(ch, True, C.GREEN)
-        self.screen.blit(ch_surf, (self.sw - ch_surf.get_width() - 40, 30))
+        ch = self._scale_overlay_surface(
+            self.font_lg.render(str(channel), True, C.GREEN), scale
+        )
+        self.screen.blit(ch, (rect.x + rect.w - ch.get_width() - pad, rect.y + pad))
 
         label = f"S-{season:02d} - E-{ep_num:02d}"
-        s = self.font_md.render(label, True, C.WHITE)
-        self.screen.blit(s, s.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 40))
-
+        s = self._scale_overlay_surface(
+            self.font_md.render(label, True, C.WHITE), scale
+        )
+        mid_y = rect.y + rect.h // 2
+        self.screen.blit(
+            s, s.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y - int(40 * scale))
+        )
         if ep_name:
-            n = self.font_md.render(ep_name, True, C.BLUE)
-            self.screen.blit(n, n.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 10))
+            n = self._truncate_overlay_text(
+                ep_name, self.font_md, C.BLUE, rect.w - pad * 2, scale=scale
+            )
+            self.screen.blit(
+                n, n.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y + int(10 * scale))
+            )
 
         if resume_secs and resume_secs > 0:
             mins = int(resume_secs) // 60
             secs = int(resume_secs) % 60
-            sn = self.font_sm.render(f"RESUME  {mins}:{secs:02d}", True, C.GREEN)
+            sub = f"RESUME  {mins}:{secs:02d}"
+            sub_color = C.GREEN
         else:
-            sn = self.font_sm.render(show.upper(), True, C.DIM)
-        self.screen.blit(sn, sn.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 55))
+            sub = show.upper()
+            sub_color = C.DIM
+        sn = self._truncate_overlay_text(
+            sub, self.font_sm, sub_color, rect.w - pad * 2, scale=scale
+        )
+        self.screen.blit(
+            sn, sn.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y + int(55 * scale))
+        )
 
     def _draw_channel_tune_frame(self) -> None:
         """Destination screen drawn under a channel-change snow burst."""
@@ -665,6 +992,8 @@ class TVTimeCapsule:
             self._blit_now_playing_content(*deferred)
         elif self.view == self.CONFIRM_EXIT:
             self.draw_confirm_exit()
+        elif self.view == self.SAFE_ZONE_EDIT:
+            self.draw_safe_zone_editor()
         elif self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
             self.draw_key_config(capturing=(self.view == self.KEY_CAPTURE))
         else:
@@ -680,16 +1009,25 @@ class TVTimeCapsule:
         start = pygame.time.get_ticks()
         while pygame.time.get_ticks() - start < FX_DURATION_MS:
             pygame.event.pump()
-            self._draw_channel_tune_frame()
+            if self.view == self.SAFE_ZONE_EDIT:
+                self._draw_channel_tune_frame()
+            else:
+                with self._ui_layout(letterbox=True):
+                    self._draw_channel_tune_frame()
             self._channel_fx.draw(self.screen)
-            self.draw_channel_overlay()
-            self._draw_rescan_banner()
+            if self.view == self.SAFE_ZONE_EDIT:
+                self.draw_channel_overlay()
+                self._draw_rescan_banner()
+            else:
+                with self._ui_layout(letterbox=True):
+                    self.draw_channel_overlay()
+                    self._draw_rescan_banner()
             self.present()
             self.clock.tick(60)
 
     def _draw_footer(self, *hints):
         """Draw a consistent footer bar with spaced hint segments."""
-        bar_h = 34
+        bar_h = FOOTER_BAR_H
         fy = self.sh - bar_h
         gap = 28
         pygame.draw.rect(self.screen, C.BG_FOOTER, (0, fy, self.sw, bar_h))
@@ -765,10 +1103,29 @@ class TVTimeCapsule:
             pygame.draw.line(self.screen, (25, 40, 70), (0, y), (self.sw, y), 1)
         return nav_h
 
+    def _show_browser_layout(self, header_h: int):
+        """Vertical layout for the cable-TV show browser."""
+        nav_h = NAV_BAR_H
+        footer_h = FOOTER_BAR_H
+        up_y = header_h
+        down_y = self.sh - footer_h - nav_h
+        content_y = up_y + nav_h + 4
+        content_bottom = down_y
+        content_h = max(40, content_bottom - content_y)
+        return {
+            "nav_h": nav_h,
+            "footer_h": footer_h,
+            "up_y": up_y,
+            "down_y": down_y,
+            "content_y": content_y,
+            "content_bottom": content_bottom,
+            "content_h": content_h,
+        }
+
     def _stack_browser_layout(self):
         """Shared vertical layout for season/episode stack browsers."""
-        nav_h = 28
-        footer_h = 34
+        nav_h = NAV_BAR_H
+        footer_h = FOOTER_BAR_H
         header_h = 48
         up_y = header_h
         down_y = self.sh - footer_h - nav_h
@@ -928,12 +1285,13 @@ class TVTimeCapsule:
     # ─── Main draw dispatch ──────────────────────────────────────────────
 
     def draw(self):
-        self._draw_browse_content()
+        with self._ui_layout(letterbox=True):
+            self._draw_browse_content()
+            self.draw_channel_overlay()
+            self._draw_rescan_banner()
+            if self.view == self.SHOW_LIST:
+                self._apply_analog_artifacts()
         self._apply_channel_fx()
-        self.draw_channel_overlay()
-        self._draw_rescan_banner()
-        if self.view == self.SHOW_LIST:
-            self._apply_analog_artifacts()
 
     # ─── Channel overlay ─────────────────────────────────────────────────
 
@@ -1052,10 +1410,15 @@ class TVTimeCapsule:
 
         # ── Header ──
         header_h = self._draw_header(show_name.upper(), ch_num=ch_num)
+        layout = self._show_browser_layout(header_h)
+        nav_h = layout["nav_h"]
+        up_y = layout["up_y"]
+        content_y = layout["content_y"]
+        content_bottom = layout["content_bottom"]
+        content_h = layout["content_h"]
+        down_y = layout["down_y"]
 
         # ── Up navigation bar (full width) ──
-        nav_h = 28
-        up_y = header_h
         if idx > 0:
             up_name = shows[idx - 1].upper()
             pygame.draw.rect(self.screen, C.BG_CARD, (0, up_y, self.sw, nav_h))
@@ -1065,16 +1428,7 @@ class TVTimeCapsule:
             pygame.draw.rect(self.screen, (14, 20, 35), (0, up_y, self.sw, nav_h))
         pygame.draw.line(self.screen, (25, 40, 70), (0, up_y + nav_h), (self.sw, up_y + nav_h), 1)
 
-        # ── Content area ──
-        footer_h = 30
-        content_y = up_y + nav_h + 4
-        content_bottom = self.sh - footer_h - nav_h - 4
-        content_h = content_bottom - content_y
-        if content_h < 40:
-            content_h = 40
-
         # ── Down navigation bar (full width) ──
-        down_y = content_bottom
         if idx < len(shows) - 1:
             down_name = shows[idx + 1].upper()
             pygame.draw.rect(self.screen, C.BG_CARD, (0, down_y, self.sw, nav_h))
@@ -1404,10 +1758,13 @@ class TVTimeCapsule:
     def draw_playback(self):
         """Render video frame with overlays during playback.
 
-        Embedded mode: video frame fills the canvas, overlays on top.
-        Omxplayer mode: video renders on hardware layer — we draw
-        transparent overlays only (no black fill).
+        Video is full-bleed on the whole canvas; HUD alone respects safe-zone inset.
+        Omxplayer mode: video renders on hardware layer — overlays only on canvas.
         """
+        self._draw_playback_content()
+
+    def _draw_playback_content(self):
+        cw, ch = self.canvas_w, self.canvas_h
         if self.player and self.player.use_omx:
             # omxplayer renders on its own hardware layer — don't fill black
             pass
@@ -1417,18 +1774,24 @@ class TVTimeCapsule:
         if self.player:
             frame = self.player.get_frame()
             if frame:
-                # FFmpeg already scales/pads to canvas size — blit as-is.
-                if frame.get_size() == (self.sw, self.sh):
+                # FFmpeg scales/pads to the full canvas — blit edge to edge.
+                if frame.get_size() == (cw, ch):
                     self.screen.blit(frame, (0, 0))
                 else:
-                    scaled = pygame.transform.scale(frame, (self.sw, self.sh))
+                    scaled = pygame.transform.scale(frame, (cw, ch))
                     self.screen.blit(scaled, (0, 0))
             elif not self.player.use_omx:
-                # No frame yet — show loading indicator
-                t = self.font_md.render("Loading...", True, C.WHITE)
-                self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+                rect, scale = self._playback_overlay_layout()
+                t = self._scale_overlay_surface(
+                    self.font_md.render("Loading...", True, C.WHITE), scale
+                )
+                self.screen.blit(
+                    t,
+                    t.get_rect(
+                        center=(rect.x + rect.w // 2, rect.y + rect.h // 2),
+                    ),
+                )
 
-        # Draw overlays on top of video
         self.draw_progress_overlay()
         self.draw_volume_overlay()
         self.draw_pause_overlay()
@@ -1440,7 +1803,7 @@ class TVTimeCapsule:
     # ─── Progress overlay (during playback) ─────────────────────────────────
 
     def draw_progress_overlay(self):
-        """Progress bar overlay — top info bar + bottom scrub line.
+        """Progress bar overlay — top season/episode bar, optional bottom title bar, scrub line.
         Green color scheme like a real CRT TV."""
         if not self.player:
             return
@@ -1463,47 +1826,67 @@ class TVTimeCapsule:
         progress = self.player.progress()
         time_str = f"{self.player.format_time(self.player.time_pos)} / {self.player.format_time(self.player.duration)}"
 
-        # Top bar: show/episode info + time
-        bar_h = 44
-        bar_surf = pygame.Surface((self.sw, bar_h), pygame.SRCALPHA)
+        rect, scale = self._playback_overlay_layout()
+        pad = HUD_PAD
+        top_bar_h = HUD_TOP_BAR_H
+
+        bar_surf = pygame.Surface((rect.w, top_bar_h), pygame.SRCALPHA)
         bar_surf.fill((0, 10, 5, min(200, fade)))
-        self.screen.blit(bar_surf, (0, 0))
+        self.screen.blit(bar_surf, (rect.x, rect.y))
 
         ep = self.playing_episode or {}
         ep_num = ep.get('number', 0)
         ep_name = ep.get('name') or ''
         label = f"S-{self.playing_season or 1:02d} - E-{ep_num:02d}"
-        if ep_name:
-            label += f"  {ep_name}"
-        lt = self.font_sm.render(label, True, C.GREEN)
-        lt.set_alpha(fade)
-        self.screen.blit(lt, (16, (bar_h - lt.get_height()) // 2))
 
-        rt = self.font_sm.render(time_str, True, C.GREEN)
+        rt = self._scale_overlay_surface(
+            self.font_md.render(time_str, True, C.GREEN), scale
+        )
         rt.set_alpha(fade)
-        self.screen.blit(rt, (self.sw - rt.get_width() - 16, (bar_h - rt.get_height()) // 2))
+        rt_x = rect.x + rect.w - rt.get_width() - pad
+        rt_y = rect.y + (top_bar_h - rt.get_height()) // 2
+        self.screen.blit(rt, (rt_x, rt_y))
 
-        # Bottom scrub bar
-        bar_y = self.sh - 28
-        bar_w = self.sw - 40
-        bar_x = 20
-        bar_h = 6
+        label_max_w = max(20, rt_x - (rect.x + pad) - 8)
+        lt = self._truncate_overlay_text(label, self.font_md, C.GREEN, label_max_w, scale=scale)
+        lt.set_alpha(fade)
+        self.screen.blit(lt, (rect.x + pad, rect.y + (top_bar_h - lt.get_height()) // 2))
 
-        # Track background
-        track = pygame.Surface((bar_w, bar_h), pygame.SRCALPHA)
+        scrub_h = HUD_SCRUB_H
+        scrub_track_h = HUD_SCRUB_TRACK_H
+        bottom_bar_h = HUD_TOP_BAR_H if ep_name else 0
+        scrub_y = rect.y + rect.h - scrub_track_h
+
+        if ep_name:
+            bottom_bar_y = scrub_y - bottom_bar_h
+            bottom_bar = pygame.Surface((rect.w, bottom_bar_h), pygame.SRCALPHA)
+            bottom_bar.fill((0, 10, 5, min(200, fade)))
+            self.screen.blit(bottom_bar, (rect.x, bottom_bar_y))
+
+            name_surf = self._truncate_overlay_text(
+                ep_name, self.font_md, C.GREEN, rect.w - pad * 2, scale=scale
+            )
+            name_surf.set_alpha(fade)
+            self.screen.blit(
+                name_surf,
+                (rect.x + pad, bottom_bar_y + (bottom_bar_h - name_surf.get_height()) // 2),
+            )
+
+        bar_w = rect.w - pad * 2
+        bar_x = rect.x + pad
+
+        track = pygame.Surface((bar_w, scrub_h), pygame.SRCALPHA)
         track.fill((20, 60, 35, min(220, fade)))
-        self.screen.blit(track, (bar_x, bar_y))
+        self.screen.blit(track, (bar_x, scrub_y + (scrub_track_h - scrub_h) // 2))
 
-        # Filled progress
         fill_w = max(1, int(bar_w * progress))
-        fill = pygame.Surface((fill_w, bar_h), pygame.SRCALPHA)
+        fill = pygame.Surface((fill_w, scrub_h), pygame.SRCALPHA)
         fill.fill((*C.GREEN[:3], min(255, fade)))
-        self.screen.blit(fill, (bar_x, bar_y))
+        self.screen.blit(fill, (bar_x, scrub_y + (scrub_track_h - scrub_h) // 2))
 
-        # Playhead dot
         dot_x = bar_x + fill_w
-        dot_y = bar_y + bar_h // 2
-        dot_r = 7
+        dot_y = scrub_y + scrub_track_h // 2
+        dot_r = HUD_SCRUB_DOT_R
         dot_surf = pygame.Surface((dot_r * 2, dot_r * 2), pygame.SRCALPHA)
         pygame.draw.circle(dot_surf, (*C.BRIGHT, min(255, fade)), (dot_r, dot_r), dot_r)
         self.screen.blit(dot_surf, (dot_x - dot_r, dot_y - dot_r))
@@ -1511,7 +1894,7 @@ class TVTimeCapsule:
     # ─── Volume overlay ───────────────────────────────────────────────────
 
     def draw_volume_overlay(self):
-        """Simple retro volume bar — upper-right corner, no background, no fade."""
+        """Simple retro volume bar — upper-right, below the metadata bar."""
         if not self.player:
             return
 
@@ -1522,19 +1905,23 @@ class TVTimeCapsule:
             return
 
         vol = min(self.player.volume, 100)
+        rect, scale = self._playback_overlay_layout()
+        pad = HUD_PAD
+        top_bar_h = HUD_TOP_BAR_H
 
-        # "VOLUME [||||||||||]" — larger, upper-right corner
-        label = self.font_md.render("VOLUME", True, C.GREEN)
+        label = self._scale_overlay_surface(
+            self.font_md.render("VOLUME", True, C.GREEN), scale
+        )
         n_bars = 10
-        bar_w = 12
-        bar_h = 28
-        bar_gap = 3
+        bar_w = HUD_VOL_BAR_W
+        bar_h = HUD_VOL_BAR_H
+        bar_gap = 4
         filled = int(n_bars * vol / 100)
 
         total_bar_w = n_bars * bar_w + (n_bars - 1) * bar_gap
         total_w = label.get_width() + 16 + total_bar_w
-        x = self.sw - total_w - 16
-        y = 16
+        x = rect.x + rect.w - total_w - pad
+        y = rect.y + top_bar_h + pad
 
         self.screen.blit(label, (x, y + (bar_h - label.get_height()) // 2))
 
@@ -1551,9 +1938,13 @@ class TVTimeCapsule:
         if not self.player or not self.player.paused:
             return
 
-        # Static PAUSED text
-        txt = self.font_lg.render("PAUSED", True, C.GREEN)
-        self.screen.blit(txt, txt.get_rect(centerx=self.sw // 2, centery=self.sh // 2))
+        rect, scale = self._playback_overlay_layout()
+        txt = self._scale_overlay_surface(
+            self.font_lg.render("PAUSED", True, C.GREEN), scale
+        )
+        cx = rect.x + rect.w // 2
+        cy = rect.y + rect.h // 2
+        self.screen.blit(txt, txt.get_rect(center=(cx, cy)))
 
     # ─── Splash screen ────────────────────────────────────────────────────
 
@@ -1578,6 +1969,25 @@ class TVTimeCapsule:
                     y += max(lt.get_height(), dt.get_height()) + 4
         return y
 
+    def _splash_layout(self, lines, section_gap=20):
+        """Vertical layout for the controls splash (uses current self.sh / self.sw)."""
+        footer_hint_y = self.sh - 18
+        divider_y = self.sh - 36
+        content_region_top = 62
+        content_region_bottom = divider_y - 10
+        min_top_pad = 24
+        help_height = self._splash_help_content_height(lines, section_gap)
+        slack = content_region_bottom - content_region_top - help_height
+        y_start = content_region_top + max(min_top_pad, slack // 2)
+        if y_start + help_height > content_region_bottom:
+            y_start = max(content_region_top, content_region_bottom - help_height)
+        return {
+            "footer_hint_y": footer_hint_y,
+            "divider_y": divider_y,
+            "content_region_bottom": content_region_bottom,
+            "y_start": y_start,
+        }
+
     def draw_splash(self):
         """Show a 10-second controls splash screen. Dismissable by any key."""
         start = pygame.time.get_ticks()
@@ -1592,6 +2002,7 @@ class TVTimeCapsule:
             ("go back", f"{key_display_name(km.get('left', DEFAULT_KEYMAP['left']))} or {key_display_name(km.get('back', DEFAULT_KEYMAP['back']))}"),
             ("reset watch status", f"tap {key_display_name(km.get('reset', DEFAULT_KEYMAP['reset']))}  |  hold to rescan"),
             ("rebind keys", "Tab"),
+            ("safe zone setup", "Z"),
             ("CHANNELS", None),
             ("jump to channel", "type any number  (auto-enters after 1.5s)"),
             ("DURING PLAYBACK", None),
@@ -1608,21 +2019,12 @@ class TVTimeCapsule:
                 ("select / back", "A / B  (or Start / Back)"),
             )
 
-        footer_hint_y = self.sh - 18
-        divider_y = self.sh - 36
-        content_region_top = 62
-        content_region_bottom = divider_y - 10
         section_gap = 20
-        min_top_pad = 24
-
-        help_height = self._splash_help_content_height(lines, section_gap)
-        slack = content_region_bottom - content_region_top - help_height
-        y_start = content_region_top + max(min_top_pad, slack // 2)
-        if y_start + help_height > content_region_bottom:
-            y_start = max(content_region_top, content_region_bottom - help_height)
 
         while self.running:
             for event in pygame.event.get():
+                if self._handle_window_event(event):
+                    continue
                 if event.type == pygame.QUIT:
                     self.running = False
                     return
@@ -1635,59 +2037,66 @@ class TVTimeCapsule:
 
             remaining = max(0, (duration - elapsed) // 1000)
 
-            self.screen.fill(C.BG)
+            with self._ui_layout(letterbox=True):
+                splash = self._splash_layout(lines, section_gap)
+                footer_hint_y = splash["footer_hint_y"]
+                divider_y = splash["divider_y"]
+                content_region_bottom = splash["content_region_bottom"]
+                y_start = splash["y_start"]
 
-            # Title
-            title = self.font_lg.render("TV TIME CAPSULE", True, C.BRIGHT)
-            self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=28))
+                self.screen.fill(C.BG)
 
-            # Divider under title
-            pygame.draw.line(self.screen, C.BLUE, (40, 56), (self.sw - 40, 56), 1)
+                # Title
+                title = self.font_lg.render("TV TIME CAPSULE", True, C.BRIGHT)
+                self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=28))
 
-            # Control lines — vertically centered in the region below the title
-            y = y_start
-            content_max_y = content_region_bottom
-            first_section = True
-            for label, detail in lines:
-                if y >= content_max_y:
-                    break
-                if detail is None:
-                    if not first_section:
-                        y += section_gap
-                    first_section = False
-                    hdr = self.font_sm.render(label, True, C.CYAN)
-                    if y + hdr.get_height() > content_max_y:
+                # Divider under title
+                pygame.draw.line(self.screen, C.BLUE, (40, 56), (self.sw - 40, 56), 1)
+
+                # Control lines — vertically centered in the region below the title
+                y = y_start
+                content_max_y = content_region_bottom
+                first_section = True
+                for label, detail in lines:
+                    if y >= content_max_y:
                         break
-                    self.screen.blit(hdr, (50, y))
-                    y += hdr.get_height() + 6
-                else:
-                    lt = self.font_sm.render(label, True, C.WHITE)
-                    dt = self.font_sm.render(detail, True, C.GREEN)
-                    row_h = max(lt.get_height(), dt.get_height()) + 4
-                    if y + row_h > content_max_y:
-                        break
-                    left_x = 70
-                    right_x = self.sw - dt.get_width() - 70
-                    if right_x < left_x + lt.get_width() + 20:
-                        self.screen.blit(lt, (left_x, y))
-                        y += lt.get_height() + 3
-                        if y + dt.get_height() > content_max_y:
+                    if detail is None:
+                        if not first_section:
+                            y += section_gap
+                        first_section = False
+                        hdr = self.font_sm.render(label, True, C.CYAN)
+                        if y + hdr.get_height() > content_max_y:
                             break
-                        self.screen.blit(dt, (max(20, self.sw - dt.get_width() - 70), y))
-                        y += dt.get_height() + 3
+                        self.screen.blit(hdr, (50, y))
+                        y += hdr.get_height() + 6
                     else:
-                        self.screen.blit(lt, (left_x, y))
-                        self.screen.blit(dt, (right_x, y))
-                        y += row_h
+                        lt = self.font_sm.render(label, True, C.WHITE)
+                        dt = self.font_sm.render(detail, True, C.GREEN)
+                        row_h = max(lt.get_height(), dt.get_height()) + 4
+                        if y + row_h > content_max_y:
+                            break
+                        left_x = 70
+                        right_x = self.sw - dt.get_width() - 70
+                        if right_x < left_x + lt.get_width() + 20:
+                            self.screen.blit(lt, (left_x, y))
+                            y += lt.get_height() + 3
+                            if y + dt.get_height() > content_max_y:
+                                break
+                            self.screen.blit(dt, (max(20, self.sw - dt.get_width() - 70), y))
+                            y += dt.get_height() + 3
+                        else:
+                            self.screen.blit(lt, (left_x, y))
+                            self.screen.blit(dt, (right_x, y))
+                            y += row_h
 
-            # Divider above footer — below content, not through it
-            pygame.draw.line(self.screen, C.BLUE, (40, divider_y), (self.sw - 40, divider_y), 1)
+                # Divider above footer — below content, not through it
+                pygame.draw.line(self.screen, C.BLUE, (40, divider_y), (self.sw - 40, divider_y), 1)
 
-            # Countdown + dismiss hint
-            hint = self.font_sm.render(f"Press any key to continue...  {remaining}s", True, C.DIM)
-            self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=footer_hint_y))
+                # Countdown + dismiss hint
+                hint = self.font_sm.render(f"Press any key to continue...  {remaining}s", True, C.DIM)
+                self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=footer_hint_y))
 
-            self._apply_scanlines()
+                self._apply_scanlines()
             self.present()
             self.clock.tick(15)
 
@@ -1695,13 +2104,18 @@ class TVTimeCapsule:
 
     def draw_now_playing(self, show, season, episode, channel, resume_secs=None):
         """Splash screen before video plays. Green accent."""
-        self._blit_now_playing_content(
-            show, season, episode, channel, resume_secs=resume_secs
-        )
+        if not self._now_playing_splash or self._now_playing_splash_ms <= 0:
+            return
+
+        on_extended = (self.canvas_w, self.canvas_h) != (SCREEN_W, SCREEN_H)
+        with self._ui_layout(letterbox=True, enabled=on_extended):
+            self._blit_now_playing_content(
+                show, season, episode, channel, resume_secs=resume_secs
+            )
         self.present()
         # Pump/clear events while waiting so held keys (and key-repeat KEYDOWNs)
         # do not pile up and immediately pause/seek when playback begins.
-        deadline = pygame.time.get_ticks() + 1500
+        deadline = pygame.time.get_ticks() + self._now_playing_splash_ms
         while pygame.time.get_ticks() < deadline:
             pygame.event.clear()
             self.clock.tick(30)
@@ -1750,75 +2164,76 @@ class TVTimeCapsule:
 
     def draw_confirm_exit(self):
         """'Are you sure?' exit confirmation dialog."""
-        self.screen.fill(C.BG)
+        with self._ui_layout(letterbox=True):
+            self.screen.fill(C.BG)
 
-        # Dim overlay
-        overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 160))
-        self.screen.blit(overlay, (0, 0))
+            # Dim overlay
+            overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 160))
+            self.screen.blit(overlay, (0, 0))
 
-        # Dialog box
-        box_w = 400
-        box_h = 160
-        box_x = (self.sw - box_w) // 2
-        box_y = (self.sh - box_h) // 2
+            # Dialog box
+            box_w = 400
+            box_h = 160
+            box_x = (self.sw - box_w) // 2
+            box_y = (self.sh - box_h) // 2
 
-        pygame.draw.rect(self.screen, C.BG_CARD, (box_x, box_y, box_w, box_h), border_radius=10)
-        pygame.draw.rect(self.screen, C.BLUE, (box_x, box_y, box_w, box_h), 2, border_radius=10)
+            pygame.draw.rect(self.screen, C.BG_CARD, (box_x, box_y, box_w, box_h), border_radius=10)
+            pygame.draw.rect(self.screen, C.BLUE, (box_x, box_y, box_w, box_h), 2, border_radius=10)
 
-        # Title
-        title = self.font_md.render("Quit?", True, C.BRIGHT)
-        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=box_y + 40))
+            # Title
+            title = self.font_md.render("Quit?", True, C.BRIGHT)
+            self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=box_y + 40))
 
-        # Buttons — simple Yes / No
-        btn_w = 100
-        btn_h = 44
-        btn_y = box_y + 95
-        gap = 40
-        total_btn_w = btn_w * 2 + gap
-        btn_start_x = box_x + (box_w - total_btn_w) // 2
+            # Buttons — simple Yes / No
+            btn_w = 100
+            btn_h = 44
+            btn_y = box_y + 95
+            gap = 40
+            total_btn_w = btn_w * 2 + gap
+            btn_start_x = box_x + (box_w - total_btn_w) // 2
 
-        # Yes button
-        yes_x = btn_start_x
-        yes_rect = pygame.Rect(yes_x, btn_y, btn_w, btn_h)
-        yes_sel = self._confirm_exit_yes
-        pygame.draw.rect(
-            self.screen,
-            C.BG_CARD_SEL if yes_sel else C.BG_CARD,
-            yes_rect,
-            border_radius=6,
-        )
-        pygame.draw.rect(
-            self.screen,
-            C.CYAN if yes_sel else C.DIM,
-            yes_rect,
-            2,
-            border_radius=6,
-        )
-        yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else C.DIM)
-        self.screen.blit(yes_txt, yes_txt.get_rect(center=yes_rect.center))
+            # Yes button
+            yes_x = btn_start_x
+            yes_rect = pygame.Rect(yes_x, btn_y, btn_w, btn_h)
+            yes_sel = self._confirm_exit_yes
+            pygame.draw.rect(
+                self.screen,
+                C.BG_CARD_SEL if yes_sel else C.BG_CARD,
+                yes_rect,
+                border_radius=6,
+            )
+            pygame.draw.rect(
+                self.screen,
+                C.CYAN if yes_sel else C.DIM,
+                yes_rect,
+                2,
+                border_radius=6,
+            )
+            yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else C.DIM)
+            self.screen.blit(yes_txt, yes_txt.get_rect(center=yes_rect.center))
 
-        # No button
-        no_x = btn_start_x + btn_w + gap
-        no_rect = pygame.Rect(no_x, btn_y, btn_w, btn_h)
-        no_sel = not self._confirm_exit_yes
-        pygame.draw.rect(
-            self.screen,
-            C.BG_CARD_SEL if no_sel else C.BG_CARD,
-            no_rect,
-            border_radius=6,
-        )
-        pygame.draw.rect(
-            self.screen,
-            C.CYAN if no_sel else C.DIM,
-            no_rect,
-            2,
-            border_radius=6,
-        )
-        no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else C.DIM)
-        self.screen.blit(no_txt, no_txt.get_rect(center=no_rect.center))
+            # No button
+            no_x = btn_start_x + btn_w + gap
+            no_rect = pygame.Rect(no_x, btn_y, btn_w, btn_h)
+            no_sel = not self._confirm_exit_yes
+            pygame.draw.rect(
+                self.screen,
+                C.BG_CARD_SEL if no_sel else C.BG_CARD,
+                no_rect,
+                border_radius=6,
+            )
+            pygame.draw.rect(
+                self.screen,
+                C.CYAN if no_sel else C.DIM,
+                no_rect,
+                2,
+                border_radius=6,
+            )
+            no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else C.DIM)
+            self.screen.blit(no_txt, no_txt.get_rect(center=no_rect.center))
 
-        self._apply_scanlines()
+            self._apply_scanlines()
 
     def _set_confirm_exit_choice(self, yes: bool) -> None:
         self._confirm_exit_yes = bool(yes)
@@ -1840,65 +2255,307 @@ class TVTimeCapsule:
         elif action == "back":
             self.view = self.SHOW_LIST
 
+    # ─── Safe zone calibration ───────────────────────────────────────────
+
+    def enter_safe_zone_editor(self) -> None:
+        self._safe_zone_return_view = self.view
+        self._safe_zone_backup = (self._safe_zone_margins, self._safe_zone_offset)
+        self._sz_edit_margins = self._safe_zone_margins
+        self._sz_edit_offset = self._safe_zone_offset
+        self._safe_zone_edit_mode = "zoom"
+        self._safe_zone_save_prompt = False
+        self._safe_zone_save_yes = True
+        self.view = self.SAFE_ZONE_EDIT
+
+    def _apply_sz_draft_to_runtime(self) -> None:
+        self._safe_zone_margins = self._sz_edit_margins
+        self._safe_zone_offset = self._sz_edit_offset
+        self._safe_zone_enabled = safe_zone_enabled(self._sz_edit_margins)
+        frame = safe_zone_frame(self._sz_edit_margins, self._sz_edit_offset)
+        self._pending_canvas_size = None
+        self._pending_safe_zone_frame = None
+        self._apply_safe_zone_frame(frame)
+
+    def _restore_safe_zone_backup(self) -> None:
+        if self._safe_zone_backup is None:
+            self._apply_safe_zone_from_config()
+            return
+        margins, offset = self._safe_zone_backup
+        self._sz_edit_margins = margins
+        self._sz_edit_offset = offset
+        self._apply_sz_draft_to_runtime()
+
+    def _commit_safe_zone_edit(self) -> None:
+        ui_cfg = dict(self.config.get("ui") or {})
+        sz = safe_zone_to_config(self._sz_edit_margins, self._sz_edit_offset)
+        sz["offset_x"] = self._sz_edit_offset.x
+        sz["offset_y"] = self._sz_edit_offset.y
+        ui_cfg["safe_zone"] = sz
+        self.config["ui"] = ui_cfg
+        save_config(self.config)
+        self._apply_sz_draft_to_runtime()
+
+    def exit_safe_zone_editor(self, *, save: bool) -> None:
+        if save:
+            self._commit_safe_zone_edit()
+        else:
+            self._restore_safe_zone_backup()
+        self._safe_zone_backup = None
+        self._safe_zone_save_prompt = False
+        self.view = self._safe_zone_return_view
+
+    def _toggle_safe_zone_edit_mode(self) -> None:
+        self._safe_zone_edit_mode = (
+            "position" if self._safe_zone_edit_mode == "zoom" else "zoom"
+        )
+
+    def _adjust_safe_zone_edit(self, direction: str) -> None:
+        if self._safe_zone_edit_mode == "position":
+            ox, oy = self._sz_edit_offset.x, self._sz_edit_offset.y
+            step = SAFE_ZONE_OFFSET_STEP
+            if direction == "left":
+                ox -= step
+            elif direction == "right":
+                ox += step
+            elif direction == "up":
+                oy -= step
+            elif direction == "down":
+                oy += step
+            self._sz_edit_offset = clamp_offset(SafeZoneOffset(ox, oy))
+        else:
+            step = SAFE_ZONE_MARGIN_STEP
+            m = self._sz_edit_margins
+            if direction == "up":
+                m = adjust_margins_uniform(m, vertical=-step)
+            elif direction == "down":
+                m = adjust_margins_uniform(m, vertical=step)
+            elif direction == "left":
+                m = adjust_margins_uniform(m, horizontal=-step)
+            elif direction == "right":
+                m = adjust_margins_uniform(m, horizontal=step)
+            self._sz_edit_margins = m
+        self._apply_sz_draft_to_runtime()
+
+    def _process_safe_zone_save_action(self, action: str) -> None:
+        if action in ("left", "up"):
+            self._safe_zone_save_yes = True
+        elif action in ("right", "down"):
+            self._safe_zone_save_yes = False
+        elif action == "select":
+            self.exit_safe_zone_editor(save=self._safe_zone_save_yes)
+        elif action == "back":
+            self._safe_zone_save_prompt = False
+
+    def _process_safe_zone_edit_action(self, action: str) -> None:
+        if self._safe_zone_save_prompt:
+            self._process_safe_zone_save_action(action)
+            return
+        if action == "select":
+            self._toggle_safe_zone_edit_mode()
+        elif action == "back":
+            self._safe_zone_save_prompt = True
+            self._safe_zone_save_yes = True
+        elif action in ("up", "down", "left", "right"):
+            self._adjust_safe_zone_edit(action)
+
+    def draw_safe_zone_editor(self) -> None:
+        """Full-frame safe zone preview — white inset box with diagonal guides."""
+        surface = self.screen
+        cw, ch = self.canvas_w, self.canvas_h
+        surface.fill(C.BLACK)
+
+        frame = safe_zone_frame(self._sz_edit_margins, self._sz_edit_offset)
+        ui = frame.ui
+
+        safe_rect = pygame.Rect(ui.x, ui.y, ui.w, ui.h)
+        pygame.draw.rect(surface, C.WHITE, safe_rect)
+        pygame.draw.line(
+            surface, C.BLACK, safe_rect.topleft, safe_rect.bottomright, 2
+        )
+        pygame.draw.line(
+            surface, C.BLACK, safe_rect.topright, safe_rect.bottomleft, 2
+        )
+        pygame.draw.rect(surface, C.DIM, (0, 0, cw, ch), 1)
+
+        zoom_active = self._safe_zone_edit_mode == "zoom"
+        pos_active = not zoom_active
+        mode_y = 24
+        zoom_color = C.GREEN if zoom_active else C.DIM
+        pos_color = C.GREEN if pos_active else C.DIM
+        zoom_label = self.font_md.render("ZOOM", True, zoom_color)
+        pos_label = self.font_md.render("POSITION", True, pos_color)
+        gap = 24
+        total_w = zoom_label.get_width() + gap + pos_label.get_width()
+        start_x = (cw - total_w) // 2
+        surface.blit(zoom_label, (start_x, mode_y))
+        surface.blit(pos_label, (start_x + zoom_label.get_width() + gap, mode_y))
+
+        m = self._sz_edit_margins
+        o = self._sz_edit_offset
+        stats = (
+            f"T{m.top:.1f}% B{m.bottom:.1f}% L{m.left:.1f}% R{m.right:.1f}%"
+            f"   X{o.x} Y{o.y}"
+        )
+        stats_surf = self.font_sm.render(stats, True, C.CYAN)
+        surface.blit(stats_surf, stats_surf.get_rect(centerx=cw // 2, top=52))
+
+        if self._safe_zone_save_prompt:
+            hint = self.font_sm.render(
+                "Save changes?  \u2190 Yes   \u2192 No   Enter confirm   Esc cancel",
+                True,
+                C.DIM,
+            )
+        elif zoom_active:
+            hint = self.font_sm.render(
+                "ZOOM: \u2191\u2193 vertical margins   \u2190\u2192 horizontal"
+                "   Enter: position mode   Esc: save",
+                True,
+                C.DIM,
+            )
+        else:
+            hint = self.font_sm.render(
+                "POSITION: arrows move inset   Enter: zoom mode   Esc: save",
+                True,
+                C.DIM,
+            )
+        surface.blit(hint, hint.get_rect(centerx=cw // 2, bottom=ch - 16))
+
+        if self._safe_zone_save_prompt:
+            self._draw_safe_zone_save_prompt_on(surface, cw, ch)
+
+        self.present()
+
+    def _draw_safe_zone_save_prompt_on(
+        self, surface: pygame.Surface, cw: int, ch: int
+    ) -> None:
+        overlay = pygame.Surface((cw, ch), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        surface.blit(overlay, (0, 0))
+
+        box_w = 420
+        box_h = 160
+        box_x = (cw - box_w) // 2
+        box_y = (ch - box_h) // 2
+
+        pygame.draw.rect(surface, C.BG_CARD, (box_x, box_y, box_w, box_h), border_radius=10)
+        pygame.draw.rect(surface, C.BLUE, (box_x, box_y, box_w, box_h), 2, border_radius=10)
+
+        title = self.font_md.render("Save safe zone changes?", True, C.BRIGHT)
+        surface.blit(title, title.get_rect(centerx=cw // 2, centery=box_y + 40))
+
+        btn_w = 100
+        btn_h = 44
+        btn_y = box_y + 95
+        gap = 40
+        btn_start_x = box_x + (box_w - btn_w * 2 - gap) // 2
+
+        yes_rect = pygame.Rect(btn_start_x, btn_y, btn_w, btn_h)
+        yes_sel = self._safe_zone_save_yes
+        pygame.draw.rect(
+            surface,
+            C.BG_CARD_SEL if yes_sel else C.BG_CARD,
+            yes_rect,
+            border_radius=6,
+        )
+        pygame.draw.rect(
+            surface,
+            C.CYAN if yes_sel else C.DIM,
+            yes_rect,
+            2,
+            border_radius=6,
+        )
+        yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else C.DIM)
+        surface.blit(yes_txt, yes_txt.get_rect(center=yes_rect.center))
+
+        no_x = btn_start_x + btn_w + gap
+        no_rect = pygame.Rect(no_x, btn_y, btn_w, btn_h)
+        no_sel = not self._safe_zone_save_yes
+        pygame.draw.rect(
+            surface,
+            C.BG_CARD_SEL if no_sel else C.BG_CARD,
+            no_rect,
+            border_radius=6,
+        )
+        pygame.draw.rect(
+            surface,
+            C.CYAN if no_sel else C.DIM,
+            no_rect,
+            2,
+            border_radius=6,
+        )
+        no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else C.DIM)
+        surface.blit(no_txt, no_txt.get_rect(center=no_rect.center))
+
     # ─── Key configuration ────────────────────────────────────────────────
 
     def draw_key_config(self, capturing=False):
         """Key configuration screen with white/blue theme."""
-        self.screen.fill(C.BG)
+        with self._ui_layout(letterbox=True):
+            self.screen.fill(C.BG)
 
-        title = self.font_lg.render("KEY SETUP", True, C.BLUE)
-        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=40))
+            title = self.font_lg.render("KEY SETUP", True, C.BLUE)
+            self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=40))
 
-        if capturing:
-            hint = self.font_md.render("Press a key...  (Esc cancels)", True, C.GREEN)
-        else:
-            hint = self.font_sm.render("ENTER assign  |  ESC done  |  TAB reset", True, C.DIM)
-        self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=82))
-
-        y_start = 118
-        row_h = 50
-        # Leave room for the bound-key value on the right
-        label_max_x = self.sw - 180
-
-        for i, (action_id, action_label) in enumerate(KEY_ACTIONS):
-            y = y_start + i * row_h
-            if y + row_h > self.sh - 30:
-                break
-
-            selected = (i == self.config_cursor)
-
-            bar_rect = pygame.Rect(30, y, self.sw - 60, row_h - 6)
-            if selected:
-                pygame.draw.rect(self.screen, C.BG_CARD_SEL, bar_rect, border_radius=6)
-                pygame.draw.rect(self.screen, C.CYAN, bar_rect.inflate(2, 2), 2, border_radius=7)
+            if capturing:
+                hint = self.font_md.render("Press a key...  (Esc cancels)", True, C.GREEN)
             else:
-                pygame.draw.rect(self.screen, C.BG_CARD, bar_rect, border_radius=6)
+                hint = self.font_sm.render("ENTER assign  |  ESC done  |  TAB reset", True, C.DIM)
+            self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=82))
 
-            # Truncate label if it would overflow into the key-name area
-            label_color = C.BRIGHT if selected else C.WHITE
-            label_text = action_label
-            label_surf = self.font_md.render(label_text, True, label_color)
-            if label_surf.get_width() > label_max_x - 50:
-                while (self.font_md.size(label_text + "...")[0] > label_max_x - 50
-                       and len(label_text) > 3):
-                    label_text = label_text[:-1]
-                label_surf = self.font_md.render(label_text + "...", True, label_color)
-            self.screen.blit(label_surf, (50, y + (row_h - label_surf.get_height()) // 2 - 3))
+            y_start = 118
+            row_h = 44
+            label_x = 50
+            right_pad = 50
+            col_gap = 16
+            row_font = self.font_sm
 
-            bound_key = self.keymap.get(action_id, DEFAULT_KEYMAP.get(action_id))
-            key_name = key_display_name(bound_key)
+            for i, (action_id, action_label) in enumerate(KEY_ACTIONS):
+                y = y_start + i * row_h
+                if y + row_h > self.sh - 30:
+                    break
 
-            if capturing and selected:
-                if (pygame.time.get_ticks() // 500) % 2 == 0:
-                    key_surf = self.font_lg.render("_", True, C.GREEN)
+                selected = (i == self.config_cursor)
+
+                bar_rect = pygame.Rect(30, y, self.sw - 60, row_h - 6)
+                if selected:
+                    pygame.draw.rect(self.screen, C.BG_CARD_SEL, bar_rect, border_radius=6)
+                    pygame.draw.rect(self.screen, C.CYAN, bar_rect.inflate(2, 2), 2, border_radius=7)
                 else:
-                    key_surf = self.font_lg.render("-", True, C.GREEN)
-            else:
-                key_surf = self.font_md.render(key_name, True, C.BRIGHT if selected else C.DIM)
-            self.screen.blit(key_surf, (self.sw - key_surf.get_width() - 50,
-                                         y + (row_h - key_surf.get_height()) // 2 - 3))
+                    pygame.draw.rect(self.screen, C.BG_CARD, bar_rect, border_radius=6)
 
-        self._apply_scanlines()
+                bound_key = self.keymap.get(action_id, DEFAULT_KEYMAP.get(action_id))
+                key_name = key_display_name(bound_key)
+                label_color = C.BRIGHT if selected else C.WHITE
+                key_color = C.BRIGHT if selected else C.DIM
+
+                if capturing and selected:
+                    if (pygame.time.get_ticks() // 500) % 2 == 0:
+                        key_surf = row_font.render("_", True, C.GREEN)
+                    else:
+                        key_surf = row_font.render("-", True, C.GREEN)
+                else:
+                    key_surf = row_font.render(key_name, True, key_color)
+
+                key_x = self.sw - right_pad - key_surf.get_width()
+                label_max_w = max(20, key_x - label_x - col_gap)
+                label_text = action_label
+                label_surf = row_font.render(label_text, True, label_color)
+                if label_surf.get_width() > label_max_w:
+                    while (
+                        row_font.size(label_text + "...")[0] > label_max_w
+                        and len(label_text) > 3
+                    ):
+                        label_text = label_text[:-1]
+                    label_surf = row_font.render(label_text + "...", True, label_color)
+
+                row_text_y = y + (row_h - label_surf.get_height()) // 2 - 3
+                self.screen.blit(label_surf, (label_x, row_text_y))
+                self.screen.blit(
+                    key_surf,
+                    (key_x, y + (row_h - key_surf.get_height()) // 2 - 3),
+                )
+
+            self._apply_scanlines()
         self.present()
 
     def enter_key_config(self):
@@ -2172,15 +2829,21 @@ class TVTimeCapsule:
 
     def draw_stall_overlay(self):
         """Prompt after watchdog gives up or auto-retry fails."""
-        overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
+        rect, scale = self._playback_overlay_layout()
+        overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 180))
-        self.screen.blit(overlay, (0, 0))
+        self.screen.blit(overlay, (rect.x, rect.y))
 
-        title = self.font_md.render("PLAYBACK STALLED", True, C.GREEN)
-        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 36))
-
-        hint = self.font_sm.render("Enter retry  |  Esc back", True, C.DIM)
-        self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 16))
+        title = self._scale_overlay_surface(
+            self.font_lg.render("PLAYBACK STALLED", True, C.GREEN), scale
+        )
+        hint = self._scale_overlay_surface(
+            self.font_md.render("Enter retry  |  Esc back", True, C.DIM), scale
+        )
+        cx = rect.x + rect.w // 2
+        cy = rect.y + rect.h // 2
+        self.screen.blit(title, title.get_rect(center=(cx, cy - 24)))
+        self.screen.blit(hint, hint.get_rect(center=(cx, cy + 20)))
 
     def _start_current_episode(self, *, resume_secs=None, show_splash=True):
         """Start ``playing_episodes[playing_index]``. Returns True on success."""
@@ -2195,13 +2858,16 @@ class TVTimeCapsule:
             self.playing_index + 1,
             resume_secs,
         )
-        if show_splash and self._in_channel_tune:
-            self._deferred_splash = splash_args
-        elif show_splash:
-            self.draw_now_playing(*splash_args)
+        if show_splash and self._now_playing_splash and self._now_playing_splash_ms > 0:
+            if self._in_channel_tune:
+                self._deferred_splash = splash_args
+            else:
+                self.draw_now_playing(*splash_args)
 
+        self._enter_playback_display()
         self.player = self._create_player()
         if self.player is None:
+            self._exit_playback_display()
             self.channel_error = "NO PLAYER"
             self.channel_error_time = pygame.time.get_ticks()
             self.view = self.EPISODE_SELECT
@@ -2209,6 +2875,7 @@ class TVTimeCapsule:
 
         if not self.player.start(episode["path"], resume_pos=resume_secs):
             self.player = None
+            self._exit_playback_display()
             self.channel_error = "PLAY FAILED"
             self.channel_error_time = pygame.time.get_ticks()
             self.view = self.EPISODE_SELECT
@@ -2249,28 +2916,48 @@ class TVTimeCapsule:
 
     def _draw_up_next_splash(self, episode, season, channel, seconds_left):
         self.screen.fill(C.BLACK)
-        title = self.font_lg.render("UP NEXT", True, C.GREEN)
-        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, centery=80))
+        rect, scale = self._playback_overlay_layout()
+        pad = HUD_PAD
+
+        title = self._scale_overlay_surface(
+            self.font_lg.render("UP NEXT", True, C.GREEN), scale
+        )
+        title_y = rect.y + 40
+        self.screen.blit(title, title.get_rect(centerx=rect.x + rect.w // 2, centery=title_y))
 
         ep_num = episode["number"]
         ep_name = episode.get("name") or ""
         label = f"S-{season:02d} - E-{ep_num:02d}"
-        s = self.font_md.render(label, True, C.WHITE)
-        self.screen.blit(s, s.get_rect(centerx=self.sw // 2, centery=self.sh // 2 - 30))
+        s = self._scale_overlay_surface(self.font_md.render(label, True, C.WHITE), scale)
+        mid_y = rect.y + rect.h // 2
+        self.screen.blit(s, s.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y - 30))
         if ep_name:
-            n = self.font_md.render(ep_name, True, C.BLUE)
-            self.screen.blit(n, n.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 10))
+            n = self._truncate_overlay_text(
+                ep_name, self.font_md, C.BLUE, rect.w - pad * 2, scale=scale
+            )
+            self.screen.blit(n, n.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y + 10))
 
-        ch = self.font_lg.render(str(channel), True, C.GREEN)
-        self.screen.blit(ch, (self.sw - ch.get_width() - 40, 30))
-
-        show = self.font_sm.render(self.playing_show.upper(), True, C.DIM)
-        self.screen.blit(show, show.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 55))
-
-        hint = self.font_sm.render(
-            f"Starting in {seconds_left}s  —  Esc to cancel", True, C.DIM
+        ch = self._scale_overlay_surface(
+            self.font_lg.render(str(channel), True, C.GREEN), scale
         )
-        self.screen.blit(hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh - 50))
+        self.screen.blit(
+            ch,
+            (rect.x + rect.w - ch.get_width() - pad, rect.y + pad),
+        )
+
+        show = self._truncate_overlay_text(
+            self.playing_show.upper(), self.font_md, C.DIM, rect.w - pad * 2, scale=scale
+        )
+        self.screen.blit(show, show.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y + 55))
+
+        hint = self._scale_overlay_surface(
+            self.font_sm.render(
+                f"Starting in {seconds_left}s  -  Esc to cancel", True, C.DIM
+            ),
+            scale,
+        )
+        hint_y = rect.y + rect.h - 40
+        self.screen.blit(hint, hint.get_rect(centerx=rect.x + rect.w // 2, centery=hint_y))
         self._apply_scanlines()
 
     def _run_up_next_countdown(self, episode, season, channel):
@@ -2285,6 +2972,8 @@ class TVTimeCapsule:
 
         while self.running:
             for event in pygame.event.get():
+                if self._handle_window_event(event):
+                    continue
                 if event.type == pygame.QUIT:
                     self.running = False
                     return False
@@ -2477,6 +3166,7 @@ class TVTimeCapsule:
             self.cursor = self._next_up_index(episodes, resume, pos_ep=pos_ep)
 
         self.view = self.EPISODE_SELECT
+        self._exit_playback_display()
 
     # ─── Main loop ─────────────────────────────────────────────────────────
 
@@ -2491,6 +3181,7 @@ class TVTimeCapsule:
             self.KEY_CONFIG,
             self.KEY_CAPTURE,
             self.CONFIRM_EXIT,
+            self.SAFE_ZONE_EDIT,
         )
 
     def _enter_screensaver(self):
@@ -2509,7 +3200,8 @@ class TVTimeCapsule:
         dt = max(self.clock.get_time(), 1) / 1000.0
         if self._screensaver.update(dt):
             self._screensaver.randomize_color()
-        self._screensaver.draw(self.screen)
+        with self._ui_layout(letterbox=True):
+            self._screensaver.draw(self.screen)
 
     def _apply_runtime_config(self) -> None:
         """Apply reloadable settings from ``self.config`` without restarting."""
@@ -2548,6 +3240,13 @@ class TVTimeCapsule:
         pb_cfg = self.config.get("playback") or {}
         self._autoplay_mode = pb_cfg.get("autoplay", "off")
         self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
+        self._now_playing_splash = bool(pb_cfg.get("now_playing_splash", True))
+        try:
+            splash_seconds = float(pb_cfg.get("now_playing_splash_seconds", 1.5))
+        except (TypeError, ValueError):
+            splash_seconds = 1.5
+        splash_seconds = max(0.0, min(30.0, splash_seconds))
+        self._now_playing_splash_ms = int(splash_seconds * 1000)
         self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
 
         gp_cfg = self.config.get("gamepad") or {}
@@ -2575,6 +3274,8 @@ class TVTimeCapsule:
             self._analog_artifacts.configure(
                 rate_per_minute=float(self._analog_artifact_rate_override)
             )
+
+        self._apply_safe_zone_from_config()
 
     def _reload_config_from_disk(self) -> None:
         self.config = load_config()
@@ -2667,6 +3368,12 @@ class TVTimeCapsule:
             "scanlines": self.scanlines,
             "analog_artifacts": self._analog_artifacts.enabled,
             "analog_artifact_rate": self._analog_artifacts.rate_per_minute,
+            "safe_zone_top": self._safe_zone_margins.top,
+            "safe_zone_bottom": self._safe_zone_margins.bottom,
+            "safe_zone_left": self._safe_zone_margins.left,
+            "safe_zone_right": self._safe_zone_margins.right,
+            "safe_zone_offset_x": self._safe_zone_offset.x,
+            "safe_zone_offset_y": self._safe_zone_offset.y,
             "screensaver": self._screensaver_enabled,
             "screensaver_timeout_seconds": self._screensaver_timeout_ms // 1000,
             "cli_overrides": {
@@ -2674,6 +3381,8 @@ class TVTimeCapsule:
                 "shutdown_collapse": self._shutdown_collapse_override is not None,
                 "scanlines": self._scanlines_override is not None,
                 "analog_artifacts": self._analog_artifacts_override is not None,
+                "safe_zone": self._safe_zone_override is not None,
+                "safe_zone_offset": self._safe_zone_offset_override is not None,
                 "screensaver": self._screensaver_override is not None,
                 "screensaver_timeout": self._screensaver_timeout_override is not None,
             },
@@ -2703,6 +3412,35 @@ class TVTimeCapsule:
                 )
             except (TypeError, ValueError):
                 return False, "invalid analog_artifact_rate"
+        if self._safe_zone_override is None:
+            sz = dict(ui_cfg.get("safe_zone") or safe_zone_to_config(parse_safe_zone(None)))
+            for key, field in (
+                ("safe_zone_top", "top"),
+                ("safe_zone_bottom", "bottom"),
+                ("safe_zone_left", "left"),
+                ("safe_zone_right", "right"),
+            ):
+                if key in patch:
+                    try:
+                        sz[field] = max(0.0, min(25.0, float(patch[key])))
+                    except (TypeError, ValueError):
+                        return False, f"invalid {key}"
+            for key, field in (
+                ("safe_zone_offset_x", "offset_x"),
+                ("safe_zone_offset_y", "offset_y"),
+            ):
+                if key in patch:
+                    if self._safe_zone_offset_override is not None:
+                        continue
+                    try:
+                        sz[field] = max(-320, min(320, int(patch[key])))
+                    except (TypeError, ValueError):
+                        return False, f"invalid {key}"
+            if any(k in patch for k in (
+                "safe_zone_top", "safe_zone_bottom", "safe_zone_left", "safe_zone_right",
+                "safe_zone_offset_x", "safe_zone_offset_y",
+            )):
+                ui_cfg["safe_zone"] = sz
         if "screensaver" in patch and self._screensaver_override is None:
             ss_cfg["enabled"] = bool(patch["screensaver"])
         if "screensaver_timeout_seconds" in patch and self._screensaver_timeout_override is None:
@@ -2794,6 +3532,8 @@ class TVTimeCapsule:
             if self.view == self.PLAYING:
                 if self._playback_stalled:
                     for event in pygame.event.get():
+                        if self._handle_window_event(event):
+                            continue
                         if event.type == pygame.QUIT:
                             self.running = False
                             break
@@ -2833,6 +3573,8 @@ class TVTimeCapsule:
                         continue
 
                 for event in pygame.event.get():
+                    if self._handle_window_event(event):
+                        continue
                     if event.type == pygame.QUIT:
                         self.stop_playback()
                         self.running = False
@@ -2864,6 +3606,8 @@ class TVTimeCapsule:
 
             if self._screensaver_active:
                 for event in pygame.event.get():
+                    if self._handle_window_event(event):
+                        continue
                     if event.type == pygame.QUIT:
                         self.running = False
                     elif event.type == pygame.KEYDOWN:
@@ -2883,6 +3627,8 @@ class TVTimeCapsule:
                 continue
 
             for event in pygame.event.get():
+                if self._handle_window_event(event):
+                    continue
                 if event.type == pygame.QUIT:
                     self.running = False
 
@@ -2934,6 +3680,40 @@ class TVTimeCapsule:
                             self._activate_confirm_exit_choice()
                         continue
 
+                    elif self.view == self.SAFE_ZONE_EDIT:
+                        km = self.keymap
+                        left = km.get("left", pygame.K_LEFT)
+                        right = km.get("right", pygame.K_RIGHT)
+                        up = km.get("up", pygame.K_UP)
+                        down = km.get("down", pygame.K_DOWN)
+                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            if self._safe_zone_save_prompt:
+                                self.exit_safe_zone_editor(save=self._safe_zone_save_yes)
+                            else:
+                                self._toggle_safe_zone_edit_mode()
+                        elif event.key == pygame.K_ESCAPE or event.key == km.get(
+                            "back", pygame.K_ESCAPE
+                        ):
+                            if self._safe_zone_save_prompt:
+                                self._safe_zone_save_prompt = False
+                            else:
+                                self._safe_zone_save_prompt = True
+                                self._safe_zone_save_yes = True
+                        elif self._safe_zone_save_prompt:
+                            if event.key in (left, pygame.K_LEFT, up, pygame.K_UP):
+                                self._safe_zone_save_yes = True
+                            elif event.key in (right, pygame.K_RIGHT, down, pygame.K_DOWN):
+                                self._safe_zone_save_yes = False
+                        elif event.key in (up, pygame.K_UP):
+                            self._adjust_safe_zone_edit("up")
+                        elif event.key in (down, pygame.K_DOWN):
+                            self._adjust_safe_zone_edit("down")
+                        elif event.key in (left, pygame.K_LEFT):
+                            self._adjust_safe_zone_edit("left")
+                        elif event.key in (right, pygame.K_RIGHT):
+                            self._adjust_safe_zone_edit("right")
+                        continue
+
                     if pygame.K_0 <= event.key <= pygame.K_9 or pygame.K_KP0 <= event.key <= pygame.K_KP9:
                         if pygame.K_0 <= event.key <= pygame.K_9:
                             digit = event.key - pygame.K_0
@@ -2950,6 +3730,10 @@ class TVTimeCapsule:
 
                     if event.key == pygame.K_TAB:
                         self.enter_key_config()
+                        continue
+
+                    if event.key == pygame.K_z:
+                        self.enter_safe_zone_editor()
                         continue
 
                     if event.key == pygame.K_h:
@@ -2990,6 +3774,9 @@ class TVTimeCapsule:
                     if self.view == self.CONFIRM_EXIT:
                         self._process_confirm_exit_action(action)
                         continue
+                    if self.view == self.SAFE_ZONE_EDIT:
+                        self._process_safe_zone_edit_action(action)
+                        continue
                     if self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
                         if action == "back" and self.view == self.KEY_CONFIG:
                             self.exit_key_config()
@@ -3027,6 +3814,9 @@ class TVTimeCapsule:
                 self.draw_confirm_exit()
                 self._apply_channel_fx()
                 self.present()
+            elif self.view == self.SAFE_ZONE_EDIT:
+                self.draw_safe_zone_editor()
+                self._apply_channel_fx()
             elif self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
                 self.draw_key_config(capturing=(self.view == self.KEY_CAPTURE))
                 self._apply_channel_fx()
@@ -3042,7 +3832,12 @@ class TVTimeCapsule:
         if self.player:
             self.player.stop()
         if shutdown_snapshot is not None:
-            self._channel_fx.play_shutdown(self.screen, shutdown_snapshot)
+            self._channel_fx.play_shutdown(
+                self.screen,
+                shutdown_snapshot,
+                self._shutdown_viewport(),
+                after_frame=self.present,
+            )
         if self._admin_server:
             self._admin_server.stop()
         pygame.quit()

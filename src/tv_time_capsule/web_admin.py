@@ -201,6 +201,12 @@ const SETTING_LABELS = {
   scanlines: "CRT scanlines",
   analog_artifacts: "Analog signal glitches (static / tear / roll)",
   analog_artifact_rate: "Analog glitches per minute",
+  safe_zone_top: "Safe zone top (%)",
+  safe_zone_bottom: "Safe zone bottom (%)",
+  safe_zone_left: "Safe zone left (%)",
+  safe_zone_right: "Safe zone right (%)",
+  safe_zone_offset_x: "Safe zone offset X (px)",
+  safe_zone_offset_y: "Safe zone offset Y (px)",
   screensaver: "Screensaver",
   screensaver_timeout_seconds: "Screensaver timeout (seconds)",
 };
@@ -212,11 +218,17 @@ function renderSettings() {
   for (const [key, label] of Object.entries(SETTING_LABELS)) {
     const row = document.createElement("div");
     row.className = "toggle" + (cli[key] || cli[key === "screensaver" ? "screensaver" : key] ? " locked" : "");
-    const overrideKey = key === "screensaver_timeout_seconds" ? "screensaver_timeout" : key;
+    const overrideKey = key === "screensaver_timeout_seconds" ? "screensaver_timeout"
+      : (key === "safe_zone_offset_x" || key === "safe_zone_offset_y") ? "safe_zone_offset"
+      : key;
     const locked = cli[overrideKey];
-    if (key === "screensaver_timeout_seconds" || key === "analog_artifact_rate") {
+    if (key === "screensaver_timeout_seconds" || key === "analog_artifact_rate"
+        || (key.startsWith("safe_zone_") && !key.includes("offset"))) {
       row.innerHTML = `<label>${label}${locked ? " (CLI)" : ""}</label>
-        <input type="number" min="0" id="set-${key}" value="${settingsState[key] ?? (key === "analog_artifact_rate" ? 12 : 300)}" ${locked ? "disabled" : ""}>`;
+        <input type="number" min="0" id="set-${key}" value="${settingsState[key] ?? (key === "analog_artifact_rate" ? 12 : 0)}" ${locked ? "disabled" : ""}>`;
+    } else if (key === "safe_zone_offset_x" || key === "safe_zone_offset_y") {
+      row.innerHTML = `<label>${label}${locked ? " (CLI)" : ""}</label>
+        <input type="number" min="-320" max="320" id="set-${key}" value="${settingsState[key] ?? 0}" ${locked ? "disabled" : ""}>`;
     } else {
       row.innerHTML = `<label><input type="checkbox" id="set-${key}" ${settingsState[key] ? "checked" : ""} ${locked ? "disabled" : ""}>
         ${label}${locked ? " (CLI)" : ""}</label>`;
@@ -325,7 +337,9 @@ async function saveSettings() {
     const el = document.getElementById("set-" + key);
     if (!el || el.disabled) continue;
     patch[key] = key === "screensaver_timeout_seconds" || key === "analog_artifact_rate"
-      ? parseFloat(el.value)
+      || key.startsWith("safe_zone_")
+      ? (key === "safe_zone_offset_x" || key === "safe_zone_offset_y"
+        ? parseInt(el.value, 10) : parseFloat(el.value))
       : el.checked;
   }
   const r = await api("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});

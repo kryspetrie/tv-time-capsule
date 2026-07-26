@@ -9,8 +9,6 @@ import random
 
 import pygame
 
-from .config import SCREEN_H, SCREEN_W
-
 GLITCH_DURATION_MS = 360
 TICK_INTERVAL_MS = 250
 
@@ -80,8 +78,9 @@ class AnalogArtifacts:
 
     def _apply_static(self, screen: pygame.Surface) -> None:
         """Dense white speckle overlay."""
-        w = max(1, SCREEN_W // 2)
-        h = max(1, SCREEN_H // 2)
+        width, height = screen.get_size()
+        w = max(1, width // 2)
+        h = max(1, height // 2)
         tiny = pygame.Surface((w, h), pygame.SRCALPHA)
         for row in range(h):
             for col in range(w):
@@ -89,28 +88,30 @@ class AnalogArtifacts:
                     continue
                 alpha = random.randint(90, 220)
                 tiny.set_at((col, row), (255, 255, 255, alpha))
-        noise = pygame.transform.scale(tiny, (SCREEN_W, SCREEN_H))
+        noise = pygame.transform.scale(tiny, (width, height))
         screen.blit(noise, (0, 0))
 
     def _apply_tear(self, screen: pygame.Surface) -> None:
+        width, height = screen.get_size()
         snap = screen.copy()
         offset = self._tear_offset
-        for y in range(SCREEN_H):
+        for y in range(height):
             line_off = offset if y % 2 == 0 else -offset
-            screen.blit(snap, (line_off, y), (0, y, SCREEN_W, 1))
+            screen.blit(snap, (line_off, y), (0, y, width, 1))
 
     def _apply_roll(self, screen: pygame.Surface, elapsed: int) -> None:
+        width, height = screen.get_size()
         snap = screen.copy()
-        shift = int((elapsed / 1000.0) * self._roll_speed) % SCREEN_H
+        shift = int((elapsed / 1000.0) * self._roll_speed) % height
         screen.blit(snap, (0, shift))
-        screen.blit(snap, (0, shift - SCREEN_H))
-        bar_h = max(10, SCREEN_H // 12)
-        bar_y = (shift + SCREEN_H // 3) % SCREEN_H
-        bar = pygame.Surface((SCREEN_W, bar_h), pygame.SRCALPHA)
+        screen.blit(snap, (0, shift - height))
+        bar_h = max(10, height // 12)
+        bar_y = (shift + height // 3) % height
+        bar = pygame.Surface((width, bar_h), pygame.SRCALPHA)
         bar.fill((255, 255, 255, 140))
         screen.blit(bar, (0, bar_y))
-        static_band = pygame.Surface((SCREEN_W, bar_h // 2), pygame.SRCALPHA)
-        for x in range(0, SCREEN_W, 2):
+        static_band = pygame.Surface((width, bar_h // 2), pygame.SRCALPHA)
+        for x in range(0, width, 2):
             if random.random() < 0.5:
                 pygame.draw.line(static_band, (255, 255, 255, 180), (x, 0), (x, bar_h // 2))
         screen.blit(static_band, (0, bar_y))

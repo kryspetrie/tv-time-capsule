@@ -144,9 +144,20 @@ class ChannelChangeFX:
     def draw(self, screen: pygame.Surface) -> None:
         if not self.is_active() or not self._snow_frames:
             return
-        screen.blit(self._snow_frames[self._snow_frame_index()], (0, 0))
+        frame = self._snow_frames[self._snow_frame_index()]
+        size = screen.get_size()
+        if frame.get_size() != size:
+            frame = pygame.transform.scale(frame, size)
+        screen.blit(frame, (0, 0))
 
-    def play_shutdown(self, screen: pygame.Surface, snapshot: pygame.Surface) -> None:
+    def play_shutdown(
+        self,
+        screen: pygame.Surface,
+        snapshot: pygame.Surface,
+        viewport: tuple[int, int, int, int] | None = None,
+        *,
+        after_frame=None,
+    ) -> None:
         """Classic CRT vertical collapse (~0.5s) before power-off."""
         if not self.shutdown_enabled:
             return
@@ -157,11 +168,17 @@ class ChannelChangeFX:
             if elapsed >= SHUTDOWN_DURATION_MS:
                 break
             progress = elapsed / SHUTDOWN_DURATION_MS
-            draw_tv_shutdown(screen, snapshot, progress)
-            pygame.display.flip()
+            draw_tv_shutdown(screen, snapshot, progress, viewport)
+            if after_frame is not None:
+                after_frame()
+            else:
+                pygame.display.flip()
             clock.tick(60)
         screen.fill((0, 0, 0))
-        pygame.display.flip()
+        if after_frame is not None:
+            after_frame()
+        else:
+            pygame.display.flip()
 
 
 def _blur_surface(surf: pygame.Surface) -> pygame.Surface:
@@ -178,11 +195,19 @@ def _ease_in_quad(t: float) -> float:
 
 
 def draw_tv_shutdown(
-    screen: pygame.Surface, snapshot: pygame.Surface, progress: float
+    screen: pygame.Surface,
+    snapshot: pygame.Surface,
+    progress: float,
+    viewport: tuple[int, int, int, int] | None = None,
 ) -> None:
     """Draw one frame of the CRT power-off collapse (progress 0..1)."""
     progress = max(0.0, min(1.0, progress))
-    center_y = SCREEN_H // 2
+    screen_w, screen_h = screen.get_size()
+    if viewport is None:
+        vx, vy, vw, vh = 0, 0, screen_w, screen_h
+    else:
+        vx, vy, vw, vh = viewport
+    center_y = vy + vh // 2
     screen.fill((0, 0, 0))
 
     if progress < SHUTDOWN_BLACK_HOLD:
@@ -193,23 +218,35 @@ def draw_tv_shutdown(
 
     if timeline < collapse_end:
         phase = _ease_in_quad(timeline / collapse_end)
-        half_h = max(1, int((SCREEN_H * 0.5) * (1.0 - phase)))
+        half_h = max(1, int((vh * 0.5) * (1.0 - phase)))
         top_y = center_y - half_h
         band_h = max(1, half_h * 2)
 
-        squashed = pygame.transform.smoothscale(snapshot, (SCREEN_W, band_h))
+        snap_w, snap_h = snapshot.get_size()
+        if (
+            snap_w == screen_w
+            and snap_h == screen_h
+            and (vx, vy, vw, vh) != (0, 0, screen_w, screen_h)
+        ):
+            content = snapshot.subsurface((vx, vy, vw, vh)).copy()
+        elif snapshot.get_size() == (vw, vh):
+            content = snapshot
+        else:
+            content = pygame.transform.smoothscale(snapshot, (vw, vh))
+
+        squashed = pygame.transform.smoothscale(content, (vw, band_h))
         squashed = _blur_surface(squashed)
-        screen.blit(squashed, (0, top_y))
+        screen.blit(squashed, (vx, top_y))
 
         bot_y = top_y + band_h
-        top_inset = int(phase * SCREEN_W * 0.12)
-        bot_inset = int(phase * SCREEN_W * 0.04)
-        trap = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+        top_inset = int(phase * vw * 0.12)
+        bot_inset = int(phase * vw * 0.04)
+        trap = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
         points = [
-            (top_inset, top_y),
-            (SCREEN_W - top_inset, top_y),
-            (SCREEN_W - bot_inset, bot_y),
-            (bot_inset, bot_y),
+            (vx + top_inset, top_y),
+            (vx + vw - top_inset, top_y),
+            (vx + vw - bot_inset, bot_y),
+            (vx + bot_inset, bot_y),
         ]
         white_strength = int(80 + 175 * phase)
         pygame.draw.polygon(trap, (255, 255, 255, min(255, white_strength)), points)
@@ -219,6 +256,6 @@ def draw_tv_shutdown(
         fade = _ease_in_quad(fade)
         line_h = max(1, int(3 * (1.0 - fade)))
         alpha = int(255 * (1.0 - fade))
-        line = pygame.Surface((SCREEN_W, line_h), pygame.SRCALPHA)
+        line = pygame.Surface((vw, line_h), pygame.SRCALPHA)
         line.fill((255, 255, 255, alpha))
-        screen.blit(line, (0, center_y - line_h // 2))
+        screen.blit(line, (vx, center_y - line_h // 2))

@@ -49,7 +49,7 @@ http://<pi-ip-address>:8765/
 | Screen | What it does |
 |--------|----------------|
 | **Status** | Show count, current menu/playback state |
-| **Player settings** | Toggle fun tweaks: channel snow, snow audio, shutdown collapse, scanlines, analog glitches (+ rate), screensaver (+ timeout). Saved to config; applies immediately. See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md). |
+| **Player settings** | Toggle fun tweaks and **CRT safe zone** margins (top/bottom/left/right %) plus pixel offset (X/Y), channel snow, scanlines, screensaver, etc. Saved to config; applies immediately. See [Configuration → Safe zone](configuration.md#safe-zone). |
 | **Media paths** | Edit local library roots, verify readability, preview or apply library scans |
 | **Network mounts** | Edit CIFS/NFS/SSHFS/FTP entries, verify/mount shares |
 | **Cached library** | Full hierarchical tree of the in-memory discovery cache (shows → seasons → episodes) |

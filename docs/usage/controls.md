@@ -13,6 +13,7 @@ Default bindings (rebindable in-app via **Tab**):
 | R | Reset watch status (tap) / rescan library (hold) |
 | H | Help / controls screen |
 | Tab | Key configuration |
+| Z | Safe zone calibration (CRT overscan setup) |
 | Q | Quit (from anywhere) |
 
 ### Channel numbers
