@@ -42,32 +42,83 @@ def _season_entry(state: dict, show: str, season: int) -> dict[str, Any]:
     return entry
 
 
-def get_resume_ep(state, show, season):
-    """Highest fully-completed episode number in the season (0 = none)."""
-    entry = state.get(show, {}).get(f"s{season:02d}", {})
-    if not isinstance(entry, dict):
-        return 0
+def _watched_numbers(entry: dict) -> set[int]:
+    """Episode numbers marked watched for a season entry."""
+    raw = entry.get("watched")
+    if isinstance(raw, list):
+        out: set[int] = set()
+        for item in raw:
+            try:
+                num = int(item)
+            except (TypeError, ValueError):
+                continue
+            if num >= 1:
+                out.add(num)
+        return out
+
+    # Legacy: single ``ep`` meant episodes 1..ep were completed in order.
     try:
-        return int(entry.get("ep", 0) or 0)
+        legacy = int(entry.get("ep", 0) or 0)
     except (TypeError, ValueError):
-        return 0
+        legacy = 0
+    if legacy > 0:
+        return set(range(1, legacy + 1))
+    return set()
+
+
+def _write_watched(entry: dict, watched: set[int]) -> None:
+    if watched:
+        entry["watched"] = sorted(watched)
+    else:
+        entry.pop("watched", None)
+    entry.pop("ep", None)
+
+
+def get_watched_episodes(state, show, season) -> set[int]:
+    """Return the set of individually completed episode numbers."""
+    entry = state.get(show, {}).get(f"s{int(season):02d}", {})
+    if not isinstance(entry, dict):
+        return set()
+    return _watched_numbers(entry)
+
+
+def is_episode_watched(state, show, season, ep_num) -> bool:
+    try:
+        ep_num = int(ep_num)
+    except (TypeError, ValueError):
+        return False
+    return ep_num in get_watched_episodes(state, show, season)
+
+
+def mark_episode_watched(state, show, season, ep_num) -> None:
+    """Mark one episode as fully watched."""
+    ep_num = int(ep_num)
+    entry = _season_entry(state, show, season)
+    watched = _watched_numbers(entry)
+    watched.add(ep_num)
+    _write_watched(entry, watched)
+    entry["ts"] = datetime.now().isoformat()
+    try:
+        if entry.get("pos_ep") is not None and int(entry["pos_ep"]) == ep_num:
+            entry.pop("pos_ep", None)
+            entry.pop("pos", None)
+    except (TypeError, ValueError):
+        pass
+    save_state(state)
+
+
+def get_resume_ep(state, show, season):
+    """Highest watched episode number in the season (0 = none).
+
+    Kept for compatibility; prefer ``get_watched_episodes`` / ``is_episode_watched``.
+    """
+    watched = get_watched_episodes(state, show, season)
+    return max(watched) if watched else 0
 
 
 def set_resume_ep(state, show, season, ep):
-    """Record that episodes up through ``ep`` are completed."""
-    entry = _season_entry(state, show, season)
-    entry["ep"] = int(ep)
-    entry["ts"] = datetime.now().isoformat()
-    # Completing an episode clears any mid-play bookmark on it (or earlier).
-    pos_ep = entry.get("pos_ep")
-    try:
-        pos_ep_i = int(pos_ep) if pos_ep is not None else None
-    except (TypeError, ValueError):
-        pos_ep_i = None
-    if pos_ep_i is not None and pos_ep_i <= int(ep):
-        entry.pop("pos_ep", None)
-        entry.pop("pos", None)
-    save_state(state)
+    """Record that a single episode is completed."""
+    mark_episode_watched(state, show, season, int(ep))
 
 
 def get_episode_position(state, show, season) -> tuple[int | None, float]:
@@ -109,8 +160,7 @@ def set_episode_position(state, show, season, ep, seconds, duration=None):
 
     # Near the end → treat as finished instead of bookmarking.
     if dur and dur > 0 and seconds >= max(dur - END_COMPLETE_SECONDS, dur * 0.92):
-        prev = get_resume_ep(state, show, season)
-        set_resume_ep(state, show, season, max(prev, ep_num))
+        mark_episode_watched(state, show, season, ep_num)
         return "completed"
 
     # Too early → drop any bookmark for this episode.
@@ -150,7 +200,7 @@ def clear_episode_position(state, show, season, ep=None) -> bool:
 
 
 def reset_episode_progress(state, show, season, ep_num) -> bool:
-    """Clear bookmark and watched progress for a single episode."""
+    """Clear bookmark and watched flag for a single episode."""
     try:
         ep_num = int(ep_num)
         season = int(season)
@@ -175,25 +225,20 @@ def reset_episode_progress(state, show, season, ep_num) -> bool:
     except (TypeError, ValueError):
         pass
 
-    try:
-        resume = int(entry.get("ep", 0) or 0)
-    except (TypeError, ValueError):
-        resume = 0
-
-    if ep_num <= resume:
-        new_resume = max(0, ep_num - 1)
-        if new_resume != resume:
-            if new_resume == 0:
-                entry.pop("ep", None)
-            else:
-                entry["ep"] = new_resume
-            entry["ts"] = datetime.now().isoformat()
-            changed = True
+    watched = _watched_numbers(entry)
+    if ep_num in watched:
+        watched.discard(ep_num)
+        _write_watched(entry, watched)
+        entry["ts"] = datetime.now().isoformat()
+        changed = True
 
     if not entry or all(k == "ts" for k in entry):
-        show_state.pop(key, None)
-        if not show_state:
+        if key in show_state:
+            show_state.pop(key, None)
+            changed = True
+        if not show_state and show in state:
             state.pop(show, None)
+            changed = True
 
     if changed:
         save_state(state)

@@ -229,7 +229,10 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        pygame.quit()
+        if admin_server is not None:
+            admin_server.stop()
+        if pygame.get_init():
+            pygame.quit()
 
 
 if __name__ == "__main__":

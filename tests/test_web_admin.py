@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import unittest
 import urllib.request
 from typing import Any
+from unittest.mock import patch
 
 from tv_time_capsule.web_admin import (
     AdminHandler,
     _AdminHTTPServer,
+    _clear_admin_pid,
+    _read_admin_pid,
+    _write_admin_pid,
     create_admin_httpd,
+    stop_previous_admin_server,
     verify_admin_reachable,
 )
+from tv_time_capsule.fonts import FTFontWrapper
 
 
 class _MockContext:
@@ -169,6 +176,25 @@ class WebAdminTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             thread.join(timeout=2)
+
+
+class AdminLifecycleTests(unittest.TestCase):
+    def tearDown(self):
+        _clear_admin_pid()
+
+    @patch("tv_time_capsule.web_admin._pids_listening_on_port", return_value=[])
+    @patch("tv_time_capsule.web_admin._terminate_pid")
+    @patch("tv_time_capsule.web_admin._pid_is_running", return_value=True)
+    def test_stop_previous_admin_server_uses_pid_file(
+        self, _running, terminate, _port_pids
+    ):
+        _write_admin_pid()
+        stop_previous_admin_server(8765)
+        terminate.assert_called_once()
+        self.assertIsNone(_read_admin_pid())
+
+    def test_ft_font_wrapper_exposes_get_height(self):
+        self.assertTrue(hasattr(FTFontWrapper, "get_height"))
 
 
 if __name__ == "__main__":

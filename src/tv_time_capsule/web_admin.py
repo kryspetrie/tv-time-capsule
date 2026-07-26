@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import socket
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from .config import STATE_DIR
 from .log import LOG, log_tail
+
+ADMIN_PID_FILE = os.path.join(STATE_DIR, "admin.pid")
 
 
 class AdminContext(Protocol):
@@ -644,6 +651,88 @@ class DeferredAdminBridge:
         return self._app.admin_update_paths(patch)
 
 
+def _read_admin_pid() -> int | None:
+    try:
+        raw = Path(ADMIN_PID_FILE).read_text().strip()
+        pid = int(raw)
+        return pid if pid > 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_admin_pid() -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    Path(ADMIN_PID_FILE).write_text(str(os.getpid()))
+
+
+def _clear_admin_pid() -> None:
+    try:
+        Path(ADMIN_PID_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _terminate_pid(pid: int, *, wait_s: float = 1.0) -> None:
+    if pid <= 0 or pid == os.getpid():
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _pids_listening_on_port(port: int) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        try:
+            pids.append(int(line.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
+def stop_previous_admin_server(port: int) -> None:
+    """Stop a leftover admin instance so the port can be bound again."""
+    pid = _read_admin_pid()
+    if pid is not None:
+        LOG.info("stopping previous admin server (pid %s)", pid)
+        _terminate_pid(pid)
+
+    for other in _pids_listening_on_port(port):
+        if other != os.getpid():
+            LOG.info("stopping process %s listening on admin port %s", other, port)
+            _terminate_pid(other)
+
+    _clear_admin_pid()
+    time.sleep(0.05)
+
+
 def start_admin_if_enabled(
     ctx: AdminContext,
     admin_cfg: dict[str, Any],
@@ -657,6 +746,7 @@ def start_admin_if_enabled(
         return None
     port = int(port_override if port_override is not None else cfg.get("port", 8765))
     bind = resolve_admin_bind(cfg, local_only=local_only)
+    stop_previous_admin_server(port)
     try:
         server = AdminServer(ctx, bind, port)
         server.start()
@@ -821,11 +911,17 @@ class AdminServer:
             target=self._httpd.serve_forever, name="tv-admin", daemon=True
         )
         self._thread.start()
+        _write_admin_pid()
         time.sleep(0.05)
 
     def stop(self) -> None:
-        if self._httpd:
-            self._httpd.shutdown()
-            self._httpd.server_close()
-            self._httpd = None
+        httpd = self._httpd
+        thread = self._thread
+        self._httpd = None
         self._thread = None
+        if httpd:
+            httpd.shutdown()
+            httpd.server_close()
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
+        _clear_admin_pid()

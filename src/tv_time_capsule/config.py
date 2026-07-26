@@ -164,7 +164,8 @@ class C:
     SCANLINE = (0, 0, 0, 28)
     NOW_PLAYING = (255, 210, 80)
     WATCHED = (60, 80, 100)
-    NEXT_UP = (40, 100, 60)
+    NEXT_UP = (18, 55, 32)
+    NEXT_UP_BORDER = (50, 220, 100)
 
 
 def _parse_playback(raw: dict | None) -> dict[str, Any]:

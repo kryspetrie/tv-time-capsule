@@ -36,6 +36,9 @@ class FTFontWrapper:
     def get_linesize(self):
         return self._font.get_sized_height()
 
+    def get_height(self):
+        return self._font.get_sized_height()
+
 
 def make_font(size):
     """Return a font object with a unified .render() -> Surface API.
