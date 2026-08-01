@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import array
 import random
+import subprocess
 
 import pygame
 
 from .config import SCREEN_H, SCREEN_W
+from .player import detect_ffplay
 
 try:
     import numpy as np
@@ -28,6 +30,11 @@ SNOW_FRAME_MS = max(1, 1000 // SNOW_FPS)
 SNOW_FRAME_COUNT = max(1, (FX_DURATION_MS + SNOW_FRAME_MS - 1) // SNOW_FRAME_MS)
 
 
+def _mixer_available() -> bool:
+    """True when pygame was built with SDL_mixer (MissingModule is falsy)."""
+    return bool(pygame.mixer)
+
+
 def _build_snow_noise_buffer() -> bytes:
     """~320 ms of quiet white noise for channel-tuning static."""
     n_samples = int(SNOW_SAMPLE_RATE * FX_DURATION_MS / 1000)
@@ -36,6 +43,73 @@ def _build_snow_noise_buffer() -> bytes:
         (random.randint(-8000, 8000) for _ in range(n_samples)),
     )
     return samples.tobytes()
+
+
+class _ChannelSnowAudio:
+    """Quiet static burst via pygame.mixer, or ffplay when mixer is unavailable."""
+
+    def __init__(self) -> None:
+        self._mixer_sound: pygame.mixer.Sound | None = None
+        self._ffplay_path: str | None = None
+        self._init_backend()
+
+    def _init_backend(self) -> None:
+        if _mixer_available():
+            try:
+                import pygame.mixer as mixer
+
+                if not mixer.get_init():
+                    mixer.init(
+                        frequency=SNOW_SAMPLE_RATE,
+                        size=-16,
+                        channels=1,
+                        buffer=512,
+                    )
+                self._mixer_sound = mixer.Sound(buffer=_build_snow_noise_buffer())
+                self._mixer_sound.set_volume(SNOW_AUDIO_VOLUME)
+                return
+            except pygame.error:
+                self._mixer_sound = None
+
+        ffplay = detect_ffplay()
+        if ffplay:
+            self._ffplay_path = ffplay
+
+    @property
+    def ready(self) -> bool:
+        return self._mixer_sound is not None or self._ffplay_path is not None
+
+    def play(self) -> None:
+        if self._mixer_sound is not None:
+            self._mixer_sound.play()
+            return
+        if not self._ffplay_path:
+            return
+        duration_s = FX_DURATION_MS / 1000
+        noise = (
+            f"anoisesrc=d={duration_s}:color=white:"
+            f"sample_rate={SNOW_SAMPLE_RATE}:amplitude={SNOW_AUDIO_VOLUME}"
+        )
+        try:
+            subprocess.Popen(
+                [
+                    self._ffplay_path,
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "quiet",
+                    "-volume",
+                    str(int(SNOW_AUDIO_VOLUME * 100)),
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    noise,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
 
 
 class ChannelChangeFX:
@@ -54,25 +128,18 @@ class ChannelChangeFX:
         self._active_start = 0
         self._active_until = 0
         self._snow_frames: list[pygame.Surface] | None = None
-        self._sound: pygame.mixer.Sound | None = None
+        self._audio_player: _ChannelSnowAudio | None = None
         if self.snow_enabled:
             self._precache_snow_frames()
         if self.snow_enabled and self._audio:
             self._init_sound()
 
     def _init_sound(self) -> None:
-        try:
-            if not pygame.mixer.get_init():
-                pygame.mixer.init(
-                    frequency=SNOW_SAMPLE_RATE, size=-16, channels=1, buffer=512
-                )
-            self._sound = pygame.mixer.Sound(buffer=_build_snow_noise_buffer())
-            self._sound.set_volume(SNOW_AUDIO_VOLUME)
-        except pygame.error:
-            self._sound = None
+        if self._audio_player is None:
+            self._audio_player = _ChannelSnowAudio()
 
     def _ensure_sound(self) -> None:
-        if self._sound is None and self._audio:
+        if self._audio_player is None and self._audio:
             self._init_sound()
 
     def configure(
@@ -110,8 +177,8 @@ class ChannelChangeFX:
         self._active_until = now + FX_DURATION_MS
         if self._audio:
             self._ensure_sound()
-            if self._sound is not None:
-                self._sound.play()
+            if self._audio_player is not None:
+                self._audio_player.play()
 
     def _precache_snow_frames(self) -> None:
         """Pre-generate every static frame for one channel-tune burst."""

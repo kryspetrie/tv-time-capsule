@@ -9,4 +9,6 @@ Docs for working on the TV Time Capsule codebase. For running the app as an oper
 3. [Module map](modules.md) — package layout and responsibilities  
 4. [Packaging & release](packaging.md) — Poetry, pipx, wheels, assets  
 5. [Scripts reference](scripts-reference.md) — `scripts/` and `install-pi.sh`  
-6. [Improvement plan](improvement-plan.md) — phased roadmap and retros  
+6. [Remote mount testing](remote-mount-testing.md) — local Docker harness for Samba / SFTP / FTP  
+7. [WSL2 on Windows](wsl2.md) — develop on Windows via Linux  
+8. [Improvement plan](improvement-plan.md) — phased roadmap and retros  

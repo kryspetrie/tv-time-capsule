@@ -54,13 +54,9 @@
   ],
 
   "keymap": {
-    "up": 1073741906,
-    "down": 1073741905,
-    "left": 1073741904,
-    "right": 1073741903,
-    "select": 13,
-    "back": 27,
-    "reset": 114
+    "select": ["enter", "kp-enter", "space"],
+    "back": ["escape"],
+    "quit": ["q"]
   },
 
   "screensaver": {
@@ -76,13 +72,21 @@
     "hw_decode": "auto"
   },
 
+  "cache": {
+    "enabled": true,
+    "directory": null,
+    "max_bytes": 2147483648,
+    "prefetch_next": true,
+    "cache_before_playing": false
+  },
+
   "ui": {
     "channel_snow": true,
     "shutdown_collapse": true,
     "channel_snow_audio": true,
-    "scanlines": false,
     "analog_artifacts": true,
     "analog_artifact_rate": 12,
+    "footer_hints": true,
     "safe_zone": {
       "top": 10,
       "bottom": 10,
@@ -94,7 +98,15 @@
   },
 
   "gamepad": {
-    "enabled": true
+    "enabled": true,
+    "bindings": {
+      "select": ["button-0", "button-7"],
+      "back": ["button-1", "button-6"],
+      "up": ["hat-up", "stick-up"],
+      "down": ["hat-down", "stick-down"],
+      "left": ["hat-left", "stick-left"],
+      "right": ["hat-right", "stick-right"]
+    }
   },
 
   "channels": {
@@ -105,6 +117,16 @@
   "library": {
     "rescan_interval_seconds": 0,
     "rescan_long_press_ms": 800
+  },
+
+  "kids_mode": {
+    "default_enabled": false,
+    "enabled": false
+  },
+
+  "network": {
+    "mdns_hostname": "vintage-tv",
+    "admin_port": 8765
   },
 
   "admin": {
@@ -123,6 +145,17 @@
     "rescan_long_press_ms": "Hold R (reset key) this long to rescan without restarting"
   },
 
+  "_kids_mode": {
+    "default_enabled": "Fallback when enabled is omitted — first launch only",
+    "enabled": "Persisted parent/kids mode (written when you toggle Tab); restored on next start",
+    "allowlist": "Omit for full kids library (legacy). Once present, kids mode only shows tagged shows/movies; parent K toggles tags"
+  },
+
+  "_network": {
+    "mdns_hostname": "LAN browse name without .local — set by install.sh / install-pi.sh (--hostname)",
+    "admin_port": "Web admin TCP port; Avahi HTTP service uses this during install"
+  },
+
   "_admin": {
     "enabled": "Local web UI — see docs/usage/web-admin.md",
     "port": "Default 8765",
@@ -137,13 +170,21 @@
     "hw_decode": "auto | on | off — Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"
   },
 
+  "_cache": {
+    "enabled": "Background-copy remote episodes to local disk for smoother playback (default true)",
+    "directory": "Cache folder (default ~/.local/share/tv-time-capsule/playback-cache)",
+    "max_bytes": "LRU cache size cap in bytes (default 2 GiB)",
+    "prefetch_next": "Start caching the next autoplay episode during the countdown (default true)",
+    "cache_before_playing": "Wait on the now-playing title screen with a progress bar until the episode is fully cached (default false; avoids mid-playback cache switch)"
+  },
+
   "_ui": {
     "channel_snow": "FUN TWEAK — B&W static burst when committing channel numbers on show/season/episode lists (not arrow keys). Pre-cached 320ms animation. CLI: --channel-snow",
     "shutdown_collapse": "FUN TWEAK — CRT vertical collapse on quit. CLI: --shutdown-collapse",
     "channel_snow_audio": "FUN TWEAK — Quiet white-noise with channel snow (defaults on when channel_snow is true; set false to mute)",
-    "scanlines": "FUN TWEAK — CRT scanline overlay. CLI: --scanlines",
     "analog_artifacts": "FUN TWEAK — Random brief static, line tear, and vertical roll on the show browser only. CLI: --analog-artifacts",
-    "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches)"
+    "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches)",
+    "footer_hints": "Bottom status bar (clock + help key) on browse screens in parent mode (toggle with F5 by default; always off in kids mode)"
   },
 
   "_safe_zone": {
@@ -160,25 +201,49 @@
   },
 
   "_easter_eggs": {
-    "test_patterns": "Show browser only — dial 0, 00, or 000 for full-screen colorbars.png, grid.png, indianhead.png from src/tv_time_capsule/assets/ (you supply the PNGs; app never generates them). Esc exits. See docs/usage/fun-tweaks-and-easter-eggs.md"
+    "test_patterns": "Any parent browse screen — press 001, 002, or 003 for full-screen colorbars.png, grid.png, indianhead.png from src/tv_time_capsule/assets/ (you supply the PNGs; app never generates them). Esc exits. Bare 0 = Back; 00 = alphabet menu. See docs/usage/fun-tweaks-and-easter-eggs.md"
   },
 
-  "_gamepad": "USB controllers via SDL. D-pad / left stick to navigate; A or Start to select; B or Back to go back. Set enabled false to disable.",
+  "_gamepad": "USB controllers via SDL. Remap live in-app with F4 (gamepad configuration). Bindings use readable tokens: button-N, hat-up/down/left/right, stick-up/down/left/right.",
 
   "_keymap_reference": {
     "up": "Browse up / volume up during playback (default: Up arrow)",
     "down": "Browse down / volume down during playback (default: Down arrow)",
     "left": "Back / seek backward 10s during playback (default: Left arrow)",
     "right": "Select / seek forward 10s during playback (default: Right arrow)",
-    "select": "Select / play / pause-resume (default: Enter)",
+    "select": "Select / play / pause-resume (default: Enter, keypad Enter, Space)",
     "back": "Back / stop playback (default: Escape)",
-    "reset": "Reset watch status for current show/season (default: R)"
+    "quit": "Quit app — parent mode only (default: Q)",
+    "help": "Context help for the current screen (default: H)",
+    "reset": "Reset watch status — tap; hold to rescan library (default: R)",
+    "keymap_reset": "Reset all key bindings to defaults on key-setup screen (default: F3)",
+    "keymap_remove": "Remove last binding for highlighted action on key-setup screen (default: Delete)",
+    "kids_mode_toggle": "Toggle kid-friendly / parent mode (default: Tab)",
+    "letter_menu": "Open alphabet jump menu on show/movie list — parent mode (default: L)",
+    "kids_tag_toggle": "Tag/untag title for kids allowlist — parent mode (default: K)",
+    "key_config": "Open keyboard key configuration (default: F2)",
+    "gamepad_config": "Open gamepad configuration (default: F4)",
+    "safe_zone": "Safe zone calibration (default: Z)",
+    "cache_cancel": "Cancel background playback cache (default: C)",
+    "footer_hints_toggle": "Toggle browse status bar — parent mode (default: F5)",
+    "digit_0": "Channel digit 0 (default: 0, keypad 0)",
+    "digit_1": "Channel digit 1 (default: 1, keypad 1)",
+    "digit_2": "Channel digit 2",
+    "digit_3": "Channel digit 3",
+    "digit_4": "Channel digit 4",
+    "digit_5": "Channel digit 5",
+    "digit_6": "Channel digit 6",
+    "digit_7": "Channel digit 7",
+    "digit_8": "Channel digit 8",
+    "digit_9": "Channel digit 9"
   },
 
   "_keymap_notes": [
-    "Values are pygame key codes (integers). Omit an action or use an empty keymap object {} to keep defaults.",
-    "Rebind in-app with Tab → key configuration. Tab on that screen resets to defaults.",
-    "Not configurable here: 0–9 (channel numbers), H (help), Z (safe zone setup), Tab (key config), Q (quit), Space (pause during playback)."
+    "Each action accepts a key name string or an array of names (aliases). Examples: escape, enter, space, q, f2, up, num-0.",
+    "Legacy integer pygame key codes still load correctly.",
+    "Omit an action or use an empty keymap object {} to keep defaults.",
+    "Rebind in-app with F2. F3 on that screen resets to defaults; Delete removes the last alias.",
+    "Left/right on the key-setup screen change pages. Assigning a key already used elsewhere moves it to the new action."
   ],
 
   "_screensaver": "FUN TWEAK — Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",

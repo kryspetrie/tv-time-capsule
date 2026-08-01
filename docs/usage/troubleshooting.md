@@ -89,7 +89,7 @@ See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md). Common issues:
 | Symptom | Check |
 |---------|--------|
 | No static on channel change | Enable `ui.channel_snow` or `--channel-snow`. Snow runs on **numeric commit only**, not arrow keys. |
-| Snow silent | Set `ui.channel_snow_audio: true` (defaults on when snow is enabled). |
+| Snow silent | Set `ui.channel_snow_audio: true` (defaults on when snow is enabled). If `pygame.mixer` is missing, run `./scripts/ensure-pygame-mixer.sh` (rebuilds pygame with SDL_mixer; ffplay is used as a fallback). |
 | Glitches only on show list | Expected — `analog_artifacts` applies to the show browser only. |
 | Test pattern “not found” | Add your own `colorbars.png`, `grid.png`, `indianhead.png` under `src/tv_time_capsule/assets/` — the app never generates them. |
 | Screensaver never starts | `screensaver.enabled: true` or `--screensaver`; timeout is menu idle only (not during playback). |

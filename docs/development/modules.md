@@ -14,6 +14,7 @@ Package root: `src/tv_time_capsule/`.
 | `log.py` | stderr / journal logging + ring buffer for admin |
 | `media.py` | Show/season/episode discovery, filename parsing, folder season labels |
 | `mounts.py` | Mount/unmount helpers for remote stores |
+| `playback_cache.py` | Background local cache for remote episode files |
 | `secrets.py` | Keyring get/set + resolve helpers |
 | `secrets_cli.py` | `tv-time-capsule-secrets` console script |
 | `config.py` | Paths, colors (`C`), timing constants, config search/load/save |
@@ -24,7 +25,10 @@ Package root: `src/tv_time_capsule/`.
 | `channel_fx.py` | Optional CRT snow burst on channel changes (pre-cached frames); shutdown collapse |
 | `analog_artifacts.py` | Optional random static / tear / roll on the show browser |
 | `safe_zone.py` | CRT overscan safe-zone parsing; extends framebuffer outside fixed 640×480 UI |
-| `test_patterns.py` | Easter egg dial codes `0` / `00` / `000` → user-supplied test pattern PNGs |
+| `dial_nav.py` | Numeric dial classification (`0` / `01`–`02` / `00` / `001`–`003` / channel) + page cursor helper |
+| `movie_nav.py` | Alphabet jump helpers (present letters, digit bands A–C … Y–Z/#) |
+| `kids_mode.py` | Kids mode helpers (catalog interleave, library picker) |
+| `test_patterns.py` | Easter egg dial codes `001` / `002` / `003` → user-supplied test pattern PNGs |
 | `screensaver.py` | Bouncing VHS logo idle screensaver (2× pixelated scale, multiply tint) |
 | `fonts.py` | VCR OSD Mono + pygame.font / freetype compatibility |
 | `assets/` | Bundled `vcr_osd_mono.ttf`, `vhs.bmp` (packaged as package data) |

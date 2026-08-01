@@ -21,7 +21,6 @@
 #   --graphical     Use desktop session + --graphical player autostart
 #   --media-dir DIR Forwarded to enable-autostart (repeatable)
 #   --force-43      Forwarded to enable-autostart
-#   --scanlines     Forwarded to enable-autostart
 #   --reboot        Reboot when done
 #   --start         Start the player immediately (kiosk only)
 #
@@ -40,7 +39,6 @@ DO_REBOOT=0
 START_NOW=0
 KEEP_SERVICE=0
 FORCE_43=0
-SCANLINES=0
 MEDIA_DIRS=()
 
 RED='\033[0;31m'
@@ -75,7 +73,6 @@ while [[ $# -gt 0 ]]; do
         --start) START_NOW=1; shift ;;
         --keep-service) KEEP_SERVICE=1; shift ;;
         --force-43) FORCE_43=1; shift ;;
-        --scanlines) SCANLINES=1; shift ;;
         --media-dir)
             MEDIA_DIRS+=("${2:?--media-dir requires a path}")
             shift 2
@@ -148,7 +145,6 @@ set_kiosk() {
         start_args+=(--media-dir "$dir")
     done
     [[ "$FORCE_43" -eq 1 ]] && start_args+=(--force-43)
-    [[ "$SCANLINES" -eq 1 ]] && start_args+=(--scanlines)
     [[ "$START_NOW" -eq 1 ]] && start_args+=(--start)
 
     TV_TIME_CAPSULE_BIN="${TV_TIME_CAPSULE_BIN:-}" \

@@ -14,7 +14,6 @@
 #                   uses ~/.config/tv-time-capsule/config.json
 #   --user NAME     Systemd service user (default: SUDO_USER or current user)
 #   --force-43      Pass --force-43 to the app
-#   --scanlines     Pass --scanlines to the app
 #   --start         Start the service immediately after enabling
 #
 set -euo pipefail
@@ -28,7 +27,6 @@ SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 GRAPHICAL=0
 START_NOW=0
 FORCE_43=0
-SCANLINES=0
 MEDIA_DIRS=()
 SERVICE_USER=""
 
@@ -49,7 +47,6 @@ while [[ $# -gt 0 ]]; do
         --graphical) GRAPHICAL=1; shift ;;
         --start) START_NOW=1; shift ;;
         --force-43) FORCE_43=1; shift ;;
-        --scanlines) SCANLINES=1; shift ;;
         --user)
             SERVICE_USER="${2:?--user requires a username}"
             shift 2
@@ -140,9 +137,6 @@ for dir in "${MEDIA_DIRS[@]+"${MEDIA_DIRS[@]}"}"; do
 done
 if [[ "$FORCE_43" -eq 1 ]]; then
     EXEC_START+=" --force-43"
-fi
-if [[ "$SCANLINES" -eq 1 ]]; then
-    EXEC_START+=" --scanlines"
 fi
 
 if [[ "$GRAPHICAL" -eq 1 ]]; then

@@ -44,12 +44,28 @@ From another device on the LAN:
 http://<pi-ip-address>:8765/
 ```
 
+If you ran `install-pi.sh` or `install.sh`, the device is also advertised as **`http://vintage-tv.local:8765/`** via mDNS (Bonjour/Avahi). Use a unique name when you have more than one TV:
+
+```bash
+MDNS_HOSTNAME=vintage-tv-bedroom ./install-pi.sh
+# → http://vintage-tv-bedroom.local:8765/
+```
+
+Check or change the name later:
+
+```bash
+sudo ./scripts/ensure-mdns-hostname.sh --status
+sudo ./scripts/ensure-mdns-hostname.sh --hostname vintage-tv-kitchen
+```
+
+The chosen name is stored in `/etc/tv-time-capsule/mdns-hostname` on Linux.
+
 ## Features
 
 | Screen | What it does |
 |--------|----------------|
 | **Status** | Show count, current menu/playback state |
-| **Player settings** | Toggle fun tweaks and **CRT safe zone** margins (top/bottom/left/right %) plus pixel offset (X/Y), channel snow, scanlines, screensaver, etc. Saved to config; applies immediately. See [Configuration → Safe zone](configuration.md#safe-zone). |
+| **Player settings** | Toggle fun tweaks and **CRT safe zone** margins (top/bottom/left/right %) plus pixel offset (X/Y), channel snow, screensaver, etc. Saved to config; applies immediately. See [Configuration → Safe zone](configuration.md#safe-zone). |
 | **Media paths** | Edit local library roots, verify readability, preview or apply library scans |
 | **Network mounts** | Edit CIFS/NFS/SSHFS/FTP entries, verify/mount shares |
 | **Cached library** | Full hierarchical tree of the in-memory discovery cache (shows → seasons → episodes) |

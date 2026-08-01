@@ -1,4 +1,4 @@
-"""Secret show-list test patterns (channels 0, 00, 000).
+"""Secret show-list test patterns (channels 001, 002, 003).
 
 Easter egg — see docs/usage/fun-tweaks-and-easter-eggs.md.
 
@@ -14,9 +14,9 @@ _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 # Dial string on the show browser → bundled PNG filename.
 SHOW_LIST_TEST_PATTERNS: dict[str, str] = {
-    "0": "colorbars.png",
-    "00": "grid.png",
-    "000": "indianhead.png",
+    "001": "colorbars.png",
+    "002": "grid.png",
+    "003": "indianhead.png",
 }
 
 

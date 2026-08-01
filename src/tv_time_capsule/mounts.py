@@ -194,7 +194,7 @@ def _mount_cifs(entry: dict[str, Any], mountpoint: str) -> subprocess.CompletedP
         if domain:
             opts.append(f"domain={domain}")
 
-    for default in ("iocharset=utf8", "file_mode=0644", "dir_mode=0755"):
+    for default in ("file_mode=0644", "dir_mode=0755"):
         key = default.split("=", 1)[0]
         if not any(o.startswith(key + "=") for o in opts):
             opts.append(default)

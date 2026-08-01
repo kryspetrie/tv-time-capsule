@@ -14,7 +14,7 @@ Cosmetic effects you can turn on deliberately. Good for demos, nostalgia, or a k
 
 **Label:** fun tweak
 
-A brief burst of fine black-and-white TV static whenever you **commit a channel number** (after the ~1.5s dial timeout).
+A brief burst of fine black-and-white TV static whenever you **commit a channel number** (after the ~1.5s number-entry timeout).
 
 | Where it runs | Behavior |
 |---------------|----------|
@@ -22,7 +22,7 @@ A brief burst of fine black-and-white TV static whenever you **commit a channel 
 | Season list | Jump to season 1–N |
 | Episode list | Jump to episode 1–N and play |
 
-- **Not** triggered by arrow keys or Enter — numeric dial only.
+- **Not** triggered by arrow keys or Enter — number keys only.
 - ~320ms animation; frames are **pre-generated and cached** when snow is enabled (smooth, consistent length everywhere).
 - Optional quiet white-noise audio (defaults **on** when snow is enabled; mute with `channel_snow_audio: false`).
 
@@ -54,22 +54,6 @@ Classic CRT **vertical collapse** when you quit the app (after the “Quit?” c
 CLI: `--shutdown-collapse`
 
 Independent of channel snow — you can enable either or both.
-
-### Scanlines
-
-**Label:** fun tweak
-
-Semi-transparent horizontal CRT scanlines over the whole UI (menus and playback).
-
-```json
-{
-  "ui": {
-    "scanlines": true
-  }
-}
-```
-
-CLI: `--scanlines`
 
 ### Analog signal glitches
 
@@ -125,13 +109,15 @@ Hidden or discoverable extras — no config switch; they are always available wh
 
 **Label:** easter egg
 
-On the **show list only**, dial these channel codes (same numeric entry as normal channels — wait for auto-commit):
+On any **parent** browse screen (library picker, shows, movies, seasons, episodes), press these codes (third digit commits immediately):
 
-| Dial | Pattern | Asset file |
+| Press | Pattern | Asset file |
 |------|---------|------------|
-| `0` | Color bars | `src/tv_time_capsule/assets/colorbars.png` |
-| `00` | Grid | `src/tv_time_capsule/assets/grid.png` |
-| `000` | Indian head | `src/tv_time_capsule/assets/indianhead.png` |
+| `001` | Color bars | `src/tv_time_capsule/assets/colorbars.png` |
+| `002` | Grid | `src/tv_time_capsule/assets/grid.png` |
+| `003` | Indian head | `src/tv_time_capsule/assets/indianhead.png` |
+
+Bare `0` is **Back**; `00` opens the alphabet menu — patterns use the `00x` special family only.
 
 - Full-screen display (no header, footer, or channel chrome).
 - **Escape** exits the pattern (does not open the quit dialog).
@@ -151,12 +137,11 @@ On the **show list only**, dial these channel codes (same numeric entry as norma
 | Channel snow | Fun tweak | `ui.channel_snow`, `--channel-snow` | off |
 | Channel snow audio | Fun tweak | `ui.channel_snow_audio` | off (follows snow when enabled) |
 | Shutdown collapse | Fun tweak | `ui.shutdown_collapse`, `--shutdown-collapse` | off |
-| Scanlines | Fun tweak | `ui.scanlines`, `--scanlines` | off |
 | Analog glitches | Fun tweak | `ui.analog_artifacts`, `--analog-artifacts` | off |
 | Screensaver | Fun tweak | `screensaver.enabled`, `--screensaver` | off |
 | Autoplay | QoL | `playback.autoplay` | `next_in_season_only` |
 | Gamepad | Input | `gamepad.enabled` | on |
-| Test patterns `0` / `00` / `000` | Easter egg | *(none)* | always if PNGs exist |
+| Test patterns `001` / `002` / `003` | Easter egg | *(none)* | always if PNGs exist |
 
 Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` when the new keys are absent.
 
@@ -166,8 +151,8 @@ Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) 
 
 **Kid TV night:** `channel_snow: true`, `screensaver` with a long timeout, `autoplay: next_in_season_only`.
 
-**Demo / showroom:** `channel_snow`, `scanlines`, `analog_artifacts`, `shutdown_collapse` — enable via `--channel-snow --scanlines --analog-artifacts --shutdown-collapse` for one run.
+**Demo / showroom:** `channel_snow`, `analog_artifacts`, `shutdown_collapse` — enable via `--channel-snow --analog-artifacts --shutdown-collapse` for one run.
 
-**Purist / low CPU:** leave all fun tweaks off; easter egg patterns still work if you dial them intentionally.
+**Purist / low CPU:** leave all fun tweaks off; easter egg patterns still work when you press their number sequences.
 
 See also [Controls](controls.md) (channel numbers, quit flow) and [Web admin](web-admin.md) (live toggles).

@@ -133,6 +133,7 @@ PLAY_INPUT_GRACE_MS = 350
 AUTOPLAY_MODES = ("off", "next_episode", "next_in_season_only")
 CHANNEL_FX_MODES = ("off", "visual", "visual+audio")
 HW_DECODE_MODES = ("auto", "on", "off")
+_PLAYBACK_CACHE_DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
 class C:
@@ -161,7 +162,6 @@ class C:
 
     # Misc
     BLACK = (0, 0, 0)
-    SCANLINE = (0, 0, 0, 28)
     NOW_PLAYING = (255, 210, 80)
     WATCHED = (60, 80, 100)
     NEXT_UP = (18, 55, 32)
@@ -216,6 +216,7 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
         if legacy == "visual+audio":
             channel_snow_audio = True
     analog_artifacts = bool(ui.get("analog_artifacts", defaults["analog_artifacts"]))
+    footer_hints = bool(ui.get("footer_hints", defaults["footer_hints"]))
     try:
         analog_rate = float(ui.get("analog_artifact_rate", 12))
     except (TypeError, ValueError):
@@ -228,9 +229,9 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
         "channel_snow": channel_snow,
         "shutdown_collapse": shutdown_collapse,
         "channel_snow_audio": channel_snow_audio,
-        "scanlines": bool(ui.get("scanlines", False)),
         "analog_artifacts": analog_artifacts,
         "analog_artifact_rate": analog_rate,
+        "footer_hints": footer_hints,
         "safe_zone": safe_zone_to_config(safe_zone, safe_zone_offset),
     }
 
@@ -239,7 +240,10 @@ def _parse_gamepad(raw: dict | None) -> dict[str, Any]:
     gp = raw or {}
     if not isinstance(gp, dict):
         gp = {}
-    return {"enabled": bool(gp.get("enabled", True))}
+    bindings = gp.get("bindings") or {}
+    if not isinstance(bindings, dict):
+        bindings = {}
+    return {"enabled": bool(gp.get("enabled", True)), "bindings": bindings}
 
 
 def _parse_channels(raw: dict | None) -> dict[str, Any]:
@@ -255,6 +259,49 @@ def _parse_channels(raw: dict | None) -> dict[str, Any]:
     return {
         "order": [str(n) for n in order],
         "numbers": numbers,
+    }
+
+
+def _parse_kids_mode(raw: dict | None) -> dict[str, Any]:
+    km = raw or {}
+    if not isinstance(km, dict):
+        km = {}
+    out: dict[str, Any] = {
+        "default_enabled": bool(km.get("default_enabled", False)),
+        "interleave_shows_movies": bool(km.get("interleave_shows_movies", False)),
+        "browse_style": str(km.get("browse_style", "card")),
+        "enabled": km.get("enabled"),
+    }
+    if "allowlist" in km:
+        al = km.get("allowlist")
+        if not isinstance(al, dict):
+            al = {}
+        shows = al.get("shows") or []
+        movies = al.get("movies") or []
+        if not isinstance(shows, list):
+            shows = []
+        if not isinstance(movies, list):
+            movies = []
+        out["allowlist"] = {
+            "shows": [str(s) for s in shows],
+            "movies": [str(m) for m in movies],
+        }
+    return out
+
+
+def _parse_network(raw: dict | None) -> dict[str, Any]:
+    net = raw or {}
+    if not isinstance(net, dict):
+        net = {}
+    hostname = str(net.get("mdns_hostname", "vintage-tv")).strip() or "vintage-tv"
+    try:
+        port = int(net.get("admin_port", 8765))
+    except (TypeError, ValueError):
+        port = 8765
+    port = max(1024, min(65535, port))
+    return {
+        "mdns_hostname": hostname,
+        "admin_port": port,
     }
 
 
@@ -275,6 +322,27 @@ def _parse_library(raw: dict | None) -> dict[str, Any]:
     return {
         "rescan_interval_seconds": interval,
         "rescan_long_press_ms": long_press,
+    }
+
+
+def _parse_cache(raw: dict | None) -> dict[str, Any]:
+    cache = raw or {}
+    if not isinstance(cache, dict):
+        cache = {}
+    try:
+        max_bytes = int(cache.get("max_bytes", _PLAYBACK_CACHE_DEFAULT_MAX_BYTES))
+    except (TypeError, ValueError):
+        max_bytes = _PLAYBACK_CACHE_DEFAULT_MAX_BYTES
+    max_bytes = max(64 * 1024 * 1024, max_bytes)
+    directory = cache.get("directory")
+    if directory is not None:
+        directory = str(directory).strip() or None
+    return {
+        "enabled": bool(cache.get("enabled", True)),
+        "directory": directory,
+        "max_bytes": max_bytes,
+        "prefetch_next": bool(cache.get("prefetch_next", True)),
+        "cache_before_playing": bool(cache.get("cache_before_playing", False)),
     }
 
 
@@ -316,9 +384,9 @@ def _default_config() -> dict[str, Any]:
             "channel_snow": True,
             "shutdown_collapse": True,
             "channel_snow_audio": True,
-            "scanlines": False,
             "analog_artifacts": True,
             "analog_artifact_rate": 12,
+            "footer_hints": True,
             "safe_zone": {"top": 10, "bottom": 10, "left": 10, "right": 10},
         },
         "gamepad": {
@@ -331,6 +399,21 @@ def _default_config() -> dict[str, Any]:
         "library": {
             "rescan_interval_seconds": 0,
             "rescan_long_press_ms": 800,
+        },
+        "kids_mode": {
+            "default_enabled": False,
+            "interleave_shows_movies": False,
+        },
+        "network": {
+            "mdns_hostname": "vintage-tv",
+            "admin_port": 8765,
+        },
+        "cache": {
+            "enabled": True,
+            "directory": None,
+            "max_bytes": _PLAYBACK_CACHE_DEFAULT_MAX_BYTES,
+            "prefetch_next": True,
+            "cache_before_playing": False,
         },
         "admin": {
             "enabled": True,
@@ -374,6 +457,9 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "gamepad": _parse_gamepad(raw.get("gamepad")),
         "channels": _parse_channels(raw.get("channels")),
         "library": _parse_library(raw.get("library")),
+        "kids_mode": _parse_kids_mode(raw.get("kids_mode")),
+        "network": _parse_network(raw.get("network")),
+        "cache": _parse_cache(raw.get("cache")),
         "admin": _parse_admin(raw.get("admin")),
     }
 

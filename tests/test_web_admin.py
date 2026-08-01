@@ -44,10 +44,13 @@ class _MockContext:
 
     def admin_keymap(self) -> dict[str, Any]:
         return {
-            "bindings": [
-                {"action": "up", "label": "Up", "key": "<up>"},
+            "keyboard": [
+                {"action": "up", "label": "Up", "key": "up"},
                 {"action": "reset", "label": "Reset watch status", "key": "r"},
-            ]
+            ],
+            "gamepad": [
+                {"action": "select", "label": "Select / pause", "binding": "button-0"},
+            ],
         }
 
     def admin_library(self) -> dict[str, Any]:
@@ -138,8 +141,9 @@ class WebAdminTests(unittest.TestCase):
 
     def test_keymap(self):
         data = self._get("/api/keymap")
-        self.assertIn("bindings", data)
-        self.assertEqual(data["bindings"][0]["key"], "<up>")
+        self.assertIn("keyboard", data)
+        self.assertEqual(data["keyboard"][0]["key"], "up")
+        self.assertIn("gamepad", data)
 
     def test_library(self):
         data = self._get("/api/library")

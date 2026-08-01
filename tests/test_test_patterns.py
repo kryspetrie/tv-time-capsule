@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import os
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import pygame
@@ -18,9 +18,12 @@ from tv_time_capsule.test_patterns import (
 
 class TestPatternsTests(unittest.TestCase):
     def test_dial_codes(self):
-        self.assertTrue(is_show_list_test_dial("0"))
-        self.assertTrue(is_show_list_test_dial("00"))
-        self.assertTrue(is_show_list_test_dial("000"))
+        self.assertTrue(is_show_list_test_dial("001"))
+        self.assertTrue(is_show_list_test_dial("002"))
+        self.assertTrue(is_show_list_test_dial("003"))
+        self.assertFalse(is_show_list_test_dial("0"))
+        self.assertFalse(is_show_list_test_dial("00"))
+        self.assertFalse(is_show_list_test_dial("000"))
         self.assertFalse(is_show_list_test_dial("1"))
         self.assertFalse(is_show_list_test_dial("007"))
 
@@ -39,6 +42,51 @@ class TestPatternsTests(unittest.TestCase):
             path = pattern_asset_path(dial)
             assert path is not None
             self.assertEqual(path.name, name)
+
+
+class TestPatternDialViewsTests(unittest.TestCase):
+    """Easter egg dials should work on every parent browse screen."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+
+    def _app(self, view_name: str):
+        from tv_time_capsule.app import TVTimeCapsule
+
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app._kids_mode_active = False
+        app.view = getattr(app, view_name)
+        return app
+
+    def test_dial_works_on_all_parent_browse_views(self):
+        if pattern_asset_path("001") is None:
+            self.skipTest("test pattern assets not present")
+        for view_name in (
+            "SHOW_LIST",
+            "MOVIE_LIST",
+            "LIBRARY_SELECT",
+            "SEASON_SELECT",
+            "EPISODE_SELECT",
+        ):
+            with self.subTest(view=view_name):
+                app = self._app(view_name)
+                for digit in (0, 0, 1):
+                    app._append_dial_digit(digit)
+                self.assertEqual(app._show_list_test_pattern, "001")
+                self.assertEqual(app.channel_error, "")
+                app._process_browse_action("back")
+                self.assertIsNone(app._show_list_test_pattern)
+
+    def test_kids_mode_does_not_show_patterns(self):
+        app = self._app("SHOW_LIST")
+        app._kids_mode_active = True
+        for digit in (0, 0, 1):
+            app._append_dial_digit(digit)
+        self.assertIsNone(app._show_list_test_pattern)
 
 
 class AnalogArtifactsTests(unittest.TestCase):

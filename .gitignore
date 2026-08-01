@@ -26,5 +26,5 @@ Thumbs.db
 # Media files (user content)
 media/
 sample/.cache/
-sample/media-a/
-sample/media-b/
+scripts/mount-test/media/
+scripts/mount-test/.ssh/

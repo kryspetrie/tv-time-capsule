@@ -2,7 +2,7 @@
 
 A child-friendly CRT media player for Raspberry Pi. Cable-TV style interface with channel numbers, single-show focus, and vintage TV aesthetics.
 
-Optional **fun tweaks** (channel snow, scanlines, analog glitches, screensaver) and **easter eggs** (secret test patterns on dial `0` / `00` / `000`) — see [Fun tweaks & easter eggs](docs/usage/fun-tweaks-and-easter-eggs.md).
+Optional **fun tweaks** (channel snow, analog glitches, screensaver) and **easter eggs** (press `001` / `002` / `003` for secret test patterns) — see [Fun tweaks & easter eggs](docs/usage/fun-tweaks-and-easter-eggs.md).
 
 ## Documentation
 

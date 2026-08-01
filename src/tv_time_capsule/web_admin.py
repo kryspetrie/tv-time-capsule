@@ -174,7 +174,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 
 <div class="card">
   <h2>Keymap</h2>
-  <p class="muted">Current keyboard bindings (read-only). Rebind in-app with Tab.</p>
+  <p class="muted">Current keyboard bindings (read-only). Rebind in-app with F2.</p>
   <pre id="keymap">Loading…</pre>
 </div>
 
@@ -205,9 +205,9 @@ const SETTING_LABELS = {
   channel_snow: "Channel snow (tune burst)",
   shutdown_collapse: "Shutdown CRT collapse",
   channel_snow_audio: "Channel snow audio",
-  scanlines: "CRT scanlines",
   analog_artifacts: "Analog signal glitches (static / tear / roll)",
   analog_artifact_rate: "Analog glitches per minute",
+  footer_hints: "Bottom status bar — clock + help (parent mode)",
   safe_zone_top: "Safe zone top (%)",
   safe_zone_bottom: "Safe zone bottom (%)",
   safe_zone_left: "Safe zone left (%)",
@@ -283,14 +283,24 @@ function readMediaPathsFromDom() {
 }
 
 function renderLibrary(data) {
+  const layout = data.layout ? ` · layout: ${data.layout}` : "";
   document.getElementById("lib-summary").textContent =
-    `${data.shows || 0} show(s), ${data.episodes || 0} episode(s)`;
+    `${data.shows || 0} show(s), ${data.episodes || 0} episode(s), ${data.movies || 0} movie(s)${layout}`;
   const tree = document.getElementById("lib-tree");
-  if (!data.tree || !data.tree.length) {
+  const root = data.tree;
+  let showList = [];
+  let movieList = [];
+  if (Array.isArray(root)) {
+    showList = root;
+  } else if (root) {
+    showList = root.shows || [];
+    movieList = root.movies || [];
+  }
+  if (!showList.length && !movieList.length) {
     tree.textContent = "(empty)";
     return;
   }
-  tree.innerHTML = data.tree.map(show => {
+  let html = showList.map(show => {
     const seasons = (show.seasons || []).map(s => {
       const label = s.label ? esc(s.label) : `Season ${s.number}`;
       const eps = (s.episodes || []).map(e =>
@@ -300,6 +310,13 @@ function renderLibrary(data) {
     }).join("");
     return `<details open><summary><strong>${esc(show.name)}</strong></summary>${seasons}</details>`;
   }).join("");
+  if (movieList.length) {
+    const items = movieList.map(m =>
+      `<div class="ep">${esc(m.title || m.file || "")}</div>`
+    ).join("");
+    html += `<details open><summary><strong>Movies</strong> (${movieList.length})</summary>${items}</details>`;
+  }
+  tree.innerHTML = html;
 }
 
 function renderChannels() {
@@ -455,8 +472,12 @@ async function loadWatch() {
 }
 async function loadKeymap() {
   const data = await api("/api/keymap");
-  const lines = (data.bindings || []).map(row => `${row.label}: ${row.key}`);
-  document.getElementById("keymap").textContent = lines.join("\\n") || "(none)";
+  const kb = (data.keyboard || []).map(row => `${row.label}: ${row.key}`).join("\\n");
+  const gp = (data.gamepad || []).map(row => `${row.label}: ${row.binding}`).join("\\n");
+  const lines = [];
+  if (kb) lines.push("KEYBOARD\\n" + kb);
+  if (gp) lines.push("GAMEPAD\\n" + gp);
+  document.getElementById("keymap").textContent = lines.join("\\n\\n") || "(none)";
 }
 async function loadLogs() {
   document.getElementById("log").textContent = (await api("/api/logs")).lines.join("\\n");
@@ -600,7 +621,7 @@ class DeferredAdminBridge:
 
     def admin_library(self) -> dict[str, Any]:
         if self._app is None:
-            return {"shows": 0, "episodes": 0, "tree": [], "media_paths": []}
+            return {"shows": 0, "episodes": 0, "movies": 0, "tree": {"shows": [], "movies": []}, "media_paths": []}
         return self._app.admin_library()
 
     def admin_config_get(self) -> dict[str, Any]:

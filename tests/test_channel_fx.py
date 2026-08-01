@@ -44,17 +44,40 @@ class ChannelFxTests(unittest.TestCase):
         fx = ChannelChangeFX(snow=True)
         self.assertTrue(fx.audio_enabled)
 
+    def test_snow_audio_uses_ffplay_when_mixer_missing(self):
+        with patch("tv_time_capsule.channel_fx._mixer_available", return_value=False):
+            with patch(
+                "tv_time_capsule.channel_fx.detect_ffplay",
+                return_value="/usr/bin/ffplay",
+            ):
+                with patch("tv_time_capsule.channel_fx.subprocess.Popen") as popen:
+                    fx = ChannelChangeFX(snow=True)
+                    fx.trigger()
+                    popen.assert_called_once()
+                    cmd = popen.call_args[0][0]
+                    self.assertEqual(cmd[0], "/usr/bin/ffplay")
+                    self.assertIn("anoisesrc", cmd[-1])
+
+    def test_snow_audio_uses_mixer_when_available(self):
+        mock_sound = unittest.mock.MagicMock()
+        with patch("tv_time_capsule.channel_fx._mixer_available", return_value=True):
+            with patch("pygame.mixer.get_init", return_value=True):
+                with patch("pygame.mixer.Sound", return_value=mock_sound):
+                    fx = ChannelChangeFX(snow=True)
+                    fx.trigger()
+                    mock_sound.play.assert_called_once()
+
     def test_snow_audio_can_be_disabled(self):
         fx = ChannelChangeFX(snow=True, audio=False)
         self.assertFalse(fx.audio_enabled)
 
     def test_trigger_plays_quiet_static(self):
         fx = ChannelChangeFX(snow=True)
-        with patch.object(fx, "_ensure_sound") as ensure:
-            with patch.object(fx, "_sound") as sound:
-                fx.trigger()
-                ensure.assert_called_once()
-                sound.play.assert_called_once()
+        player = fx._audio_player
+        self.assertIsNotNone(player)
+        with patch.object(player, "play") as play:
+            fx.trigger()
+            play.assert_called_once()
 
     def test_snow_triggers_and_draws(self):
         fx = ChannelChangeFX(snow=True, audio=False)

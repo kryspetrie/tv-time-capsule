@@ -28,7 +28,34 @@ media/
 
 When season folders use **genre-style names** (e.g. `Movies/Action/`, `Movies/Adventure/`), the season menu shows the **folder name** instead of “Season 1”. Conventional names (`s01`, `Season 2`, etc.) still show as “Season N”.
 
-## Movies alongside TV shows
+## Split library (shows + movies)
+
+When a media root contains both **`shows/`** and **`movies/`** subfolders (case-insensitive), the app treats them as separate libraries:
+
+```
+media/
+  shows/
+    Bluey/
+      s01/s01e01 - Dancing.mp4
+  movies/
+    Big Hero.mp4
+    The Red Balloon.mkv
+    Action/
+      Journey.mp4
+```
+
+| Layout | Startup screen |
+|--------|----------------|
+| Both `shows/` and `movies/` | **Library** picker (Shows \| Movies) |
+| `shows/` only | Show list (scans `shows/` only) |
+| `movies/` only | Movie list (scans `movies/` only) |
+| Neither (legacy) | Show list (scans the media root as today) |
+
+**Movies** are discovered recursively under `movies/` and shown as a **flat, alphabetically sorted** list — no season or episode screens. Selecting a movie plays it directly. Watch progress is stored like a single episode (`S01 E01` internally).
+
+Multiple media roots merge independently: shows from all applicable `shows/` (or legacy) paths; movies from all `movies/` paths.
+
+## Movies alongside TV shows (legacy folder)
 
 Use a normal show folder (e.g. `Movies/`) in the same media root as series like `Bluey/`:
 

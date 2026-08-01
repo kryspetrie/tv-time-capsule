@@ -1,0 +1,43 @@
+# Local Samba / SFTP / FTP servers for ./scripts/verify-remote-mounts.sh
+#
+# Credentials (test only): user media, password secret
+# SFTP also accepts the generated key in ./.ssh/id_rsa
+services:
+  samba:
+    image: dperson/samba:latest
+    restart: unless-stopped
+    ports:
+      - "1139:139"
+      - "1445:445"
+    volumes:
+      - ./media:/share/media:ro
+    environment:
+      - TZ=UTC
+    command: >
+      -u "media;secret"
+      -s "media;/share/media;yes;no;no;media"
+
+  sftp:
+    image: atmoz/sftp:latest
+    restart: unless-stopped
+    ports:
+      - "2222:22"
+    volumes:
+      - ./media:/home/media/media:ro
+      - ./.ssh/id_rsa.pub:/home/media/.ssh/keys/id_rsa.pub:ro
+    command: media::1000:1000:media
+
+  ftp:
+    image: fauria/vsftpd:latest
+    restart: unless-stopped
+    ports:
+      - "2121:21"
+      - "21100-21110:21100-21110"
+    environment:
+      - FTP_USER=media
+      - FTP_PASS=secret
+      - PASV_ADDRESS=127.0.0.1
+      - PASV_MIN_PORT=21100
+      - PASV_MAX_PORT=21110
+    volumes:
+      - ./media:/home/vsftpd/media:ro

@@ -83,29 +83,34 @@ tv-time-capsule --media-dir /path/to/media
 tv-time-capsule --media-dir /usb/shows --media-dir ~/Videos/kids
 ```
 
-Useful flags (most features are **on by default** in config — flags override for one run):
+Useful flags override config when set. Boolean options accept `--feature` / `--no-feature`:
 
 | Flag | Meaning |
 |------|---------|
 | `--media-dir DIR` | Scan this directory (repeatable). Overrides config paths for this run. |
 | `--windowed` | 800×600 resizable window; admin on loopback only; **safe zone 0%** unless `--safe-zone` is set |
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
-| `--scanlines` | **Fun tweak** — CRT scanline overlay (off by default) |
-| `--channel-snow` | Force channel snow on (already default in config) |
-| `--shutdown-collapse` | Force shutdown collapse on (already default in config) |
-| `--analog-artifacts` | Force analog glitches on (already default in config) |
-| `--analog-artifact-rate N` | Glitches per minute with analog artifacts |
-| `--safe-zone PCT` | CRT overscan safe zone — uniform inset % (overrides config; use with `--windowed` to test overscan on a monitor) |
+| `--channel-snow` / `--no-channel-snow` | Static burst when committing channel numbers |
+| `--shutdown-collapse` / `--no-shutdown-collapse` | CRT vertical collapse on quit |
+| `--analog-artifacts` / `--no-analog-artifacts` | Random glitches on the show browser |
+| `--analog-artifact-rate N` | Glitches per minute when analog artifacts are on |
+| `--safe-zone PCT` | CRT overscan safe zone — uniform inset % (use `--safe-zone 0` to disable) |
 | `--skip-mounts` | Do not mount remote shares from config |
-| `--screensaver` | Force screensaver on (already default in config) |
+| `--screensaver` / `--no-screensaver` | VHS logo screensaver |
 | `--screensaver-timeout SEC` | Idle seconds before screensaver |
-| `--admin` | Force web admin on (already default in config) |
+| `--admin` / `--no-admin` | Web admin UI |
 | `--admin-port PORT` | Port for admin (default 8765) |
 
-**Typical local dev** (defaults cover the rest):
+**Minimal dev run** (uses config defaults; windowed forces 0% safe zone):
 
 ```bash
 poetry run tv-time-capsule --windowed --media-dir ./media
+```
+
+Disable features for one run:
+
+```bash
+poetry run tv-time-capsule --windowed --media-dir ./media --no-admin --no-screensaver
 ```
 
 Test CRT overscan in the window:

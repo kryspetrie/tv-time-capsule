@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .media import discover_shows
+from .media import discover_library
 from .mounts import is_mounted, mount_one, mountpoints_from_config
 
 
@@ -36,13 +36,42 @@ def library_tree_from_shows(shows: dict[str, Any]) -> list[dict[str, Any]]:
     return tree
 
 
-def library_summary(shows: dict[str, Any]) -> dict[str, int]:
+def library_tree_from_movies(movies: dict[str, Any]) -> list[dict[str, Any]]:
+    """Serialize movies as a flat list for the admin tree."""
+    tree: list[dict[str, Any]] = []
+    for key in sorted(movies.keys(), key=lambda k: (movies[k].get("title") or k).lower()):
+        movie = movies[key]
+        tree.append(
+            {
+                "title": movie.get("title") or key,
+                "file": os.path.basename(movie.get("path") or ""),
+            }
+        )
+    return tree
+
+
+def library_tree_from_discovery(
+    shows: dict[str, Any],
+    movies: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Full library tree with optional movies section."""
+    out: dict[str, Any] = {"shows": library_tree_from_shows(shows)}
+    if movies:
+        out["movies"] = library_tree_from_movies(movies)
+    return out
+
+
+def library_summary(
+    shows: dict[str, Any],
+    movies: dict[str, Any] | None = None,
+) -> dict[str, int]:
     episodes = sum(
         len(season.get("episodes") or [])
         for show in shows.values()
         for season in show.get("seasons", {}).values()
     )
-    return {"shows": len(shows), "episodes": episodes}
+    summary = {"shows": len(shows), "episodes": episodes, "movies": len(movies or {})}
+    return summary
 
 
 def verify_media_path(path: str) -> dict[str, Any]:
@@ -86,20 +115,32 @@ def verify_mount_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def scan_paths(paths: list[str]) -> dict[str, Any]:
-    """Discover shows under paths and return summary + tree."""
+    """Discover shows and movies under paths; return summary + tree."""
     clean = [p for p in paths if p]
-    shows = discover_shows(clean)
-    summary = library_summary(shows)
+    discovery = discover_library(clean)
+    shows = discovery.get("shows") or {}
+    movies = discovery.get("movies") or {}
+    layout = discovery.get("layout", "legacy")
+    summary = library_summary(shows, movies)
+    has_content = bool(shows or movies)
+    parts = []
+    if summary["shows"]:
+        parts.append(f"{summary['shows']} show(s), {summary['episodes']} episode(s)")
+    if summary["movies"]:
+        parts.append(f"{summary['movies']} movie(s)")
+    message = (
+        f"Found {', '.join(parts)} (layout: {layout})"
+        if parts
+        else "No shows or movies found"
+    )
     return {
-        "ok": bool(shows),
+        "ok": has_content,
         "paths": clean,
+        "layout": layout,
         **summary,
-        "tree": library_tree_from_shows(shows),
-        "message": (
-            f"Found {summary['shows']} show(s), {summary['episodes']} episode(s)"
-            if shows
-            else "No shows found"
-        ),
+        "tree": library_tree_from_discovery(shows, movies),
+        "discovery": discovery,
+        "message": message,
     }
 
 

@@ -32,6 +32,7 @@ class AdminApiTests(unittest.TestCase):
         summary = library_summary(shows)
         self.assertEqual(summary["shows"], 1)
         self.assertEqual(summary["episodes"], 2)
+        self.assertEqual(summary["movies"], 0)
         tree = library_tree_from_shows(shows)
         self.assertEqual(tree[0]["name"], "Bluey")
         self.assertEqual(tree[0]["seasons"][0]["label"], "Season 1")

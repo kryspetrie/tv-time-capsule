@@ -114,6 +114,7 @@ install_debian() {
     apt_try gnome-keyring libsecret-1-0
     apt_try cifs-utils nfs-common sshfs curlftpfs
     apt_try util-linux network-manager exfat-fuse
+    apt_try avahi-daemon avahi-utils
     apt-get install -y -qq exfatprogs >/dev/null 2>&1 \
         || apt-get install -y -qq exfat-utils >/dev/null 2>&1 \
         || true
@@ -151,6 +152,10 @@ install_macos() {
     fi
     echo -e "${CYAN}Installing packages with Homebrew...${NC}"
     brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+    # SDL2 + mixer/image/ttf — needed when pygame must be built from source (e.g. Python 3.14).
+    for pkg in sdl2 sdl2_mixer sdl2_image sdl2_ttf; do
+        brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
+    done
 }
 
 OS="$(detect_os)"

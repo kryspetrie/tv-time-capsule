@@ -20,6 +20,8 @@ These are installed automatically by `install.sh` / `install-pi.sh`. To add them
 
 If a mount tool is missing at runtime, the player logs a skip line and continues with local media.
 
+**Local verification:** Before wiring a NAS, run `./scripts/verify-remote-mounts.sh` (Docker on localhost). See [Remote mount testing](../development/remote-mount-testing.md).
+
 CIFS and NFS need root; the privilege script installs a narrow sudoers rule so the kiosk user can run `sudo -n mount` without a password prompt.
 
 ## Common fields
@@ -105,5 +107,27 @@ Prefer SSH keys. Password-based sshfs is not the primary path.
 - Already-mounted paths are left alone  
 - Use `--skip-mounts` to skip this step  
 - Failed mounts are logged; discovery continues with whatever paths are available  
+
+## Playback cache
+
+When an episode is read from a remote mount (NFS, SMB, SSHFS, etc.), the player can copy it to local disk in the background so playback stays smooth if the network hiccups.
+
+Configure under `cache` in `config.json`:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Turn background caching on or off |
+| `directory` | `~/.local/share/tv-time-capsule/playback-cache` | Where cached files are stored |
+| `max_bytes` | `2147483648` (2 GiB) | LRU size cap; oldest entries are removed when full |
+| `prefetch_next` | `true` | Cache the next autoplay episode during the up-next countdown |
+| `cache_before_playing` | `false` | Wait on the title screen with a progress bar until caching finishes before playback starts |
+
+While you watch, a background thread copies the file. If the copy finishes before the episode ends, playback switches to the local copy at the current position. Retries after a stall also prefer the cache when it is ready.
+
+Set `cache_before_playing` to `true` to skip that mid-playback switch: the now-playing title screen stays up with a green progress bar until the full file is local, then playback starts from the cache. **Enter** starts playback immediately from the remote stream (caching continues in the background). **Esc** cancels and returns to the browse menu.
+
+While streaming with a background cache in progress, pause to see the cache progress bar. Press **C** to stop caching if it is affecting playback.
+
+Local USB paths and other non-mount media are never cached.
 
 Networking must be up in kiosk mode — see [Networking](networking.md).

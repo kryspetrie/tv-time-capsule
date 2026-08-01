@@ -77,16 +77,22 @@ Mountpoints from `mounts` are also scanned even if they are not listed in `media
 
 ## `keymap`
 
-Optional custom key bindings (pygame key codes). Omitted actions use the defaults in [Controls](controls.md). Rebinding in-app (Tab) writes here; Tab on the key-config screen resets to defaults (empty object).
+Optional custom key bindings. Each action accepts a **readable key name** or an **array of names** for aliases. Listing an action **replaces** its defaults completely (no merge). Omitted actions keep the defaults in [Controls](controls.md). Rebinding in-app (**F2**) writes here and also replaces that action’s bindings with the single captured key.
 
 ```json
 {
   "keymap": {
-    "up": 1073741906,
-    "select": 13
+    "select": ["space"],
+    "quit": ["q", "escape"]
   }
 }
 ```
+
+In this example only Space selects (Enter and keypad Enter do nothing for select). Quit accepts both `q` and `escape` because both are listed. Unlisted actions (up, back, digits, …) still use code defaults.
+
+Common names: `up`, `down`, `left`, `right`, `enter`, `kp-enter`, `escape`, `esc`, `space`, `tab`, `delete`, `f1`–`f12`, `a`–`z`, `0`–`9`, `num-0`–`num-9`. `enter` is the main Return key; `kp-enter` is the physically separate numeric-keypad Enter key. Both remain distinct in config so either key works, while in-app help combines them into one `enter` label. Legacy integer pygame key codes still load.
+
+The in-app key-setup screen is paginated (**← / →**). **F3** on that screen resets to defaults (empty object). **Delete** removes the last key when more than one is bound.
 
 ## Full example
 
@@ -131,7 +137,7 @@ The bundled asset is a 32-bit BMP so pygame can load it even when extended image
 | `enabled` | `true` | Turn screensaver on |
 | `timeout_seconds` | `30` | Menu inactivity before start (minimum 10) |
 
-CLI overrides for one run: `--screensaver` and `--screensaver-timeout SEC` (only needed to force on when disabled in config).
+CLI overrides for one run: `--screensaver` / `--no-screensaver` and `--screensaver-timeout SEC`.
 
 ## `playback`
 
@@ -156,6 +162,32 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 | `now_playing_splash_seconds` | `1.5` | How long the summary stays visible (0 = skip). Skipped after autoplay “Up next” — only manual episode select shows it |
 | `hw_decode` | `auto` | Pi hardware H.264 decode: `auto`, `on`, or `off` |
 
+## `cache`
+
+Background local copy of episodes read from remote mounts (NFS, SMB, SSHFS, etc.) for smoother playback. See [Remote mounts → Playback cache](remote-mounts.md#playback-cache).
+
+```json
+{
+  "cache": {
+    "enabled": true,
+    "directory": null,
+    "max_bytes": 2147483648,
+    "prefetch_next": true,
+    "cache_before_playing": false
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Copy remote episodes to disk while playing |
+| `directory` | `~/.local/share/tv-time-capsule/playback-cache` | Cache folder (`null` = default) |
+| `max_bytes` | `2147483648` (2 GiB) | LRU size cap; oldest cached files are removed when full |
+| `prefetch_next` | `true` | Cache the next autoplay episode during the up-next countdown |
+| `cache_before_playing` | `false` | Wait on the title screen with a progress bar until caching finishes before playback starts. **Enter** plays from the stream immediately; **Esc** cancels |
+
+While streaming with background caching, pause to see cache progress; press **C** to cancel the cache copy.
+
 ## `ui`
 
 CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md) for behavior details and suggested combos.
@@ -166,7 +198,6 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
     "channel_snow": false,
     "shutdown_collapse": false,
     "channel_snow_audio": false,
-    "scanlines": false,
     "analog_artifacts": false,
     "analog_artifact_rate": 12
   }
@@ -178,12 +209,12 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
 | `channel_snow` | `true` | **Fun tweak** — B&W static burst when committing a channel number (show, season, or episode list). Not arrow keys. |
 | `shutdown_collapse` | `true` | **Fun tweak** — CRT vertical collapse animation on quit |
 | `channel_snow_audio` | `true` | Quiet white-noise with channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
-| `scanlines` | `false` | **Fun tweak** — Semi-transparent CRT scanline overlay |
 | `analog_artifacts` | `true` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
 | `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches) |
+| `footer_hints` | `true` | Bottom status bar (clock + help key) on browse screens in **parent mode** (toggle in-app with **F5**; always hidden in kids mode) |
 | `safe_zone` | `10` on all sides | CRT overscan inset — see [Safe zone](#safe-zone) |
 
-CLI overrides: `--channel-snow`, `--shutdown-collapse`, `--scanlines`, `--analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`. In **`--windowed`** mode the safe zone defaults to **0%** unless you pass `--safe-zone` explicitly (handy for dev on a monitor).
+CLI overrides: `--channel-snow` / `--no-channel-snow`, `--shutdown-collapse` / `--no-shutdown-collapse`, `--analog-artifacts` / `--no-analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`. Omit a flag to use config. In **`--windowed`** mode the safe zone defaults to **0%** unless you pass `--safe-zone` explicitly (handy for dev on a monitor).
 
 ### Safe zone
 
@@ -196,7 +227,7 @@ When any `safe_zone` margin is greater than zero:
 - **Menus, splashes, overlays, and screensaver** always render at native **640×480** (no interpolation) and are composited into the padded frame; border pixels use the **same background color** as that screen.
 - **Video** is **full-bleed on the whole window** during playback (including margin areas). The window does not resize when you start an episode.
 - **Playback HUD** (progress, volume, pause, Up Next) still respects safe-zone inset so controls stay title-safe on CRTs.
-- **Secret test patterns** (`0` / `00` / `000`) fill the **entire extended framebuffer**.
+- **Secret test patterns** (`001` / `002` / `003`) fill the **entire extended framebuffer**.
 - **Screensaver** bounces inside the same title-safe UI inset as menus.
 
 Percentages are of the **UI viewport** — width for left/right padding, height for top/bottom. Maximum 25% per edge.
@@ -260,27 +291,37 @@ Typical CRT starting point: **5%** all sides, or **8% bottom** (where many sets 
 
 ### Easter egg: secret test patterns
 
-On the **show browser only**, dial `0`, `00`, or `000` to display full-screen test patterns from your own PNGs in `src/tv_time_capsule/assets/` (`colorbars.png`, `grid.png`, `indianhead.png`). The app never generates these files. **Esc** exits. Full details: [Fun tweaks & easter eggs → Secret test patterns](fun-tweaks-and-easter-eggs.md#secret-test-patterns-show-browser).
+On any **parent** browse screen, press `001`, `002`, or `003` to display full-screen test patterns from your own PNGs in `src/tv_time_capsule/assets/` (`colorbars.png`, `grid.png`, `indianhead.png`). The app never generates these files. **Esc** exits. Full details: [Fun tweaks & easter eggs → Secret test patterns](fun-tweaks-and-easter-eggs.md#secret-test-patterns-show-browser).
 
 Legacy `channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` if the new keys are absent.
 
 ## `gamepad`
 
-USB game controllers (SDL mapping). Enabled by default when a controller is connected.
+USB game controllers (SDL mapping). Enabled by default when a controller is connected. Remap live in-app with **F4** (gamepad configuration) — press a button, D-pad direction, or stick while capturing.
 
 ```json
 {
   "gamepad": {
-    "enabled": true
+    "enabled": true,
+    "bindings": {
+      "select": ["button-0", "button-7"],
+      "back": ["button-1", "button-6"],
+      "up": ["hat-up", "stick-up"],
+      "down": ["hat-down", "stick-down"],
+      "left": ["hat-left", "stick-left"],
+      "right": ["hat-right", "stick-right"]
+    }
   }
 }
 ```
 
-| Control | Action |
-|---------|--------|
-| D-pad / left stick | Navigate menus; volume / seek during playback |
-| A / Start | Select / pause-resume |
-| B / Back | Back / stop |
+| Token | Meaning |
+|-------|---------|
+| `button-N` | Face or menu button index (SDL numbering) |
+| `hat-up` / `hat-down` / `hat-left` / `hat-right` | D-pad |
+| `stick-up` / `stick-down` / `stick-left` / `stick-right` | Left analog stick |
+
+Each action accepts one token or an array of aliases. **F3** on the gamepad setup screen resets to defaults; **Delete** removes the last alias.
 
 See [Controls → Gamepad](controls.md#gamepad).
 
@@ -305,6 +346,50 @@ Customize show browse order and cable-style channel numbers on the **show list**
 Typing a channel number on the show list jumps to the matching show (gaps are allowed — e.g. channel 9 without a channel 8). On the **season** and **episode** lists, numbers select season or episode index instead. See [Controls → Channel numbers](controls.md#channel-numbers).
 
 With [channel snow](fun-tweaks-and-easter-eggs.md#channel-snow) enabled, committing a number plays a static burst on every browse screen.
+
+## `kids_mode`
+
+Simplified browsing for young viewers. Toggle at runtime with **Tab** (default `kids_mode_toggle` key); switch back to parent mode with the same key.
+
+```json
+{
+  "kids_mode": {
+    "default_enabled": false,
+    "interleave_shows_movies": false,
+    "enabled": false,
+    "allowlist": null
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `default_enabled` | `false` | Used on first launch when `enabled` has never been saved |
+| `enabled` | *(from `default_enabled`)* | **Persisted** parent/kids mode — written when you toggle at runtime; restored on next start |
+| `interleave_shows_movies` | `false` | In kids mode, show one combined alphabetical list of shows and movies instead of separate library screens |
+| `allowlist` | *(absent / `null`)* | When **absent**, kids mode shows the full library (legacy). When **present** (even empty), kids mode only shows tagged titles. Parent **K** toggles tags on the show/movie/catalog cursor and creates the list on first use |
+
+Kid mode auto-plays when a show is selected (resume or next-up in the last-watched season). Autoplay after an episode ends follows `playback.autoplay`. Quit (**Esc**, **Q**, window close) is disabled until you toggle back to parent mode. See [Controls → Kid-friendly mode](controls.md#kid-friendly-mode).
+
+## `network`
+
+LAN hostname for mDNS (`vintage-tv.local`). **Set automatically** by `./install.sh` and `./install-pi.sh` (see `--hostname`).
+
+```json
+{
+  "network": {
+    "mdns_hostname": "vintage-tv",
+    "admin_port": 8765
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `mdns_hostname` | `vintage-tv` | Short name registered on the LAN (browse as `<name>.local`) |
+| `admin_port` | `8765` | Web admin port; install also publishes `_http._tcp` via Avahi |
+
+Re-apply after editing: `sudo ./scripts/ensure-mdns-hostname.sh --hostname <name>`
 
 ## `library`
 

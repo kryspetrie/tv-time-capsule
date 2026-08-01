@@ -6,10 +6,37 @@
 #
 # Run on a fresh Raspberry Pi OS Lite installation:
 #   chmod +x install-pi.sh && ./install-pi.sh
+#   ./install-pi.sh --hostname vintage-tv-bedroom
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+SKIP_HOSTNAME=0
+HOSTNAME_ARG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+            exit 0
+            ;;
+        --hostname)
+            HOSTNAME_ARG="${2:?--hostname requires a value}"
+            shift 2
+            ;;
+        --skip-hostname)
+            SKIP_HOSTNAME=1
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--hostname NAME] [--skip-hostname]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Colors
 RED='\033[0;31m'
@@ -57,6 +84,7 @@ fi
 MEDIA_ROOT="${MEDIA_ROOT:-/media/usb}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/tv-time-capsule}"
 AUTOSTART="${AUTOSTART:-yes}"
+MDNS_HOSTNAME="${HOSTNAME_ARG:-${MDNS_HOSTNAME:-${TV_TIME_CAPSULE_HOSTNAME:-vintage-tv}}}"
 USER_NAME="${SUDO_USER:-$(whoami)}"
 
 echo ""
@@ -64,12 +92,11 @@ echo -e "${CYAN}Configuration:${NC}"
 echo "  Media root: $MEDIA_ROOT"
 echo "  Install dir: $INSTALL_DIR"
 echo "  Autostart: $AUTOSTART"
+echo "  mDNS name: ${MDNS_HOSTNAME}.local"
 echo "  User: $USER_NAME"
 echo ""
 
 # ─── Install Dependencies ────────────────────────────────────────────────────
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${CYAN}Installing system prerequisites...${NC}"
 "$SCRIPT_DIR/scripts/install-system-deps.sh"
@@ -91,8 +118,15 @@ fi
 
 echo -e "${GREEN}✓${NC} System packages installed"
 
-# Networking + passwordless mounts for kiosk / remote media
+# Networking + LAN hostname + passwordless mounts
 "$SCRIPT_DIR/scripts/ensure-networking.sh" || true
+if [[ "$SKIP_HOSTNAME" -eq 0 ]]; then
+    "$SCRIPT_DIR/scripts/install-hostname.sh" \
+        --hostname "$MDNS_HOSTNAME" \
+        --user "$USER_NAME"
+else
+    echo -e "${YELLOW}Skipping mDNS hostname setup (--skip-hostname)${NC}"
+fi
 "$SCRIPT_DIR/scripts/ensure-mount-privileges.sh" --user "$USER_NAME" || true
 
 # ─── Create venv and install package ─────────────────────────────────────────
@@ -130,6 +164,8 @@ python3 -m venv "$INSTALL_DIR/.venv"
 source "$INSTALL_DIR/.venv/bin/activate"
 pip install --upgrade pip --quiet
 pip install "$INSTALL_DIR"
+TV_TIME_CAPSULE_VENV="$INSTALL_DIR/.venv" \
+    "$SCRIPT_DIR/scripts/ensure-pygame-mixer.sh" || true
 deactivate
 
 echo -e "${GREEN}✓${NC} Virtual environment created with tv-time-capsule"
@@ -238,8 +274,14 @@ echo "  Arrow keys: Navigate"
 echo "  Enter/→:    Select/Play"
 echo "  Esc/←:      Back"
 echo "  0-9:        Type channel number"
-echo "  Tab:        Key setup"
+echo "  Tab:        Kids / parent mode (F2: key setup)"
+echo ""
+echo -e "${YELLOW}Web admin (when enabled in config):${NC}"
+echo "  http://${MDNS_HOSTNAME}.local:8765/"
 echo ""
 echo -e "${YELLOW}To copy files from your computer:${NC}"
-echo "  scp -r '/path/to/Show Name/*' pi@tvcapsule.local:$MEDIA_ROOT/"
+echo "  scp -r '/path/to/Show Name/*' pi@${MDNS_HOSTNAME}.local:$MEDIA_ROOT/"
+echo ""
+echo -e "${YELLOW}Multiple TVs on one network?${NC} Use a unique hostname per install:"
+echo "  ./install-pi.sh --hostname vintage-tv-bedroom"
 echo ""

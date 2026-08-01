@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import tv_time_capsule.config as config_mod
-from tv_time_capsule.config import _parse_playback
+from tv_time_capsule.config import _parse_kids_mode, _parse_playback
 
 
 class ConfigAutoCreateTests(unittest.TestCase):
@@ -61,13 +61,26 @@ class PlaybackConfigTests(unittest.TestCase):
 
     def test_default_config_ui_and_admin(self):
         cfg = config_mod.parse_config({})
+        self.assertFalse(cfg["kids_mode"]["default_enabled"])
+        self.assertTrue(cfg["cache"]["enabled"])
+        self.assertTrue(cfg["cache"]["prefetch_next"])
+        self.assertFalse(cfg["cache"]["cache_before_playing"])
+        self.assertEqual(cfg["network"]["mdns_hostname"], "vintage-tv")
+        self.assertEqual(cfg["network"]["admin_port"], 8765)
         self.assertTrue(cfg["ui"]["channel_snow"])
         self.assertTrue(cfg["ui"]["shutdown_collapse"])
         self.assertTrue(cfg["ui"]["analog_artifacts"])
+        self.assertTrue(cfg["ui"]["footer_hints"])
         self.assertEqual(cfg["ui"]["safe_zone"]["top"], 10)
         self.assertTrue(cfg["screensaver"]["enabled"])
         self.assertEqual(cfg["screensaver"]["timeout_seconds"], 30)
         self.assertTrue(cfg["admin"]["enabled"])
+
+    def test_kids_mode_enabled_persisted_field(self):
+        km = _parse_kids_mode({"default_enabled": False, "enabled": True})
+        self.assertTrue(km["enabled"])
+        km_default = _parse_kids_mode({"default_enabled": True})
+        self.assertIsNone(km_default["enabled"])
 
 
 if __name__ == "__main__":

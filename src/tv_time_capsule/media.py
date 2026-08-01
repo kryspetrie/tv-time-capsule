@@ -266,3 +266,134 @@ def _parse_episodes(video_files, season_num, base_dir):
 
     episodes.sort(key=lambda e: e["number"])
     return episodes
+
+
+def _find_library_subdir(media_root: str, name: str) -> str | None:
+    """Return path to ``name`` subfolder if present (case-insensitive)."""
+    if not os.path.isdir(media_root):
+        return None
+    want = name.lower()
+    for entry in os.listdir(media_root):
+        if entry.lower() == want:
+            path = os.path.join(media_root, entry)
+            if os.path.isdir(path):
+                return path
+    return None
+
+
+def _movie_display_title(video_path: str) -> str:
+    base = os.path.basename(video_path)
+    parsed = parse_episode_name(base)
+    title = resolve_episode_title(video_path, parsed)
+    if title:
+        return title
+    stem = Path(base).stem
+    return stem if stem else base
+
+
+def discover_movies(media_paths: list[str] | str) -> list[dict]:
+    """Recursively collect videos under movie roots into a flat sorted list."""
+    if isinstance(media_paths, str):
+        media_paths = [media_paths]
+
+    by_path: dict[str, dict] = {}
+    for movies_root in media_paths:
+        if not os.path.isdir(movies_root):
+            continue
+        for root, _dirs, files in os.walk(movies_root):
+            for fname in sorted(files):
+                if Path(fname).suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                vf = os.path.join(root, fname)
+                if vf in by_path:
+                    continue
+                title = _movie_display_title(vf)
+                thumb = find_video_thumbnail(vf)
+                if not thumb:
+                    thumb = resolve_episode_art(vf)
+                by_path[vf] = {
+                    "title": title,
+                    "path": vf,
+                    "thumbnail": thumb,
+                }
+
+    movies = sorted(by_path.values(), key=lambda m: m["title"].lower())
+    return movies
+
+
+def _movies_to_catalog(movies: list[dict]) -> tuple[dict[str, dict], list[str]]:
+    """Build unique display keys and a title-keyed movie map."""
+    catalog: dict[str, dict] = {}
+    names: list[str] = []
+    title_counts: dict[str, int] = {}
+
+    for movie in movies:
+        base_title = movie["title"]
+        title_counts[base_title] = title_counts.get(base_title, 0) + 1
+
+    title_seen: dict[str, int] = {}
+    for movie in movies:
+        base_title = movie["title"]
+        if title_counts[base_title] > 1:
+            title_seen[base_title] = title_seen.get(base_title, 0) + 1
+            key = f"{base_title} ({title_seen[base_title]})"
+        else:
+            key = base_title
+        entry = dict(movie)
+        entry["key"] = key
+        catalog[key] = entry
+        names.append(key)
+
+    return catalog, names
+
+
+def discover_library(media_paths: list[str] | str) -> dict:
+    """Discover shows and movies, inferring split vs legacy layout.
+
+    Returns:
+        layout: split | shows_only | movies_only | legacy
+        shows: show dict (discover_shows format)
+        movies: title-keyed movie entries
+        movie_names: sorted browse order for movies
+    """
+    if isinstance(media_paths, str):
+        media_paths = [media_paths]
+
+    show_scan_paths: list[str] = []
+    movie_scan_paths: list[str] = []
+    has_shows_dir = False
+    has_movies_dir = False
+
+    for media_root in media_paths:
+        if not os.path.isdir(media_root):
+            continue
+        shows_sub = _find_library_subdir(media_root, "shows")
+        movies_sub = _find_library_subdir(media_root, "movies")
+        if shows_sub:
+            has_shows_dir = True
+            show_scan_paths.append(shows_sub)
+        if movies_sub:
+            has_movies_dir = True
+            movie_scan_paths.append(movies_sub)
+        if not shows_sub and not movies_sub:
+            show_scan_paths.append(media_root)
+
+    if has_shows_dir and has_movies_dir:
+        layout = "split"
+    elif has_movies_dir:
+        layout = "movies_only"
+    elif has_shows_dir:
+        layout = "shows_only"
+    else:
+        layout = "legacy"
+
+    shows = discover_shows(show_scan_paths) if show_scan_paths else {}
+    movie_list = discover_movies(movie_scan_paths) if movie_scan_paths else []
+    movies, movie_names = _movies_to_catalog(movie_list)
+
+    return {
+        "layout": layout,
+        "shows": shows,
+        "movies": movies,
+        "movie_names": movie_names,
+    }

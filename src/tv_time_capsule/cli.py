@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 
 import pygame
 
 from .app import TVTimeCapsule
 from .config import config_file, load_config, save_default_config
-from .log import setup_logging
-from .media import discover_shows
+from .log import LOG, setup_logging
+from .media import discover_library
 from .mounts import ensure_mounts, mountpoints_from_config
 from .player import detect_ffmpeg, np_frombuffer
 from .safe_zone import parse_safe_zone_offset
@@ -26,7 +27,8 @@ def _merge_media_paths(configured: list[str], mount_points: list[str]) -> list[s
     return out
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser (also used in tests)."""
     parser = argparse.ArgumentParser(description="TV Time Capsule")
     parser.add_argument(
         "--media-dir",
@@ -53,30 +55,28 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
-        "--scanlines",
-        action="store_true",
-        help="Enable CRT scanline overlay effect",
-    )
-    parser.add_argument(
         "--channel-snow",
-        action="store_true",
-        help="CRT snow burst when tuning channels (off by default)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable channel-tune static burst (default: config)",
     )
     parser.add_argument(
         "--shutdown-collapse",
-        action="store_true",
-        help="CRT vertical collapse animation on quit (off by default)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable CRT shutdown collapse on quit (default: config)",
     )
     parser.add_argument(
         "--analog-artifacts",
-        action="store_true",
-        help="Random brief static/tear/roll glitches on the show browser",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable analog glitches on the show browser (default: config)",
     )
     parser.add_argument(
         "--analog-artifact-rate",
         type=float,
         metavar="N",
-        help="Analog glitches per minute when --analog-artifacts is on (default: config or 12)",
+        help="Analog glitches per minute when analog artifacts are on (default: config or 12)",
     )
     parser.add_argument(
         "--safe-zone",
@@ -96,14 +96,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--screensaver",
-        action="store_true",
-        help="Enable the bouncing VHS logo screensaver after idle timeout",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable the VHS logo screensaver (default: config)",
     )
     parser.add_argument(
         "--screensaver-timeout",
         type=int,
         metavar="SEC",
-        help="Seconds of menu inactivity before the screensaver starts (default: config or 300)",
+        help="Seconds of menu inactivity before the screensaver starts (default: config)",
     )
     parser.add_argument(
         "--rescan-only",
@@ -112,18 +113,31 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--admin",
-        action="store_true",
-        help="Enable the web admin UI (http://127.0.0.1:8765/ by default)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable the web admin UI (default: config)",
     )
     parser.add_argument(
         "--admin-port",
         type=int,
         metavar="PORT",
-        help="Web admin TCP port when --admin is set (default: config or 8765)",
+        help="Web admin TCP port (default: config or 8765)",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     setup_logging()
+
+    def _on_signal(signum, _frame):
+        LOG.info("received signal %s", signum)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
 
     save_default_config()
     cfg = load_config()
@@ -141,10 +155,15 @@ def main(argv: list[str] | None = None) -> None:
             mountpoints_from_config(cfg.get("mounts")),
         )
 
-    shows = discover_shows(media_paths)
-    if not shows:
-        print(f"No shows found in: {', '.join(media_paths)}")
+    discovery = discover_library(media_paths)
+    shows = discovery.get("shows") or {}
+    movies = discovery.get("movies") or {}
+    layout = discovery.get("layout", "legacy")
+
+    if not shows and not movies:
+        print(f"No shows or movies found in: {', '.join(media_paths)}")
         print("Expected: <media-dir>/Show Name/s01/s01e01.mp4")
+        print("Or split layout: <media-dir>/shows/ ... and <media-dir>/movies/ ...")
         print(f"Configure paths / mounts in: {config_file()}")
         sys.exit(1)
 
@@ -153,19 +172,26 @@ def main(argv: list[str] | None = None) -> None:
         for show in shows.values()
         for season in show["seasons"].values()
     )
-    print(f"Found {len(shows)} show(s), {total_eps} total episode(s)")
+    print(f"Layout: {layout}")
+    print(f"Found {len(shows)} show(s), {total_eps} total episode(s), {len(movies)} movie(s)")
     for name, show in shows.items():
         for s_num, s_data in sorted(show["seasons"].items()):
             n = len(s_data["episodes"])
             thumb = "[ok]" if s_data.get("thumbnail") else " [ ]"
             print(f"  {name} -- S-{s_num:02d}: {n} episode(s) {thumb}")
+    if movies:
+        print("Movies:")
+        for key in discovery.get("movie_names") or sorted(movies.keys()):
+            movie = movies[key]
+            thumb = "[ok]" if movie.get("thumbnail") else " [ ]"
+            print(f"  {movie.get('title') or key} {thumb}")
 
     if args.rescan_only:
         sys.exit(0)
 
     admin_cfg = dict(cfg.get("admin") or {})
-    if args.admin:
-        admin_cfg["enabled"] = True
+    if args.admin is not None:
+        admin_cfg["enabled"] = bool(args.admin)
 
     admin_bridge: DeferredAdminBridge | None = None
     admin_server = None
@@ -181,7 +207,7 @@ def main(argv: list[str] | None = None) -> None:
             admin_bridge = None
 
     # When the server was started above, do not start again inside the app.
-    admin_flag = None if admin_server else (True if args.admin else None)
+    admin_override = args.admin
 
     safe_zone_offset = None
     if args.safe_zone_offset:
@@ -202,17 +228,16 @@ def main(argv: list[str] | None = None) -> None:
         media_paths,
         fullscreen=not args.windowed,
         force_43=args.force_43,
-        scanlines=True if args.scanlines else None,
-        screensaver=True if args.screensaver else None,
+        screensaver=args.screensaver,
         screensaver_timeout=args.screensaver_timeout,
-        admin=admin_flag,
+        admin=admin_override,
         admin_port=args.admin_port,
         admin_bridge=admin_bridge,
         admin_server=admin_server,
         admin_local_only=bool(args.windowed),
-        channel_snow=True if args.channel_snow else None,
-        shutdown_collapse=True if args.shutdown_collapse else None,
-        analog_artifacts=True if args.analog_artifacts else None,
+        channel_snow=args.channel_snow,
+        shutdown_collapse=args.shutdown_collapse,
+        analog_artifacts=args.analog_artifacts,
         analog_artifact_rate=args.analog_artifact_rate,
         safe_zone=safe_zone_override,
         safe_zone_offset=safe_zone_offset,
@@ -232,7 +257,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         app.run()
     except KeyboardInterrupt:
-        pass
+        LOG.info("interrupted (Ctrl+C)")
     finally:
         if admin_server is not None:
             admin_server.stop()

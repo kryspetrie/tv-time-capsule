@@ -21,6 +21,7 @@ This typically:
 - Installs all system prerequisites via `scripts/install-system-deps.sh`
   (ffmpeg/ffprobe/ffplay, SDL runtime, keyring, cifs/nfs/sshfs/curlftpfs, NetworkManager, exFAT, mpv/omxplayer)  
 - Ensures networking + mount sudoers privileges  
+- Registers **`vintage-tv.local`** on the LAN (mDNS via Avahi) for SCP and web admin  
 - Copies the project to `/opt/tv-time-capsule` and installs into a venv  
 - Creates a sample media tree under `/media/usb`  
 - Enables systemd autostart  
@@ -39,7 +40,24 @@ Environment overrides:
 |----------|---------|---------|
 | `MEDIA_ROOT` | `/media/usb` | Sample media + optional `--media-dir` for autostart |
 | `INSTALL_DIR` | `/opt/tv-time-capsule` | Install location |
+| `MDNS_HOSTNAME` | `vintage-tv` | Same as `--hostname` (env override) |
 | `AUTOSTART` | `yes` | Set to `no` to skip systemd enable |
+
+Install flags:
+
+```bash
+./install-pi.sh --hostname vintage-tv          # default LAN name
+./install-pi.sh --hostname vintage-tv-bedroom   # second TV on the network
+./install-pi.sh --skip-hostname                # skip mDNS registration
+```
+
+The chosen hostname is written to `network.mdns_hostname` in the service user's `config.json` and registered on the LAN as `<name>.local`.
+
+Example for a second TV:
+
+```bash
+./install-pi.sh --hostname vintage-tv-bedroom
+```
 
 ## After install
 

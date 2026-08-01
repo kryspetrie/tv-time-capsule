@@ -14,7 +14,6 @@
 #   --user NAME      Target user (default: SUDO_USER / current user)
 #   --media-dir DIR  Pass through to the app (repeatable)
 #   --force-43       Pass --force-43 to the app
-#   --scanlines      Pass --scanlines to the app
 #   --remove         Remove installed shortcuts
 #
 set -euo pipefail
@@ -26,7 +25,6 @@ DESKTOP_ID="tv-time-capsule.desktop"
 
 REMOVE=0
 FORCE_43=0
-SCANLINES=0
 MEDIA_DIRS=()
 TARGET_USER=""
 
@@ -46,7 +44,6 @@ while [[ $# -gt 0 ]]; do
         -h|--help) usage ;;
         --remove) REMOVE=1; shift ;;
         --force-43) FORCE_43=1; shift ;;
-        --scanlines) SCANLINES=1; shift ;;
         --user)
             TARGET_USER="${2:?--user requires a username}"
             shift 2
@@ -191,7 +188,6 @@ for dir in "${MEDIA_DIRS[@]+"${MEDIA_DIRS[@]}"}"; do
     EXEC+=" --media-dir ${dir}"
 done
 [[ "$FORCE_43" -eq 1 ]] && EXEC+=" --force-43"
-[[ "$SCANLINES" -eq 1 ]] && EXEC+=" --scanlines"
 
 if [[ ! -f "$TEMPLATE" ]]; then
     echo -e "${RED}Missing template:${NC} $TEMPLATE" >&2
