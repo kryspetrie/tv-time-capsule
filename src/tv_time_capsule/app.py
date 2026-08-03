@@ -4584,9 +4584,16 @@ class TVTimeCapsule:
             y_start = 110
             row_h = 44
             label_x = 50
-            right_pad = 50
-            col_gap = 16
             row_font = self.font_sm
+
+            # Reserve right 45% of the row for key bindings text.
+            key_area_frac = 0.45
+            bar_left = 30
+            bar_right = self.sw - 30
+            bar_w = bar_right - bar_left
+            key_area_w = int(bar_w * key_area_frac)
+            key_area_x = bar_right - key_area_w
+            label_max_w = max(20, key_area_x - label_x - 16)
 
             for i, (action_id, action_label) in enumerate(visible):
                 global_index = page_start + i
@@ -4594,7 +4601,7 @@ class TVTimeCapsule:
 
                 selected = global_index == self.config_cursor
 
-                bar_rect = pygame.Rect(30, y, self.sw - 60, row_h - 6)
+                bar_rect = pygame.Rect(bar_left, y, bar_w, row_h - 6)
                 if selected:
                     pygame.draw.rect(self.screen, C.BG_CARD_SEL, bar_rect, border_radius=6)
                     pygame.draw.rect(self.screen, C.CYAN, bar_rect.inflate(2, 2), 2, border_radius=7)
@@ -4605,16 +4612,7 @@ class TVTimeCapsule:
                 label_color = C.BRIGHT if selected else C.WHITE
                 key_color = C.BRIGHT if selected else C.DIM
 
-                if capturing and selected:
-                    if (pygame.time.get_ticks() // 500) % 2 == 0:
-                        key_surf = row_font.render("_", True, C.GREEN)
-                    else:
-                        key_surf = row_font.render("-", True, C.GREEN)
-                else:
-                    key_surf = row_font.render(key_name, True, key_color)
-
-                key_x = self.sw - right_pad - key_surf.get_width()
-                label_max_w = max(20, key_x - label_x - col_gap)
+                # Action label (left side) — truncate if needed
                 label_text = action_label
                 label_surf = row_font.render(label_text, True, label_color)
                 if label_surf.get_width() > label_max_w:
@@ -4627,10 +4625,26 @@ class TVTimeCapsule:
 
                 row_text_y = y + (row_h - label_surf.get_height()) // 2 - 3
                 self.screen.blit(label_surf, (label_x, row_text_y))
-                self.screen.blit(
-                    key_surf,
-                    (key_x, y + (row_h - key_surf.get_height()) // 2 - 3),
-                )
+
+                # Key bindings (right side) — marquee-scroll when selected, truncate otherwise
+                if capturing and selected:
+                    if (pygame.time.get_ticks() // 500) % 2 == 0:
+                        key_surf = row_font.render("_", True, C.GREEN)
+                    else:
+                        key_surf = row_font.render("-", True, C.GREEN)
+                    key_y = y + (row_h - key_surf.get_height()) // 2 - 3
+                    self.screen.blit(key_surf, (key_area_x, key_y))
+                else:
+                    self._blit_marquee_text(
+                        key_name,
+                        row_font,
+                        key_color,
+                        key_area_x,
+                        y + (row_h - row_font.get_height()) // 2 - 3,
+                        key_area_w,
+                        key=("keycfg", action_id),
+                        active=selected,
+                    )
 
             # Bottom bar
             bar_h = FOOTER_BAR_H
@@ -4730,17 +4744,24 @@ class TVTimeCapsule:
             y_start = 110
             row_h = 44
             label_x = 50
-            right_pad = 50
-            col_gap = 16
             row_font = self.font_sm
             bindings = self._gamepad_bindings
+
+            # Reserve right 45% of the row for binding text.
+            key_area_frac = 0.45
+            bar_left = 30
+            bar_right = self.sw - 30
+            bar_w = bar_right - bar_left
+            key_area_w = int(bar_w * key_area_frac)
+            key_area_x = bar_right - key_area_w
+            label_max_w = max(20, key_area_x - label_x - 16)
 
             for i, (action_id, action_label) in enumerate(visible):
                 global_index = page_start + i
                 y = y_start + i * row_h
                 selected = global_index == self._gamepad_config_cursor
 
-                bar_rect = pygame.Rect(30, y, self.sw - 60, row_h - 6)
+                bar_rect = pygame.Rect(bar_left, y, bar_w, row_h - 6)
                 if selected:
                     pygame.draw.rect(self.screen, C.BG_CARD_SEL, bar_rect, border_radius=6)
                     pygame.draw.rect(self.screen, C.CYAN, bar_rect.inflate(2, 2), 2, border_radius=7)
@@ -4751,16 +4772,7 @@ class TVTimeCapsule:
                 label_color = C.BRIGHT if selected else C.WHITE
                 key_color = C.BRIGHT if selected else C.DIM
 
-                if capturing and selected:
-                    if (pygame.time.get_ticks() // 500) % 2 == 0:
-                        key_surf = row_font.render("_", True, C.GREEN)
-                    else:
-                        key_surf = row_font.render("-", True, C.GREEN)
-                else:
-                    key_surf = row_font.render(binding_text, True, key_color)
-
-                key_x = self.sw - right_pad - key_surf.get_width()
-                label_max_w = max(20, key_x - label_x - col_gap)
+                # Action label (left side) — truncate if needed
                 label_text = action_label
                 label_surf = row_font.render(label_text, True, label_color)
                 if label_surf.get_width() > label_max_w:
@@ -4773,10 +4785,26 @@ class TVTimeCapsule:
 
                 row_text_y = y + (row_h - label_surf.get_height()) // 2 - 3
                 self.screen.blit(label_surf, (label_x, row_text_y))
-                self.screen.blit(
-                    key_surf,
-                    (key_x, y + (row_h - key_surf.get_height()) // 2 - 3),
-                )
+
+                # Bindings (right side) — marquee-scroll when selected, truncate otherwise
+                if capturing and selected:
+                    if (pygame.time.get_ticks() // 500) % 2 == 0:
+                        key_surf = row_font.render("_", True, C.GREEN)
+                    else:
+                        key_surf = row_font.render("-", True, C.GREEN)
+                    key_y = y + (row_h - key_surf.get_height()) // 2 - 3
+                    self.screen.blit(key_surf, (key_area_x, key_y))
+                else:
+                    self._blit_marquee_text(
+                        binding_text,
+                        row_font,
+                        key_color,
+                        key_area_x,
+                        y + (row_h - row_font.get_height()) // 2 - 3,
+                        key_area_w,
+                        key=("gpadcfg", action_id),
+                        active=selected,
+                    )
 
             # Bottom bar
             bar_h = FOOTER_BAR_H
