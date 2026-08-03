@@ -76,7 +76,8 @@ from .keymap import (
     serialize_keymap,
 )
 from .log import LOG
-from .media import discover_library
+from .media import directory_signature, discover_library, is_media_present
+from .library import Library
 from .movie_nav import (
     band_has_titles,
     first_letter_in_band,
@@ -129,10 +130,13 @@ HEADER_BAR_H = 48
 KIDS_NAV_BAR_H = 44
 KIDS_STACK_VISIBLE = 3
 LIBRARY_THUMB_CYCLE_MS = 1500
-LIBRARY_THUMB_VISIBLE = 4
+LIBRARY_THUMB_VISIBLE = 2
 LIBRARY_THUMB_GAP = 8
 LIBRARY_SIDEBAR_W = 200
 LIBRARY_THUMB_ASPECT = (4, 3)
+CAROUSEL_TRANSITION_MS = 2000
+CAROUSEL_CENTER_FRAC = 0.55
+CAROUSEL_SIDE_SCALE = 0.5
 HUD_PAD = 12
 HUD_TOP_BAR_H = 50
 HUD_SCRUB_H = 8
@@ -207,6 +211,7 @@ class TVTimeCapsule:
         self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
         self.state = load_state()
         self.config = load_config()
+        self._device_name = self.config.get("network", {}).get("mdns_hostname", "vintage-tv")
         self._init_safe_zone_state()
 
         # Logical canvas (safe-zone padded) is drawn offscreen and scaled to the OS window.
@@ -384,6 +389,11 @@ class TVTimeCapsule:
         self.movies: dict[str, dict] = {}
         self.movie_names: list[str] = []
         self.show_names: list[str] = []
+        self.show_uuids: dict[str, str] = {}   # show_name → uuid
+        self.movie_uuids: dict[str, str] = {}  # movie_key → uuid
+        self._uuid_to_show: dict[str, str] = {}  # uuid → show_name
+        self._uuid_to_movie: dict[str, str] = {}  # uuid → movie_key
+        self.library: Library = Library.empty()  # canonical aggregate
         self._show_channel: dict[str, int] = {}
         self._channel_show: dict[int, str] = {}
         self._movie_channel: dict[str, int] = {}
@@ -404,6 +414,7 @@ class TVTimeCapsule:
         self._rescan_long_press_ms = int(lib_cfg.get("rescan_long_press_ms", 800))
         self._last_rescan_ms = pygame.time.get_ticks()
         self._rescan_banner_until = 0
+        self._media_signatures: dict[str, tuple[int, int, float]] = {}
         self._reset_hold_start = 0
         self._reset_rescan_fired = False
 
@@ -432,6 +443,10 @@ class TVTimeCapsule:
         self._library_shows_thumb_idx = 0
         self._library_movies_thumb_idx = 0
         self._library_thumb_last_advance = 0
+
+        # Carousel view state
+        self._kids_carousel_active = False
+        self._carousel_transition_start = 0
 
         # Ignore play/seek/pause keys briefly after starting an episode
         self._play_input_grace_until = 0
@@ -597,6 +612,7 @@ class TVTimeCapsule:
             self._kids_browse_style = "card"
         else:
             self._kids_browse_style = "full"
+        self._kids_carousel_active = False
         self._mode_toast_message = f"Kids view: {self._kids_browse_style}"
         self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
         km = dict(self.config.get("kids_mode") or {})
@@ -606,6 +622,19 @@ class TVTimeCapsule:
         # Switch to the matching browse view if we're on a kids-compatible screen
         if self.view == self.LIBRARY_SELECT:
             self._apply_kids_startup_view()
+
+    def _toggle_kids_carousel(self) -> None:
+        """Toggle carousel view on the kids library selector screen."""
+        if not self._kids_mode_active:
+            return
+        if self.view != self.LIBRARY_SELECT:
+            return
+        self._kids_carousel_active = not self._kids_carousel_active
+        self._carousel_transition_start = pygame.time.get_ticks()
+        self._mode_toast_message = (
+            "Carousel on" if self._kids_carousel_active else "Carousel off"
+        )
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
 
     def _parent_footer_visible(self) -> bool:
         """Bottom status bar (parent mode only)."""
@@ -718,12 +747,25 @@ class TVTimeCapsule:
         set_initial_view: bool = False,
     ) -> None:
         if discovery is None:
-            discovery = discover_library(self.media_paths)
+            discovery = discover_library(self.media_paths, device_name=self._device_name)
         self.library_layout = discovery.get("layout", "legacy")
         self.shows = discovery.get("shows") or {}
         self.movies = discovery.get("movies") or {}
+        self.show_uuids = discovery.get("show_uuids") or {}
+        self.movie_uuids = discovery.get("movie_uuids") or {}
+        self._uuid_to_show = {v: k for k, v in self.show_uuids.items()}
+        self._uuid_to_movie = {v: k for k, v in self.movie_uuids.items()}
         self._apply_channel_lineup()
         self._apply_movie_lineup()
+        self.library = Library(
+            shows=self.shows,
+            movies=self.movies,
+            show_names=tuple(self.show_names),
+            movie_names=tuple(self.movie_names),
+            show_uuids=self.show_uuids,
+            movie_uuids=self.movie_uuids,
+            layout=self.library_layout,
+        )
         if set_initial_view:
             self.view = self._view_for_library_layout()
             self.cursor = 0
@@ -751,6 +793,31 @@ class TVTimeCapsule:
         if self.view == self.PLAYING:
             return False
 
+        # Check each media path for presence before scanning.
+        # If no media is present (unplugged USB, unmounted share), preserve
+        # the current in-memory library and don't prune.
+        any_present = False
+        for mp in self.media_paths:
+            if is_media_present(mp, self._device_name):
+                any_present = True
+                break
+
+        if not any_present:
+            LOG.info("No media present — skipping rescan, preserving state")
+            return False
+
+        # Check directory signatures — skip expensive rescan if nothing changed.
+        all_unchanged = True
+        for mp in self.media_paths:
+            sig = directory_signature(mp)
+            cached = self._media_signatures.get(mp)
+            if cached is None or sig != cached:
+                all_unchanged = False
+                self._media_signatures[mp] = sig
+        if all_unchanged and self._media_signatures:
+            LOG.debug("Media signatures unchanged — skipping rescan")
+            return False
+
         prev_show = None
         prev_movie = None
         prev_view = self.view
@@ -763,7 +830,7 @@ class TVTimeCapsule:
         ):
             prev_movie = self.movie_names[self.cursor]
 
-        discovery = discover_library(self.media_paths)
+        discovery = discover_library(self.media_paths, device_name=self._device_name)
         self._apply_library_discovery(discovery)
 
         if prev_view == self.LIBRARY_SELECT and self.library_layout == "split":
@@ -804,6 +871,8 @@ class TVTimeCapsule:
         self._library_shows_thumb_idx = 0
         self._library_movies_thumb_idx = 0
         self._library_thumb_last_advance = 0
+        self._kids_carousel_active = False
+        self._carousel_transition_start = 0
         self._last_rescan_ms = pygame.time.get_ticks()
         self._rescan_banner_until = self._last_rescan_ms + 1500
         return True
@@ -2363,7 +2432,6 @@ class TVTimeCapsule:
         )
         self._draw_header(
             show_name.upper(),
-            ch_num=ch_num,
             badge_text="[kids]" if tagged else "",
         )
 
@@ -2407,7 +2475,7 @@ class TVTimeCapsule:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
             ch = str(self._display_channel(name))
-            ch_surf = self.font_md.render(ch, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else C.DIM)
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -2415,7 +2483,7 @@ class TVTimeCapsule:
 
             thumb_size = min(item_h - 12, 64)
             thumb = self.load_image(data.get("thumbnail"), (thumb_size, thumb_size))
-            label_x = rect.x + 70
+            label_x = rect.x + 14 + ch_surf.get_width() + 16
             text_right = rect.right - 14
             if thumb:
                 thumb_x = rect.right - thumb.get_width() - 10
@@ -2466,7 +2534,7 @@ class TVTimeCapsule:
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
-        self._draw_header("LIBRARY", ch_num=str(self.cursor + 1))
+        self._draw_header("LIBRARY")
         layout = self._stack_browser_layout()
         stack_top = layout["stack_top"]
         item_h = layout["item_h"]
@@ -2483,7 +2551,7 @@ class TVTimeCapsule:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
             ch = str(i + 1)
-            ch_surf = self.font_md.render(ch, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else C.DIM)
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -2491,7 +2559,7 @@ class TVTimeCapsule:
 
             label = item["name"]
             count = item["count"]
-            label_x = rect.x + 70
+            label_x = rect.x + 14 + ch_surf.get_width() + 16
             title = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
             info = self.font_sm.render(
                 f"{count} title{'s' if count != 1 else ''}", True, C.DIM
@@ -2543,31 +2611,43 @@ class TVTimeCapsule:
         if area_w <= 0 or area_h <= 0 or max_visible <= 0:
             return 0, 0, 0
         aspect_w, aspect_h = LIBRARY_THUMB_ASPECT
-        cell_h = max(1, area_h)
-        cell_w = max(1, int(cell_h * aspect_w / aspect_h))
-        if cell_w > area_w:
-            cell_w = max(1, area_w)
-            cell_h = max(1, int(cell_w * aspect_h / aspect_w))
         gap = LIBRARY_THUMB_GAP
-        slots = 0
-        used = 0
-        while slots < max_visible:
-            need = cell_w if slots == 0 else gap + cell_w
-            if used + need > area_w:
-                break
-            used += need
-            slots += 1
+        # Try to fit max_visible thumbnails; if too wide, reduce count.
+        slots = max_visible
+        while slots > 0:
+            total_gap = max(0, slots - 1) * gap
+            cell_w = (area_w - total_gap) // slots
+            if cell_w <= 0:
+                slots -= 1
+                continue
+            cell_h = max(1, int(cell_w * aspect_h / aspect_w))
+            if cell_h > area_h:
+                cell_h = area_h
+                cell_w = max(1, int(cell_h * aspect_w / aspect_h))
+                total_gap = max(0, slots - 1) * gap
+                if cell_w * slots + total_gap > area_w:
+                    slots -= 1
+                    continue
+            break
         return slots, cell_w, cell_h
 
     @staticmethod
     def _library_thumb_window(
         paths: list[str], start_idx: int, max_visible: int
     ) -> list[str]:
-        """Return up to *max_visible* thumbnails starting at *start_idx*."""
+        """Return up to *max_visible* unique thumbnails starting at *start_idx*."""
         if not paths or max_visible <= 0:
             return []
-        count = min(max_visible, len(paths))
-        return [paths[(start_idx + i) % len(paths)] for i in range(count)]
+        seen: set[str] = set()
+        result: list[str] = []
+        for offset in range(len(paths)):
+            idx = (start_idx + offset) % len(paths)
+            if paths[idx] not in seen:
+                seen.add(paths[idx])
+                result.append(paths[idx])
+            if len(result) >= max_visible:
+                break
+        return result
 
     def _advance_library_thumbnail_cycle(self) -> None:
         now = pygame.time.get_ticks()
@@ -2614,16 +2694,14 @@ class TVTimeCapsule:
         inner.w = max(1, inner.w)
         inner.h = max(1, inner.h)
 
-        label_surf = self.font_lg.render(label, True, C.BRIGHT if selected else C.WHITE)
-        ch_surf = self.font_md.render(str(channel_num), True, C.GREEN if selected else C.DIM)
+        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else C.DIM)
         count_text = f"{count} title{'s' if count != 1 else ''}"
-        count_surf = self.font_sm.render(count_text, True, C.GREEN if selected else C.DIM)
+        count_surf = self.font_sm.render(count_text, True, C.BLUE)
         sidebar_w = max(
-            LIBRARY_SIDEBAR_W,
-            label_surf.get_width() + 20,
             ch_surf.get_width() + 20,
+            count_surf.get_width() + 20,
         )
-        sidebar_w = min(sidebar_w, max(120, inner.w // 2))
+        sidebar_w = min(sidebar_w, max(80, inner.w // 3))
         sidebar_gap = 14
         sidebar = pygame.Rect(inner.x, inner.y, sidebar_w, inner.h)
         thumb_area = pygame.Rect(
@@ -2633,20 +2711,12 @@ class TVTimeCapsule:
             inner.h,
         )
 
-        text_gap = 8
-        stack_h = (
-            ch_surf.get_height()
-            + text_gap
-            + label_surf.get_height()
-            + text_gap
-            + count_surf.get_height()
-        )
-        text_y = sidebar.y + max(0, (sidebar.h - stack_h) // 2)
-        self.screen.blit(ch_surf, (sidebar.x, text_y))
-        text_y += ch_surf.get_height() + text_gap
-        self.screen.blit(label_surf, (sidebar.x, text_y))
-        text_y += label_surf.get_height() + text_gap
-        self.screen.blit(count_surf, (sidebar.x, text_y))
+        # Channel number: centered vertically
+        ch_y = sidebar.y + (sidebar.h - ch_surf.get_height()) // 2
+        self.screen.blit(ch_surf, (sidebar.x, ch_y))
+        # Count text: bottom of sidebar
+        count_y = sidebar.bottom - count_surf.get_height() - 8
+        self.screen.blit(count_surf, (sidebar.x, count_y))
 
         if kind == "show":
             all_paths = self._show_thumbnail_paths()
@@ -2676,6 +2746,126 @@ class TVTimeCapsule:
                 ph = self.font_sm.render("?", True, C.DIM)
                 self.screen.blit(ph, ph.get_rect(center=cell.center))
 
+    def _draw_kids_carousel_panel(
+        self,
+        rect: pygame.Rect,
+        label: str,
+        count: int,
+        *,
+        kind: str,
+        channel_num: int,
+        selected: bool,
+    ) -> None:
+        """Carousel panel: 3 thumbnails (small-big-small) scrolling left with scale transition."""
+        if rect.w <= 0 or rect.h <= 0:
+            return
+        radius = min(12, rect.w // 4, rect.h // 4)
+        if selected:
+            pygame.draw.rect(self.screen, C.BG_CARD_SEL, rect, border_radius=radius)
+            pygame.draw.rect(self.screen, C.CYAN, rect.inflate(4, 4), 3, border_radius=radius)
+        else:
+            pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=radius)
+            pygame.draw.rect(self.screen, C.DIM, rect, 1, border_radius=radius)
+
+        pad = 12
+        inner = rect.inflate(-pad * 2, -pad * 2)
+        inner.w = max(1, inner.w)
+        inner.h = max(1, inner.h)
+
+        # Sidebar: channel number + count
+        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else C.DIM)
+        count_text = f"{count} title{'s' if count != 1 else ''}"
+        count_surf = self.font_sm.render(count_text, True, C.BLUE)
+        sidebar_w = max(ch_surf.get_width() + 20, count_surf.get_width() + 20)
+        sidebar_w = min(sidebar_w, max(80, inner.w // 3))
+        sidebar_gap = 14
+        sidebar = pygame.Rect(inner.x, inner.y, sidebar_w, inner.h)
+        thumb_area = pygame.Rect(
+            sidebar.right + sidebar_gap,
+            inner.y,
+            max(1, inner.right - sidebar.right - sidebar_gap),
+            inner.h,
+        )
+
+        # Channel number: centered vertically
+        ch_y = sidebar.y + (sidebar.h - ch_surf.get_height()) // 2
+        self.screen.blit(ch_surf, (sidebar.x, ch_y))
+        # Count text: bottom of sidebar
+        count_y = sidebar.bottom - count_surf.get_height() - 8
+        self.screen.blit(count_surf, (sidebar.x, count_y))
+
+        # Get thumbnail paths
+        if kind == "show":
+            all_paths = self._show_thumbnail_paths()
+            start_idx = self._library_shows_thumb_idx
+        else:
+            all_paths = self._movie_thumbnail_paths()
+            start_idx = self._library_movies_thumb_idx
+
+        if not all_paths:
+            return
+
+        # Carousel: 3 slots — left (small), center (big), right (small)
+        # Transition progress 0→1 scrolls left: left exits, center→left, right→center, new→right
+        now = pygame.time.get_ticks()
+        elapsed = now - self._carousel_transition_start
+        progress = min(1.0, elapsed / CAROUSEL_TRANSITION_MS)
+
+        center_frac = CAROUSEL_CENTER_FRAC
+        side_scale = CAROUSEL_SIDE_SCALE
+
+        # Calculate sizes
+        center_h = thumb_area.h
+        center_w = int(center_h * LIBRARY_THUMB_ASPECT[0] / LIBRARY_THUMB_ASPECT[1])
+        side_h = int(center_h * side_scale)
+        side_w = int(side_h * LIBRARY_THUMB_ASPECT[0] / LIBRARY_THUMB_ASPECT[1])
+
+        # Total width of the 3-card strip
+        total_w = side_w + 8 + center_w + 8 + side_w
+        # Center the strip in thumb_area
+        strip_x = thumb_area.x + (thumb_area.w - total_w) // 2
+
+        # Positions (static, no transition offset — the cycle handles the "scroll" effect)
+        left_x = strip_x
+        center_x = strip_x + side_w + 8
+        right_x = strip_x + side_w + 8 + center_w + 8
+
+        # Which 3 thumbnails to show (unique, no duplicates)
+        seen: set[str] = set()
+        indices: list[int] = []
+        for offset in range(len(all_paths)):
+            idx = (start_idx + offset) % len(all_paths)
+            if all_paths[idx] not in seen:
+                seen.add(all_paths[idx])
+                indices.append(idx)
+            if len(indices) >= 3:
+                break
+        # Pad with repeats only if we have fewer than 3 unique paths
+        while len(indices) < 3:
+            indices.append(indices[-1] if indices else 0)
+        idx0, idx1, idx2 = indices[0], indices[1], indices[2]
+
+        # Draw left (small)
+        left_rect = pygame.Rect(left_x, thumb_area.y + (thumb_area.h - side_h) // 2, side_w, side_h)
+        pygame.draw.rect(self.screen, (20, 28, 45), left_rect, border_radius=4)
+        if not self._blit_image_fit(all_paths[idx0], left_rect):
+            ph = self.font_sm.render("?", True, C.DIM)
+            self.screen.blit(ph, ph.get_rect(center=left_rect.center))
+
+        # Draw center (big)
+        center_rect = pygame.Rect(center_x, thumb_area.y, center_w, center_h)
+        pygame.draw.rect(self.screen, (20, 28, 45), center_rect, border_radius=4)
+        if not self._blit_image_fit(all_paths[idx1], center_rect):
+            ph = self.font_sm.render("?", True, C.DIM)
+            self.screen.blit(ph, ph.get_rect(center=center_rect.center))
+
+        # Draw right (small)
+        right_rect = pygame.Rect(right_x, thumb_area.y + (thumb_area.h - side_h) // 2, side_w, side_h)
+        pygame.draw.rect(self.screen, (20, 28, 45), right_rect, border_radius=4)
+        if not self._blit_image_fit(all_paths[idx2], right_rect):
+            ph = self.font_sm.render("?", True, C.DIM)
+            self.screen.blit(ph, ph.get_rect(center=right_rect.center))
+
     def _draw_kids_library_selector(self) -> None:
         """Kid-friendly Shows / Movies picker — two large tiles with cycling art."""
         self._advance_library_thumbnail_cycle()
@@ -2686,23 +2876,40 @@ class TVTimeCapsule:
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
+        header_text = items[self.cursor]["name"] if items else "LIBRARY"
+        header_h = self._draw_header(header_text, ch_num="")
         pad = 14
         gap = 14
-        panel_h = max(80, (self.sh - pad * 2 - gap) // 2)
+        content_h = self.sh - header_h
+        panel_h = max(80, (content_h - pad * 2 - gap) // 2)
         panel_w = max(1, self.sw - pad * 2)
 
-        for i, item in enumerate(items):
-            y = pad + i * (panel_h + gap)
-            rect = pygame.Rect(pad, y, panel_w, panel_h)
-            kind = "show" if item["name"] == "SHOWS" else "movie"
-            self._draw_kids_library_panel(
-                rect,
-                item["name"],
-                item["count"],
-                kind=kind,
-                channel_num=i + 1,
-                selected=(i == self.cursor),
-            )
+        if self._kids_carousel_active:
+            for i, item in enumerate(items):
+                y = header_h + pad + i * (panel_h + gap)
+                rect = pygame.Rect(pad, y, panel_w, panel_h)
+                kind = "show" if item["name"] == "SHOWS" else "movie"
+                self._draw_kids_carousel_panel(
+                    rect,
+                    item["name"],
+                    item["count"],
+                    kind=kind,
+                    channel_num=i + 1,
+                    selected=(i == self.cursor),
+                )
+        else:
+            for i, item in enumerate(items):
+                y = header_h + pad + i * (panel_h + gap)
+                rect = pygame.Rect(pad, y, panel_w, panel_h)
+                kind = "show" if item["name"] == "SHOWS" else "movie"
+                self._draw_kids_library_panel(
+                    rect,
+                    item["name"],
+                    item["count"],
+                    kind=kind,
+                    channel_num=i + 1,
+                    selected=(i == self.cursor),
+                )
 
     def draw_movie_browser(self):
         """Paged movie list (stack of title cards)."""
@@ -2729,7 +2936,6 @@ class TVTimeCapsule:
         )
         self._draw_header(
             title.upper(),
-            ch_num=ch_num,
             badge_text="[kids]" if tagged else "",
         )
 
@@ -2774,7 +2980,7 @@ class TVTimeCapsule:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
             ch = str(self._display_movie_channel(key))
-            ch_surf = self.font_md.render(ch, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else C.DIM)
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -2782,18 +2988,20 @@ class TVTimeCapsule:
 
             thumb_size = min(item_h - 12, 64)
             thumb = self.load_image(data.get("thumbnail"), (thumb_size, thumb_size))
-            label_x = rect.x + 100
+            label_x = rect.x + 14 + ch_surf.get_width() + 16
+            text_right = rect.right - 14
             if thumb:
+                thumb_x = rect.right - thumb.get_width() - 10
                 self.screen.blit(
                     thumb,
-                    (rect.x + 70, rect.y + (rect.height - thumb.get_height()) // 2),
+                    (thumb_x, rect.y + (rect.height - thumb.get_height()) // 2),
                 )
-                label_x = rect.x + 70 + thumb.get_width() + 12
+                text_right = thumb_x - 10
 
             title_surf = self.font_md.render(
                 name.upper(), True, C.BRIGHT if selected else C.WHITE
             )
-            max_w = rect.right - label_x - 20
+            max_w = text_right - label_x
             if title_surf.get_width() > max_w and max_w > 40:
                 text = name.upper()
                 while self.font_md.size(text + "...")[0] > max_w and len(text) > 3:
@@ -2839,7 +3047,7 @@ class TVTimeCapsule:
         key = names[self.cursor]
         title = get_title(key)
         ch_num = get_ch(key)
-        self._draw_header(title.upper(), ch_num=ch_num)
+        self._draw_header(title.upper())
 
         layout = self._show_browser_layout(HEADER_BAR_H, kids=True)
         nav_h = layout["nav_h"]
@@ -2866,9 +3074,9 @@ class TVTimeCapsule:
         pygame.draw.rect(self.screen, C.BG_CARD, card_rect, border_radius=10)
         pygame.draw.rect(self.screen, C.CYAN, card_rect.inflate(2, 2), 2, border_radius=10)
 
-        # Channel number on the left
+        # Large channel number on the left
         ch_str = str(ch_num)
-        ch_surf = self.font_md.render(ch_str, True, C.GREEN)
+        ch_surf = self.font_lg.render(ch_str, True, C.GREEN)
         ch_x = card_rect.x + 18
         ch_y = card_rect.y + (card_rect.height - ch_surf.get_height()) // 2
         self.screen.blit(ch_surf, (ch_x, ch_y))
@@ -2910,10 +3118,9 @@ class TVTimeCapsule:
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
-        # Header — channel number reflects the highlighted item on THIS page
+        # Header
         self._draw_header(
             self.cur_show.upper(),
-            ch_num=str(self.cursor + 1),
             badge_text=(
                 "[kids]"
                 if not self._kids_mode_active
@@ -2959,7 +3166,7 @@ class TVTimeCapsule:
 
             # Channel number — unique per page (1-based position in this list)
             ch_label = str(item_idx + 1)
-            ch_surf = self.font_md.render(ch_label, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch_label, True, C.GREEN if selected else C.DIM)
             self.screen.blit(ch_surf, (rect.x + 14,
                                        rect.y + (rect.height - ch_surf.get_height()) // 2))
 
@@ -2984,7 +3191,7 @@ class TVTimeCapsule:
                 info_w = self.font_sm.size(count_part)[0]
 
             sl = self.font_md.render(s_label, True, C.BRIGHT if selected else C.WHITE)
-            sl_x = rect.x + 100
+            sl_x = rect.x + 14 + ch_surf.get_width() + 16
             max_label_w = rect.right - sl_x - info_w - 20
             if sl.get_width() > max_label_w and max_label_w > 30:
                 label_text = s_label
@@ -3028,10 +3235,9 @@ class TVTimeCapsule:
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
-        # Header — channel number reflects the highlighted episode on THIS page
+        # Header
         self._draw_header(
             f"{self.cur_show.upper()}  -  S-{self.cur_season:02d}",
-            ch_num=str(self.cursor + 1),
             badge_text=(
                 "[kids]"
                 if not self._kids_mode_active
@@ -3093,7 +3299,7 @@ class TVTimeCapsule:
 
             # Channel number on the left (consistent with show browser)
             ch_label = str(item_idx + 1)
-            ch_surf = self.font_md.render(ch_label, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch_label, True, C.GREEN if selected else C.DIM)
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -3101,7 +3307,7 @@ class TVTimeCapsule:
 
             # Keep episode text left-aligned; optional artwork floats right.
             thumb = self.load_image(ep.get('thumbnail'), (item_h - 12, item_h - 12))
-            label_x = rect.x + 70
+            label_x = rect.x + 14 + ch_surf.get_width() + 16
             content_right = rect.right - 14
             if thumb:
                 tx = rect.right - thumb.get_width() - 10
@@ -5865,7 +6071,7 @@ class TVTimeCapsule:
         scan_list = [p for p in (paths or self.media_paths) if p]
         result = scan_paths(scan_list)
         if apply and result.get("ok") and self.view != self.PLAYING:
-            self._apply_library_discovery(result.get("discovery") or discover_library(scan_list))
+            self._apply_library_discovery(result.get("discovery") or discover_library(scan_list, device_name=self._device_name))
             self._duration_cache.clear()
             self._img_cache.clear()
             self._img_cache_order.clear()
@@ -6223,6 +6429,10 @@ class TVTimeCapsule:
 
                         if key_action == "kids_view_toggle":
                             self._toggle_kids_view()
+                            continue
+
+                        if key_action == "kids_carousel_toggle":
+                            self._toggle_kids_carousel()
                             continue
 
                         if key_action == "key_config" and not self._kids_mode_active:

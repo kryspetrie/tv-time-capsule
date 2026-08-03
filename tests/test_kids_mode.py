@@ -243,7 +243,26 @@ class KidsViewToggleTests(unittest.TestCase):
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
         pygame.init()
         pygame.display.set_mode((800, 600))
-        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        with unittest.mock.patch("tv_time_capsule.app.load_config") as mock_load:
+            mock_load.return_value = {
+                "media_paths": ["./media"],
+                "mounts": [],
+                "keymap": {},
+                "screensaver": {"enabled": True, "timeout_seconds": 30},
+                "playback": {"autoplay": "next_in_season_only", "autoplay_countdown_seconds": 5},
+                "ui": {"channel_snow": True, "shutdown_collapse": True, "channel_snow_audio": True,
+                       "analog_artifacts": True, "analog_artifact_rate": 12, "footer_hints": True,
+                       "safe_zone": {"top": 10, "bottom": 10, "left": 10, "right": 10}},
+                "gamepad": {"enabled": True},
+                "channels": {"order": [], "numbers": {}},
+                "library": {"rescan_interval_seconds": 0, "rescan_long_press_ms": 800},
+                "kids_mode": {"default_enabled": False},
+                "network": {"mdns_hostname": "vintage-tv", "admin_port": 8765},
+                "cache": {"enabled": True, "directory": None, "max_bytes": 2147483648,
+                          "prefetch_next": True, "cache_before_playing": False},
+                "admin": {"enabled": True, "port": 8765, "bind": "0.0.0.0"},
+            }
+            app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         self.assertEqual(app._kids_browse_style, "card")
 
     def test_browse_style_compact_legacy_alias(self):
