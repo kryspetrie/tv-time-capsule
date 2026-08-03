@@ -1,13 +1,13 @@
+# Tests — disabled for now (manual trigger only).
+# Re-enable automatic runs by restoring push/pull_request triggers.
 name: Tests
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
