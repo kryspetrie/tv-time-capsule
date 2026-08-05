@@ -144,6 +144,12 @@
     "longitude": null
   },
 
+  "retro_tv": {
+    "_about": "MyRetroTVs decade streams (dial 1950-2009). filters maps box_* checkbox ids to on/off; null = site default until changed in the Enter menu. volume is 0-100 Chrome gain.",
+    "filters": null,
+    "volume": null
+  },
+
   "_channels": {
     "order": "Show folder names in desired browse / priority order (unknown names skipped)",
     "numbers": "Optional fixed channel numbers; unlisted shows use 1-based position in the ordered lineup"

@@ -140,6 +140,23 @@ Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use 
 
 **Install note:** Packaged installs include the `assets/` folder; drop your PNGs next to `vcr_osd_mono.ttf` and `vhs.bmp` in the installed package data directory, or rebuild after adding files under `src/tv_time_capsule/assets/` in a checkout.
 
+### MyRetroTVs decades (`1950`–`2009`)
+
+**Label:** easter egg
+
+Dial any **4-digit year from 1950–2009** on a parent browse screen to open that decade’s [MyRetroTVs](https://www.myretrotvs.com/) stream (Chromium CDP), cropped to the video only:
+
+| Years | Stream |
+|------|--------|
+| 1950–1959 | 50s |
+| 1960–1969 | 60s |
+| 1970–1979 | 70s |
+| 1980–1989 | 80s |
+| 1990–1999 | 90s |
+| 2000–2009 | 00s |
+
+Volume keys adjust gain; left/right change channel on the site; **Enter / Space** opens a channel-type filter menu; Esc / back exits (or closes the menu first). Filter choices and volume are saved under `retro_tv` in config. Requires Chrome/Chromium (same as Weather).
+
 ---
 
 ## Quick reference
@@ -156,6 +173,7 @@ Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use 
 | Test patterns `001` / `002` / `003` | Easter egg | *(none)* | always if PNGs exist |
 | Secret directory `000` | Easter egg | *(none)* | always |
 | Weather `004` | Easter egg | `weather.zip` etc. | always (Chrome required) |
+| MyRetroTVs `1950`–`2009` | Easter egg | *(none)* | always (Chrome required) |
 
 Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` when the new keys are absent.
 

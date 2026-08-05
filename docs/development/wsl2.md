@@ -66,6 +66,7 @@ Useful dev flags:
 | Flag | Why |
 |------|-----|
 | `--windowed` | Fixed 800×600 window; safe zone defaults to 0% |
+| `--scale N` | Integer 640×480 scale (`2`–`6`); implies `--windowed` |
 | `--no-admin` | Skip web admin / port 8765 |
 | `--skip-mounts` | Local media only — no network mounts at startup |
 | `--rescan-only` | Scan library and print summary, then exit (no UI) |

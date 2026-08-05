@@ -9,7 +9,13 @@ import sys
 import pygame
 
 from .app import TVTimeCapsule
-from .config import config_file, load_config, save_default_config
+from .config import (
+    WINDOW_SCALE_MAX,
+    WINDOW_SCALE_MIN,
+    config_file,
+    load_config,
+    save_default_config,
+)
 from .log import LOG, setup_logging
 from .media import discover_library
 from .mounts import ensure_mounts, mountpoints_from_config
@@ -45,6 +51,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--windowed",
         action="store_true",
         help="Run in an 800×600 resizable window (4:3) instead of fullscreen",
+    )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        choices=list(range(WINDOW_SCALE_MIN, WINDOW_SCALE_MAX + 1)),
+        metavar="N",
+        help=(
+            f"Windowed integer scale of the 640×480 canvas "
+            f"({WINDOW_SCALE_MIN}–{WINDOW_SCALE_MAX} → "
+            f"{640 * WINDOW_SCALE_MIN}×{480 * WINDOW_SCALE_MIN} … "
+            f"{640 * WINDOW_SCALE_MAX}×{480 * WINDOW_SCALE_MAX}). "
+            "Implies --windowed"
+        ),
     )
     parser.add_argument(
         "--force-43",
@@ -201,6 +220,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.rescan_only:
         sys.exit(0)
 
+    windowed = bool(args.windowed or args.scale)
+
     admin_cfg = dict(cfg.get("admin") or {})
     if args.admin is not None:
         admin_cfg["enabled"] = bool(args.admin)
@@ -213,7 +234,7 @@ def main(argv: list[str] | None = None) -> None:
             admin_bridge,
             admin_cfg,
             port_override=args.admin_port,
-            local_only=bool(args.windowed),
+            local_only=windowed,
         )
         if admin_server is None:
             admin_bridge = None
@@ -232,21 +253,22 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("--safe-zone-offset expects X,Y (pixels)")
 
     safe_zone_override = args.safe_zone
-    if safe_zone_override is None and args.windowed:
+    if safe_zone_override is None and windowed:
         # Windowed dev mode: no overscan padding unless --safe-zone is explicit.
         safe_zone_override = 0.0
 
     app = TVTimeCapsule(
         media_paths,
-        fullscreen=not args.windowed,
+        fullscreen=not windowed,
         force_43=args.force_43,
+        window_scale=args.scale,
         screensaver=args.screensaver,
         screensaver_timeout=args.screensaver_timeout,
         admin=admin_override,
         admin_port=args.admin_port,
         admin_bridge=admin_bridge,
         admin_server=admin_server,
-        admin_local_only=bool(args.windowed),
+        admin_local_only=windowed,
         channel_snow=args.channel_snow,
         shutdown_collapse=args.shutdown_collapse,
         analog_artifacts=args.analog_artifacts,

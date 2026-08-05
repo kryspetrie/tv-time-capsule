@@ -222,7 +222,7 @@ Analog TVs often **overscan** the picture: the outer ~5–10% of the frame is cl
 
 When any `safe_zone` margin is greater than zero:
 
-- The **logical framebuffer grows** with margin % (e.g. 5% → 704×528), but the **OS window** is separate: **800×600** by default in windowed mode (`--windowed`), resizable with a locked **4:3** aspect ratio.
+- The **logical framebuffer grows** with margin % (e.g. 5% → 704×528), but the **OS window** is separate: **800×600** by default in windowed mode (`--windowed`), or an integer multiple of 640×480 with `--scale N` (`2`–`6`), resizable with a locked **4:3** aspect ratio.
 - SDL GPU-scales the logical frame into that window (letterboxed as needed).
 - **Menus, splashes, overlays, and screensaver** always render at native **640×480** (no interpolation) and are composited into the padded frame; border pixels use the **same background color** as that screen.
 - **Video** is **full-bleed on the whole window** during playback (including margin areas). The window does not resize when you start an episode.
@@ -457,6 +457,42 @@ Progress is stored per show under `~/.local/share/tv-time-capsule/state.json`:
 Legacy seasons with a single `ep` field (highest completed in order) migrate to `watched` automatically on the next save.
 
 Episode list labels: **NEXT** (first unwatched), **RESUME** (bookmark), **WATCHED** (completed). Season list shows `21 eps` and `E-05 next` when applicable. Tap **R** on an episode to clear its watched flag and bookmark; hold **R** to rescan the library.
+
+## `retro_tv`
+
+Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated automatically when you change channel types or volume in-app.
+
+```json
+{
+  "retro_tv": {
+    "filters": {
+      "box_c": true,
+      "box_s": true,
+      "box_a": false,
+      "box_d": true,
+      "box_g": true,
+      "box_k": true,
+      "box_e": true,
+      "box_m": true,
+      "box_n": true,
+      "box_o": true,
+      "box_z": false,
+      "box_p": true,
+      "box_r": true,
+      "box_t": true,
+      "box_f": true
+    },
+    "volume": 80
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `filters` | `null` | Map of checkbox ids (`box_c` = Cartoons, `box_s` = Comedy, …) to on/off. `null` leaves the site default (all on) until you change them. Shared across all decades. |
+| `volume` | `null` | Last Chrome media gain 0–100. `null` starts at 100. |
+
+See [Fun tweaks & easter eggs → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
 
 ## Precedence
 

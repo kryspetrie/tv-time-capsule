@@ -51,6 +51,19 @@ class CliParserTests(unittest.TestCase):
         self.assertFalse(args.screensaver)
         self.assertFalse(args.admin)
 
+    def test_scale_choices(self):
+        self.assertIsNone(self.parser.parse_args([]).scale)
+        for n in (2, 3, 4, 5, 6):
+            with self.subTest(scale=n):
+                args = self.parser.parse_args(["--scale", str(n)])
+                self.assertEqual(args.scale, n)
+
+    def test_scale_rejects_out_of_range(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["--scale", "1"])
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args(["--scale", "7"])
+
 
 if __name__ == "__main__":
     unittest.main()

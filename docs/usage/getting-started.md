@@ -89,6 +89,7 @@ Useful flags override config when set. Boolean options accept `--feature` / `--n
 |------|---------|
 | `--media-dir DIR` | Scan this directory (repeatable). Overrides config paths for this run. |
 | `--windowed` | 800×600 resizable window; admin on loopback only; **safe zone 0%** unless `--safe-zone` is set |
+| `--scale N` | Integer scale of the 640×480 canvas (`2`–`6`); implies `--windowed` (e.g. `--scale 2` → 1280×960) |
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
 | `--channel-snow` / `--no-channel-snow` | Static burst when committing channel numbers |
 | `--shutdown-collapse` / `--no-shutdown-collapse` | CRT vertical collapse on quit |
@@ -105,6 +106,12 @@ Useful flags override config when set. Boolean options accept `--feature` / `--n
 
 ```bash
 poetry run tv-time-capsule --windowed --media-dir ./media
+```
+
+Larger integer-scaled window for desktop testing (2×–6× the 640×480 canvas):
+
+```bash
+poetry run tv-time-capsule --scale 3 --media-dir ./media
 ```
 
 Disable features for one run:

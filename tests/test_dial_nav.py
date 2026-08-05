@@ -16,6 +16,11 @@ from tv_time_capsule.movie_nav import (
     letter_bucket,
     present_letters,
 )
+from tv_time_capsule.retro_tv_channel import (
+    decade_slug_for_year,
+    decade_slug_from_digits,
+    url_for_decade,
+)
 from tv_time_capsule.test_patterns import is_show_list_test_dial
 
 
@@ -35,6 +40,34 @@ class DialNavTests(unittest.TestCase):
         self.assertEqual(classify_dial("01").channel, None)
         self.assertEqual(classify_dial("010").kind, DialKind.INVALID)
 
+    def test_classify_retro_tv_years(self):
+        r = classify_dial("1999")
+        self.assertEqual(r.kind, DialKind.RETRO_TV)
+        self.assertEqual(r.decade, "90")
+        self.assertIsNone(r.channel)
+
+        r = classify_dial("1950")
+        self.assertEqual(r.kind, DialKind.RETRO_TV)
+        self.assertEqual(r.decade, "50")
+
+        r = classify_dial("2000")
+        self.assertEqual(r.kind, DialKind.RETRO_TV)
+        self.assertEqual(r.decade, "00")
+
+        r = classify_dial("2009")
+        self.assertEqual(r.kind, DialKind.RETRO_TV)
+        self.assertEqual(r.decade, "00")
+
+        # Out of MyRetroTVs range → normal channel
+        self.assertEqual(classify_dial("1949").kind, DialKind.CHANNEL)
+        self.assertEqual(classify_dial("1949").channel, 1949)
+        self.assertEqual(classify_dial("2010").kind, DialKind.CHANNEL)
+        self.assertEqual(classify_dial("2010").channel, 2010)
+
+        # Shorter numbers stay channels (not decades)
+        self.assertEqual(classify_dial("90").kind, DialKind.CHANNEL)
+        self.assertEqual(classify_dial("199").kind, DialKind.CHANNEL)
+
     def test_page_cursor_preserves_row(self):
         # Page size 4: items 0-3 visible, cursor on row 2 → next page row 2 = index 6
         self.assertEqual(page_cursor(2, 20, 4, 1), 6)
@@ -48,6 +81,7 @@ class DialNavTests(unittest.TestCase):
         self.assertTrue(dial_needs_more_input("01"))
         self.assertTrue(dial_needs_more_input("02"))
         self.assertTrue(dial_needs_more_input("12"))
+        self.assertTrue(dial_needs_more_input("1999"))
         self.assertFalse(dial_needs_more_input("001"))
         self.assertFalse(dial_needs_more_input("000"))
         self.assertFalse(dial_needs_more_input("004"))
@@ -60,6 +94,29 @@ class DialNavTests(unittest.TestCase):
         self.assertFalse(is_show_list_test_dial("0"))
         self.assertFalse(is_show_list_test_dial("00"))
         self.assertFalse(is_show_list_test_dial("000"))
+
+
+class RetroDecadeTests(unittest.TestCase):
+    def test_decade_slug_for_year(self):
+        self.assertIsNone(decade_slug_for_year(1949))
+        self.assertIsNone(decade_slug_for_year(2010))
+        self.assertEqual(decade_slug_for_year(1950), "50")
+        self.assertEqual(decade_slug_for_year(1959), "50")
+        self.assertEqual(decade_slug_for_year(1985), "80")
+        self.assertEqual(decade_slug_for_year(1990), "90")
+        self.assertEqual(decade_slug_for_year(1999), "90")
+        self.assertEqual(decade_slug_for_year(2000), "00")
+        self.assertEqual(decade_slug_for_year(2009), "00")
+
+    def test_decade_slug_from_digits(self):
+        self.assertEqual(decade_slug_from_digits("1999"), "90")
+        self.assertIsNone(decade_slug_from_digits("90"))
+        self.assertIsNone(decade_slug_from_digits("01990"))
+        self.assertIsNone(decade_slug_from_digits("abcd"))
+
+    def test_url_for_decade(self):
+        self.assertEqual(url_for_decade("90"), "https://90s.myretrotvs.com/")
+        self.assertEqual(url_for_decade("00"), "https://00s.myretrotvs.com/")
 
 
 class LetterMenuTests(unittest.TestCase):

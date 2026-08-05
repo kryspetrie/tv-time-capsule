@@ -78,6 +78,8 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertEqual(cfg["weather"]["zip"], "02108")
         self.assertEqual(cfg["weather"]["name"], "Boston")
         self.assertIsNone(cfg["weather"]["latitude"])
+        self.assertIsNone(cfg["retro_tv"]["filters"])
+        self.assertIsNone(cfg["retro_tv"]["volume"])
 
 
 class WeatherConfigTests(unittest.TestCase):
@@ -102,6 +104,33 @@ class WeatherConfigTests(unittest.TestCase):
         self.assertTrue(km["enabled"])
         km_default = _parse_kids_mode({"default_enabled": True})
         self.assertIsNone(km_default["enabled"])
+
+
+class RetroTvConfigTests(unittest.TestCase):
+    def test_parse_filters_dict(self):
+        r = config_mod._parse_retro_tv(
+            {"filters": {"box_c": True, "box_a": 0}, "volume": 75}
+        )
+        self.assertEqual(r["filters"]["box_c"], True)
+        self.assertEqual(r["filters"]["box_a"], False)
+        self.assertEqual(r["volume"], 75)
+
+    def test_parse_filters_bare_letter(self):
+        r = config_mod._parse_retro_tv({"filters": {"m": True}})
+        self.assertEqual(r["filters"], {"box_m": True})
+
+    def test_parse_filters_list(self):
+        r = config_mod._parse_retro_tv({"filters": ["box_m", "n"]})
+        self.assertEqual(r["filters"], {"box_m": True, "box_n": True})
+
+    def test_parse_filters_null(self):
+        r = config_mod._parse_retro_tv({})
+        self.assertIsNone(r["filters"])
+        self.assertIsNone(r["volume"])
+
+    def test_volume_clamped(self):
+        self.assertEqual(config_mod._parse_retro_tv({"volume": 150})["volume"], 100)
+        self.assertEqual(config_mod._parse_retro_tv({"volume": -5})["volume"], 0)
 
 
 if __name__ == "__main__":

@@ -93,6 +93,9 @@ WINDOW_DEFAULT_W = 800
 WINDOW_DEFAULT_H = 600
 WINDOW_MIN_W = 400
 WINDOW_MIN_H = 300
+# Integer multiples of SCREEN_W×SCREEN_H via --scale (windowed testing).
+WINDOW_SCALE_MIN = 2
+WINDOW_SCALE_MAX = 6
 
 VIDEO_EXTENSIONS = {
     ".mp4",
@@ -401,6 +404,62 @@ def _parse_weather(raw: dict | None) -> dict[str, Any]:
     }
 
 
+def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
+    """MyRetroTVs decade-stream preferences (channel-type filters).
+
+    ``filters`` maps checkbox ids (``box_c``, ``box_s``, …) to enabled flags.
+    ``null`` / omitted means “use the site default” (typically all on) until
+    the user changes them in the in-app menu.
+    """
+    retro = raw or {}
+    if not isinstance(retro, dict):
+        retro = {}
+    defaults = _default_config()["retro_tv"]
+    filters_raw = retro.get("filters", defaults.get("filters"))
+    filters: dict[str, bool] | None
+    if filters_raw is None:
+        filters = None
+    elif isinstance(filters_raw, dict):
+        filters = {}
+        for key, val in filters_raw.items():
+            kid = str(key).strip()
+            if not kid.startswith("box_"):
+                # Allow bare letters from older notes → normalize to box_*
+                if len(kid) == 1 and kid.isalpha():
+                    kid = f"box_{kid.lower()}"
+                else:
+                    continue
+            filters[kid] = bool(val)
+        if not filters:
+            filters = None
+    elif isinstance(filters_raw, list):
+        # Enabled-id list form: ["box_c", "box_m"]
+        filters = {}
+        for item in filters_raw:
+            kid = str(item).strip()
+            if len(kid) == 1 and kid.isalpha():
+                kid = f"box_{kid.lower()}"
+            if kid.startswith("box_"):
+                filters[kid] = True
+        if not filters:
+            filters = None
+    else:
+        filters = None
+
+    volume = retro.get("volume", defaults.get("volume"))
+    try:
+        volume_i = int(volume) if volume is not None else None
+    except (TypeError, ValueError):
+        volume_i = None
+    if volume_i is not None:
+        volume_i = max(0, min(100, volume_i))
+
+    return {
+        "filters": filters,
+        "volume": volume_i,
+    }
+
+
 def _parse_admin(raw: dict | None) -> dict[str, Any]:
     admin = raw or {}
     if not isinstance(admin, dict):
@@ -487,6 +546,10 @@ def _default_config() -> dict[str, Any]:
             "latitude": None,
             "longitude": None,
         },
+        "retro_tv": {
+            "filters": None,
+            "volume": None,
+        },
     }
 
 
@@ -530,6 +593,7 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "admin": _parse_admin(raw.get("admin")),
         "accessibility": _parse_accessibility(raw.get("accessibility")),
         "weather": _parse_weather(raw.get("weather")),
+        "retro_tv": _parse_retro_tv(raw.get("retro_tv")),
     }
 
 

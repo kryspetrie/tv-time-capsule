@@ -47,6 +47,8 @@ from .config import (
     WINDOW_DEFAULT_W,
     WINDOW_MIN_H,
     WINDOW_MIN_W,
+    WINDOW_SCALE_MAX,
+    WINDOW_SCALE_MIN,
 )
 from .fonts import enable_freetype_fallback, make_font
 from .gamepad import (
@@ -118,6 +120,7 @@ from .hidden_channels import (
     hidden_channels_for_guide,
 )
 from .weather_channel import WeatherChannel, resolve_weather_location
+from .retro_tv_channel import RetroTvChannel, url_for_decade
 from .state import (
     clear_resume_ep,
     reset_episode_progress,
@@ -175,12 +178,14 @@ class TVTimeCapsule:
     GAMEPAD_CONFIG = 11
     GAMEPAD_CAPTURE = 12
     WEATHER = 13
+    RETRO_TV = 14
 
     def __init__(
         self,
         media_paths,
         fullscreen=True,
         force_43=False,
+        window_scale=None,
         screensaver=None,
         screensaver_timeout=None,
         admin=None,
@@ -209,6 +214,7 @@ class TVTimeCapsule:
 
         self.fullscreen = fullscreen
         self.force_43 = force_43
+        self.window_scale = self._normalize_window_scale(window_scale)
         self._screensaver_override = screensaver
         self._screensaver_timeout_override = screensaver_timeout
         self._channel_snow_override = channel_snow
@@ -325,6 +331,11 @@ class TVTimeCapsule:
         self._show_list_test_pattern: str | None = None
         self._hidden_channels_guide = False
         self._weather_channel: WeatherChannel | None = None
+        self._retro_tv_channel: RetroTvChannel | None = None
+        self._retro_tv_decade: str | None = None
+        self._retro_tv_year_flash: str = ""
+        self._retro_tv_menu_open = False
+        self._retro_tv_menu_cursor = 0
         gp_cfg = self.config.get("gamepad") or {}
         gp_bindings = load_gamepad_bindings(self.config)
         self._gamepad_bindings = gp_bindings
@@ -1306,8 +1317,21 @@ class TVTimeCapsule:
             self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.WEATHER:
-            if self._test_pattern_dial_allowed():
+            if self._test_pattern_dial_allowed() or self.view in (
+                self.WEATHER,
+                self.RETRO_TV,
+            ):
                 self._enter_weather_channel()
+            else:
+                self.channel_error = f"Ch {digits} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
+            return
+        if result.kind == DialKind.RETRO_TV and result.decade is not None:
+            if self._test_pattern_dial_allowed() or self.view in (
+                self.WEATHER,
+                self.RETRO_TV,
+            ):
+                self._enter_retro_tv(result.decade, year_digits=digits)
             else:
                 self.channel_error = f"Ch {digits} Not Found"
                 self.channel_error_time = pygame.time.get_ticks()
@@ -1626,7 +1650,13 @@ class TVTimeCapsule:
         x, y, w, h = self._fit_rect(sw, sh, dw, dh)
         if not self._omx_overlay:
             dst.fill(C.BLACK)
-        scaled = src if (w, h) == (sw, sh) else pygame.transform.smoothscale(src, (w, h))
+        if (w, h) == (sw, sh):
+            scaled = src
+        elif w % sw == 0 and h % sh == 0 and (w // sw) == (h // sh):
+            # Integer upscale (e.g. --scale 2): nearest-neighbor keeps CRT pixels crisp.
+            scaled = pygame.transform.scale(src, (w, h))
+        else:
+            scaled = pygame.transform.smoothscale(src, (w, h))
         dst.blit(scaled, (x, y))
         pygame.display.flip()
 
@@ -1686,15 +1716,33 @@ class TVTimeCapsule:
         self.canvas_w = frame.canvas_w
         self.canvas_h = frame.canvas_h
 
+    @staticmethod
+    def _normalize_window_scale(scale) -> int | None:
+        if scale is None:
+            return None
+        try:
+            value = int(scale)
+        except (TypeError, ValueError):
+            return None
+        if WINDOW_SCALE_MIN <= value <= WINDOW_SCALE_MAX:
+            return value
+        return None
+
+    def _windowed_size(self) -> tuple[int, int]:
+        """Default OS window size for windowed mode."""
+        if self.window_scale is not None:
+            return SCREEN_W * self.window_scale, SCREEN_H * self.window_scale
+        return WINDOW_DEFAULT_W, WINDOW_DEFAULT_H
+
     def _init_display_window(self) -> None:
-        """Create the OS window (fixed 800×600 when windowed) and logical framebuffer."""
+        """Create the OS window and logical framebuffer."""
         if self.fullscreen:
             try:
                 self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN, vsync=1)
             except TypeError:
                 self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
-            w, h = self._window_size_43(WINDOW_DEFAULT_W, WINDOW_DEFAULT_H)
+            w, h = self._window_size_43(*self._windowed_size())
             try:
                 self.display = pygame.display.set_mode((w, h), pygame.RESIZABLE, vsync=1)
             except TypeError:
@@ -1889,7 +1937,7 @@ class TVTimeCapsule:
         """Margin fill matching the active screen so the UI appears inset, not framed."""
         if self._screensaver_active:
             return C.BLACK
-        if self.view in (self.PLAYING, self.WEATHER):
+        if self.view in (self.PLAYING, self.WEATHER, self.RETRO_TV):
             return C.BLACK
         return C.BG
 
@@ -1972,8 +2020,13 @@ class TVTimeCapsule:
         """Full-screen directory of easter-egg channels."""
         self.screen.fill(C.BLACK)
         margin_x = max(32, int(self.sw * 0.06))
+        channels = hidden_channels_for_guide()
+        dial_col_w = max(
+            (self.font_md.size(ch.dial)[0] for ch in channels),
+            default=self.font_md.size("000")[0],
+        )
         dial_x = margin_x
-        title_x = margin_x + self.font_md.size("000  ")[0]
+        title_x = margin_x + dial_col_w + self.font_md.size("  ")[0]
         max_w = max(80, self.sw - title_x - margin_x)
 
         header = self.font_lg.render("CH 000", True, C.GREEN)
@@ -1984,7 +2037,7 @@ class TVTimeCapsule:
         y = 168
         line_gap = 2
         row_gap = 18
-        for ch in hidden_channels_for_guide():
+        for ch in channels:
             dial_s = self.font_md.render(ch.dial, True, C.GREEN)
             name_s = self.font_md.render(ch.title, True, C.WHITE)
             self.screen.blit(dial_s, (dial_x, y))
@@ -2091,9 +2144,15 @@ class TVTimeCapsule:
         Snow / static starts *immediately* and keeps animating while Chrome
         boots on a background thread (no main-thread network / CDP wait).
         """
+        if self.view == self.RETRO_TV:
+            prev = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
+            self._exit_retro_tv()
+            self.view = prev
+
         self._clear_hidden_channels_guide()
         self._clear_show_list_test_pattern()
-        self._weather_previous_view = self.view
+        if self.view != self.WEATHER:
+            self._weather_previous_view = self.view
         self.view = self.WEATHER
         self.channel_flash = "004"
         self.channel_flash_time = pygame.time.get_ticks()
@@ -2178,6 +2237,324 @@ class TVTimeCapsule:
             self._weather_channel = None
         self.view = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
 
+    def _draw_retro_tv(self) -> None:
+        """Render the MyRetroTVs screencast frame full-bleed."""
+        if self._retro_tv_channel is None or not self._retro_tv_channel.is_available():
+            self.screen.fill(C.BLACK)
+            t = self.font_md.render("RETRO TV UNAVAILABLE", True, self._dim_color())
+            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+            return
+        frame = self._retro_tv_channel.get_frame()
+        if frame is not None:
+            if frame.get_size() != (self.sw, self.sh):
+                frame = pygame.transform.smoothscale(frame, (self.sw, self.sh))
+            self.screen.blit(frame, (0, 0))
+        else:
+            self.screen.fill(C.BLACK)
+            t = self.font_sm.render("LOADING...", True, self._dim_color())
+            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+        if self._retro_tv_menu_open:
+            self._draw_retro_tv_filter_menu()
+        self.draw_volume_overlay()
+
+    def _retro_tv_menu_rows(self) -> list[tuple[str, str, bool | None]]:
+        """Menu rows: (kind, label, on). kind is all|none|filter id."""
+        rows: list[tuple[str, str, bool | None]] = [
+            ("all", "Select All", None),
+            ("none", "Select None", None),
+        ]
+        filters: list[dict] = []
+        if self._retro_tv_channel is not None:
+            filters = self._retro_tv_channel.get_filters()
+        for item in filters:
+            rows.append((str(item["id"]), str(item["name"]), bool(item["on"])))
+        return rows
+
+    def _open_retro_tv_filter_menu(self) -> None:
+        self._retro_tv_menu_open = True
+        rows = self._retro_tv_menu_rows()
+        if self._retro_tv_menu_cursor >= len(rows):
+            self._retro_tv_menu_cursor = 0
+
+    def _close_retro_tv_filter_menu(self) -> None:
+        self._retro_tv_menu_open = False
+        self._retro_tv_menu_cursor = 0
+
+    def _draw_retro_tv_filter_menu(self) -> None:
+        """Overlay listing MyRetroTVs channel-type filters."""
+        rows = self._retro_tv_menu_rows()
+        if not rows:
+            return
+        if self._retro_tv_menu_cursor >= len(rows):
+            self._retro_tv_menu_cursor = max(0, len(rows) - 1)
+
+        overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        self.screen.blit(overlay, (0, 0))
+
+        box_w = min(420, self.sw - 40)
+        line_h = self.font_sm.get_linesize() + 6
+        header_h = 56
+        visible = min(len(rows), max(6, (self.sh - 100) // line_h))
+        box_h = min(self.sh - 40, header_h + visible * line_h + 48)
+        box_x = (self.sw - box_w) // 2
+        box_y = (self.sh - box_h) // 2
+        pygame.draw.rect(
+            self.screen, C.BG_CARD, (box_x, box_y, box_w, box_h), border_radius=10
+        )
+        pygame.draw.rect(
+            self.screen, C.CYAN, (box_x, box_y, box_w, box_h), 2, border_radius=10
+        )
+
+        title = self.font_md.render("CHANNEL TYPES", True, C.BRIGHT)
+        self.screen.blit(
+            title, title.get_rect(centerx=self.sw // 2, top=box_y + 14)
+        )
+
+        # Keep cursor row visible.
+        first = 0
+        if len(rows) > visible:
+            first = max(
+                0,
+                min(
+                    self._retro_tv_menu_cursor - visible // 2,
+                    len(rows) - visible,
+                ),
+            )
+
+        list_top = box_y + header_h
+        for i in range(first, min(first + visible, len(rows))):
+            kind, label, on = rows[i]
+            y = list_top + (i - first) * line_h
+            focused = i == self._retro_tv_menu_cursor
+            if focused:
+                pygame.draw.rect(
+                    self.screen,
+                    C.CYAN,
+                    (box_x + 8, y - 2, box_w - 16, line_h),
+                    border_radius=4,
+                )
+            if kind in ("all", "none"):
+                mark = "*" if focused else " "
+                text = f" {mark} {label}"
+                color = C.BLACK if focused else C.GREEN
+            else:
+                mark = "X" if on else " "
+                text = f"[{mark}] {label}"
+                color = C.BLACK if focused else (C.GREEN if on else C.WHITE)
+            surf = self.font_sm.render(text, True, color)
+            self.screen.blit(surf, (box_x + 20, y))
+
+        hint = self.font_sm.render(
+            "enter toggle  |  esc close",
+            True,
+            self._dim_color(),
+        )
+        self.screen.blit(
+            hint, hint.get_rect(centerx=self.sw // 2, bottom=box_y + box_h - 12)
+        )
+
+    def _persist_retro_tv_settings(self) -> None:
+        """Write channel-type filters (+ volume) to config."""
+        retro = dict(self.config.get("retro_tv") or {})
+        filters_map: dict[str, bool] | None = None
+        volume: int | None = None
+        if self._retro_tv_channel is not None:
+            filters_map = self._retro_tv_channel.filter_map() or None
+            volume = int(self._retro_tv_channel.volume)
+        if filters_map is not None:
+            retro["filters"] = filters_map
+        if volume is not None:
+            retro["volume"] = volume
+        self.config["retro_tv"] = retro
+        save_config(self.config)
+
+    def _process_retro_tv_action(self, action: str | None) -> bool:
+        """Handle volume / channel / menu / back while retro TV is on."""
+        if not action:
+            return False
+
+        if self._retro_tv_menu_open:
+            rows = self._retro_tv_menu_rows()
+            if action == "back":
+                self._close_retro_tv_filter_menu()
+                return True
+            if not rows:
+                return True
+            if action == "up":
+                self._retro_tv_menu_cursor = (
+                    self._retro_tv_menu_cursor - 1
+                ) % len(rows)
+                return True
+            if action == "down":
+                self._retro_tv_menu_cursor = (
+                    self._retro_tv_menu_cursor + 1
+                ) % len(rows)
+                return True
+            if action == "select":
+                kind, _label, _on = rows[self._retro_tv_menu_cursor % len(rows)]
+                if self._retro_tv_channel is None:
+                    return True
+                if kind == "all":
+                    self._retro_tv_channel.select_all_filters()
+                elif kind == "none":
+                    self._retro_tv_channel.select_none_filters()
+                else:
+                    self._retro_tv_channel.toggle_filter(kind)
+                self._persist_retro_tv_settings()
+                return True
+            return True
+
+        if action == "select":
+            self._open_retro_tv_filter_menu()
+            return True
+        if action == "up":
+            if self._retro_tv_channel is not None:
+                self._retro_tv_channel.adjust_volume(10)
+                self.volume_overlay_timer = pygame.time.get_ticks()
+                self._persist_retro_tv_settings()
+            return True
+        if action == "down":
+            if self._retro_tv_channel is not None:
+                self._retro_tv_channel.adjust_volume(-10)
+                self.volume_overlay_timer = pygame.time.get_ticks()
+                self._persist_retro_tv_settings()
+            return True
+        if action == "right":
+            if self._retro_tv_channel is not None:
+                self._retro_tv_channel.channel_up()
+            return True
+        if action == "left":
+            if self._retro_tv_channel is not None:
+                self._retro_tv_channel.channel_down()
+            return True
+        if action == "back":
+            self._exit_retro_tv()
+            return True
+        return False
+
+    def _enter_retro_tv(self, decade: str, *, year_digits: str) -> None:
+        """Switch to a MyRetroTVs decade stream (Chrome screencast)."""
+        if self.view == self.WEATHER:
+            # Preserve browse destination; exit restores weather's previous view.
+            prev = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
+            self._exit_weather_channel()
+            self.view = prev  # ensure we don't start from a stale weather view
+
+        self._clear_hidden_channels_guide()
+        self._clear_show_list_test_pattern()
+        if self.view != self.RETRO_TV:
+            self._retro_tv_previous_view = self.view
+
+        # Compare against the running decade *before* updating state — otherwise
+        # switching 90s→80s looks like a no-op after overwriting the field.
+        running_decade = self._retro_tv_decade
+        same_decade = (
+            self.view == self.RETRO_TV
+            and self._retro_tv_channel is not None
+            and self._retro_tv_channel.is_available()
+            and running_decade == decade
+        )
+
+        if not same_decade:
+            self._close_retro_tv_filter_menu()
+
+        self._retro_tv_decade = decade
+        self._retro_tv_year_flash = year_digits
+        self.view = self.RETRO_TV
+        self.channel_flash = year_digits
+        self.channel_flash_time = pygame.time.get_ticks()
+
+        if self._channel_fx.snow_enabled:
+            self._channel_fx.trigger()
+            self._paint_retro_tv_tune_frame()
+            self.present()
+
+        if same_decade:
+            self._animate_channel_snow_burst()
+            return
+
+        if self._retro_tv_channel is not None:
+            self._retro_tv_channel.stop()
+            self._retro_tv_channel = None
+
+        url = url_for_decade(decade)
+        result: dict = {"ok": False}
+
+        def _boot() -> None:
+            try:
+                retro_cfg = self.config.get("retro_tv") or {}
+                filters = retro_cfg.get("filters")
+                if not isinstance(filters, dict):
+                    filters = None
+                volume = retro_cfg.get("volume")
+                self._retro_tv_channel = RetroTvChannel(
+                    url,
+                    self.canvas_w,
+                    self.canvas_h,
+                    filters=filters,
+                    volume=volume if isinstance(volume, int) else None,
+                )
+                result["ok"] = bool(self._retro_tv_channel.start())
+            except Exception:
+                LOG.exception("Retro TV start failed")
+                result["ok"] = False
+
+        boot = threading.Thread(target=_boot, daemon=True, name="retro-tv-boot")
+        boot.start()
+
+        min_ms = FX_DURATION_MS
+        max_ms = 45_000
+        t0 = pygame.time.get_ticks()
+        while True:
+            pygame.event.pump()
+            elapsed = pygame.time.get_ticks() - t0
+
+            if self._channel_fx.snow_enabled:
+                self._channel_fx.extend()
+
+            self._paint_retro_tv_tune_frame()
+            self.present()
+            self.clock.tick(60)
+
+            if not boot.is_alive() and elapsed >= min_ms:
+                break
+            if elapsed >= max_ms:
+                break
+
+        boot.join(timeout=2.0)
+
+        if not result.get("ok") or (
+            self._retro_tv_channel is None or not self._retro_tv_channel.is_available()
+        ):
+            self.channel_error = "Retro TV Unavailable"
+            self.channel_error_time = pygame.time.get_ticks()
+            self._exit_retro_tv()
+
+    def _paint_retro_tv_tune_frame(self) -> None:
+        """Draw retro TV destination under channel snow (safe-zone aware)."""
+        if self.view == self.SAFE_ZONE_EDIT:
+            self._draw_channel_tune_frame()
+            self.draw_channel_overlay()
+            self._draw_rescan_banner()
+        else:
+            with self._ui_layout(letterbox=True):
+                self._draw_channel_tune_frame()
+                self.draw_channel_overlay()
+                self._draw_rescan_banner()
+        if self._channel_fx.snow_enabled:
+            self._channel_fx.draw(self.screen)
+
+    def _exit_retro_tv(self) -> None:
+        """Leave MyRetroTVs and return to the previous browse view."""
+        self._close_retro_tv_filter_menu()
+        if self._retro_tv_channel is not None:
+            self._retro_tv_channel.stop()
+            self._retro_tv_channel = None
+        self._retro_tv_decade = None
+        self._retro_tv_year_flash = ""
+        self.view = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
+
     def _apply_channel_fx(self):
         """Brief static burst when tuning channels (if enabled)."""
         if self._channel_fx.is_active():
@@ -2196,6 +2573,9 @@ class TVTimeCapsule:
             return
         if self.view == self.WEATHER:
             self._draw_weather_channel()
+            return
+        if self.view == self.RETRO_TV:
+            self._draw_retro_tv()
             return
         if self.view == self.LIBRARY_SELECT:
             self.draw_library_selector()
@@ -2308,6 +2688,8 @@ class TVTimeCapsule:
         deferred = self._deferred_splash
         if self.view == self.WEATHER:
             self._draw_weather_channel()
+        elif self.view == self.RETRO_TV:
+            self._draw_retro_tv()
         elif self.view == self.PLAYING and deferred is not None:
             self._blit_now_playing_content(*deferred)
         elif self.view == self.CONFIRM_EXIT:
@@ -3869,6 +4251,8 @@ class TVTimeCapsule:
         vol = None
         if self.view == self.WEATHER and self._weather_channel is not None:
             vol = min(self._weather_channel.volume, 100)
+        elif self.view == self.RETRO_TV and self._retro_tv_channel is not None:
+            vol = min(self._retro_tv_channel.volume, 100)
         elif self.player:
             vol = min(self.player.volume, 100)
         else:
@@ -3949,7 +4333,7 @@ class TVTimeCapsule:
                 ("NUMBER KEYS", None),
                 ("channel / page codes", "use keyboard number keys"),
                 ("alphabet / kids / help", "keyboard only on this pad"),
-                ("secret channels", "use keyboard 000-004  |  see Secrets"),
+                ("secret channels", "use keyboard 000-004 or years  |  see Secrets"),
             ]
         )
         pages: list[tuple[str, list[tuple[str, str | None]]]] = [
@@ -3971,6 +4355,8 @@ class TVTimeCapsule:
                     *format_hidden_help_rows(),
                     ("notes", "Works on library / show / movie browse (parent mode)"),
                     ("weather tip", "Set weather zip in config for dial 004"),
+                    ("retro tip", "Dial any year 1950-2009 for MyRetroTVs"),
+                    ("retro menu", "Enter/Space toggles channel types"),
                 ],
             ),
             (
@@ -5925,6 +6311,9 @@ class TVTimeCapsule:
             if self.view == self.WEATHER:
                 self._exit_weather_channel()
                 return
+            if self.view == self.RETRO_TV:
+                self._exit_retro_tv()
+                return
             if self._kids_mode_active:
                 if self.view == self.SHOW_LIST and self._is_split_library():
                     self.view = self.LIBRARY_SELECT
@@ -6134,6 +6523,7 @@ class TVTimeCapsule:
             self.CONFIRM_EXIT,
             self.SAFE_ZONE_EDIT,
             self.WEATHER,
+            self.RETRO_TV,
         )
 
     def _enter_screensaver(self):
@@ -6512,6 +6902,9 @@ class TVTimeCapsule:
         if self._weather_channel is not None:
             self._weather_channel.stop()
             self._weather_channel = None
+        if self._retro_tv_channel is not None:
+            self._retro_tv_channel.stop()
+            self._retro_tv_channel = None
         if shutdown_snapshot is not None:
             self._channel_fx.play_shutdown(
                 self.screen,
@@ -6685,6 +7078,29 @@ class TVTimeCapsule:
                                 self._request_quit(source="quit-key")
                                 continue
                             # Ignore other keys so they don't exit the channel.
+                            continue
+
+                        if self.view == self.RETRO_TV:
+                            digit = digit_for_key(self.keymap, event.key)
+                            if digit is not None:
+                                if self._retro_tv_menu_open:
+                                    continue
+                                self._append_dial_digit(digit)
+                                continue
+                            if key_action in (
+                                "up",
+                                "down",
+                                "left",
+                                "right",
+                                "back",
+                                "select",
+                            ):
+                                self._process_retro_tv_action(key_action)
+                                continue
+                            if key_action == "quit":
+                                self._exit_retro_tv()
+                                self._request_quit(source="quit-key")
+                                continue
                             continue
 
                         if self.view == self.KEY_CAPTURE:
@@ -6903,6 +7319,10 @@ class TVTimeCapsule:
                                 # Ignore unhandled gamepad actions (keep watching).
                                 pass
                             continue
+                        if self.view == self.RETRO_TV:
+                            if not self._process_retro_tv_action(action):
+                                pass
+                            continue
                         if self.view == self.CONFIRM_EXIT:
                             self._process_confirm_exit_action(action)
                             continue
@@ -6936,6 +7356,12 @@ class TVTimeCapsule:
                 if self.view == self.WEATHER:
                     with self._ui_layout(letterbox=True):
                         self._draw_weather_channel()
+                        self.draw_channel_overlay()
+                    self._apply_channel_fx()
+                    self.present()
+                elif self.view == self.RETRO_TV:
+                    with self._ui_layout(letterbox=True):
+                        self._draw_retro_tv()
                         self.draw_channel_overlay()
                     self._apply_channel_fx()
                     self.present()

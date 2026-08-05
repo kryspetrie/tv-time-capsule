@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, auto
 
+from .retro_tv_channel import decade_slug_from_digits
+
 
 class DialKind(Enum):
     BACK = auto()
@@ -14,6 +16,7 @@ class DialKind(Enum):
     HIDDEN_GUIDE = auto()
     TEST_PATTERN = auto()
     WEATHER = auto()
+    RETRO_TV = auto()
     CHANNEL = auto()
     INVALID = auto()
 
@@ -23,6 +26,7 @@ class DialResult:
     kind: DialKind
     digits: str
     channel: int | None = None
+    decade: str | None = None
 
 
 def classify_dial(digits: str) -> DialResult:
@@ -56,6 +60,10 @@ def classify_dial(digits: str) -> DialResult:
 
     if digits.startswith("0"):
         return DialResult(DialKind.INVALID, digits)
+
+    decade = decade_slug_from_digits(digits)
+    if decade is not None:
+        return DialResult(DialKind.RETRO_TV, digits, decade=decade)
 
     if digits.isdigit() and not digits.startswith("0"):
         return DialResult(DialKind.CHANNEL, digits, channel=int(digits))

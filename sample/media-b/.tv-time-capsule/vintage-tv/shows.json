@@ -1,0 +1,15 @@
+{
+  "device_name": "vintage-tv",
+  "shows": [
+    {
+      "uuid": "35766ce9-eb38-50ff-949c-e2fd11f00d65",
+      "name": "Named Flat",
+      "relative_path": ".",
+      "seasons": {
+        "1": {
+          "episode_count": 4
+        }
+      }
+    }
+  ]
+}

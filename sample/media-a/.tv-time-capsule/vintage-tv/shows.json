@@ -1,0 +1,78 @@
+{
+  "device_name": "vintage-tv",
+  "shows": [
+    {
+      "uuid": "35766ce9-eb38-50ff-949c-e2fd11f00d65",
+      "name": "Flat Numbers",
+      "relative_path": ".",
+      "seasons": {
+        "1": {
+          "episode_count": 3
+        }
+      }
+    },
+    {
+      "uuid": "35766ce9-eb38-50ff-949c-e2fd11f00d65",
+      "name": "Mixed Naming",
+      "relative_path": ".",
+      "seasons": {
+        "1": {
+          "episode_count": 1
+        },
+        "2": {
+          "episode_count": 1
+        }
+      },
+      "thumbnail_relative": "Mixed Naming/thumbnail.png"
+    },
+    {
+      "uuid": "35766ce9-eb38-50ff-949c-e2fd11f00d65",
+      "name": "Named Flat",
+      "relative_path": ".",
+      "seasons": {
+        "1": {
+          "episode_count": 4
+        }
+      },
+      "thumbnail_relative": "Named Flat/thumbnail.png"
+    },
+    {
+      "uuid": "01a49b12-5e33-59bb-aec7-404eeefd1e31",
+      "name": "No Thumbnails",
+      "relative_path": "No Thumbnails",
+      "seasons": {
+        "1": {
+          "episode_count": 2
+        }
+      }
+    },
+    {
+      "uuid": "9d778f6d-27fd-59cc-89b8-807b4766d63c",
+      "name": "Season Folders",
+      "relative_path": "Season Folders",
+      "seasons": {
+        "2": {
+          "episode_count": 2
+        },
+        "1": {
+          "episode_count": 2
+        }
+      },
+      "thumbnail_relative": "Season Folders/show.png"
+    },
+    {
+      "uuid": "20ba1ffa-95d5-52b2-a73d-e1b146d1603d",
+      "name": "Season Named",
+      "relative_path": "Season Named",
+      "seasons": {
+        "1": {
+          "episode_count": 2
+        },
+        "2": {
+          "episode_count": 2
+        }
+      },
+      "thumbnail_relative": "Season Named/Season Named.png"
+    }
+  ]
+}

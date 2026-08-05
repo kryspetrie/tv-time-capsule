@@ -18,20 +18,16 @@ import base64
 import io
 import json
 import logging
-import os
-import platform
 import shutil
-import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 import urllib.request
-import zipfile
-from pathlib import Path
 
 import pygame
+
+from .chrome_cdp import ensure_chromium, kill_port_process, wait_for_page_ws
 
 try:
     import websocket  # type: ignore[import-untyped]
@@ -46,139 +42,6 @@ WEATHER_URL = "https://weather.com/retro/"
 # Public key embedded in weather.com/retro (same key the site uses for search).
 _TWC_API_KEY = "b7f0783d80e94fd4b0783d80e94fd48b"
 _TWC_LOCATION_SEARCH = "https://api.weather.com/v3/location/search"
-
-# Playwright-published Chromium builds.
-_CHROMIUM_REVISIONS: dict[str, str] = {
-    "linux": "1097",
-    "mac": "1097",
-    "mac_arm": "1097",
-}
-_CHROMIUM_HOST = "https://playwright.azureedge.net/builds/chromium"
-
-
-# ── Chromium helpers ────────────────────────────────────────────────────
-
-
-def _cache_dir() -> Path:
-    if sys.platform == "darwin":
-        base = Path.home() / "Library" / "Caches"
-    elif sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return base / "tv-time-capsule" / "chromium"
-
-
-def _chromium_platform_key() -> str | None:
-    if sys.platform == "linux":
-        return "linux"
-    if sys.platform == "darwin":
-        machine = platform.machine().lower()
-        return "mac_arm" if machine in ("arm64", "aarch64") else "mac"
-    return None
-
-
-def _chromium_download_url() -> str | None:
-    key = _chromium_platform_key()
-    if key is None:
-        return None
-    rev = _CHROMIUM_REVISIONS.get(key)
-    if rev is None:
-        return None
-    return f"{_CHROMIUM_HOST}/{rev}/chromium-{key}.zip"
-
-
-def _find_chrome() -> str | None:
-    for name in (
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium-browser",
-        "chromium",
-    ):
-        path = shutil.which(name)
-        if path:
-            return path
-    mac_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    if os.path.exists(mac_path):
-        return mac_path
-    return None
-
-
-def _ensure_chromium() -> str | None:
-    system = _find_chrome()
-    if system is not None:
-        return system
-
-    cache = _cache_dir()
-    key = _chromium_platform_key()
-    if key is None:
-        LOG.warning("Unsupported platform for Chromium download")
-        return None
-
-    if sys.platform == "darwin":
-        chrome_bin = (
-            cache / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
-        )
-    elif sys.platform == "linux":
-        chrome_bin = cache / "chrome-linux" / "chrome"
-    else:
-        return None
-
-    if chrome_bin.is_file():
-        _ensure_executable(chrome_bin)
-        return str(chrome_bin)
-
-    url = _chromium_download_url()
-    if url is None:
-        return None
-
-    LOG.info("Downloading Chromium for weather channel...")
-    try:
-        cache.mkdir(parents=True, exist_ok=True)
-        zip_path = cache / "chromium.zip"
-        urllib.request.urlretrieve(url, zip_path)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(cache)
-        zip_path.unlink()
-    except Exception as exc:
-        LOG.warning("Failed to download Chromium: %s", exc)
-        return None
-
-    if chrome_bin.is_file():
-        _ensure_executable(chrome_bin)
-        LOG.info("Chromium ready at %s", chrome_bin)
-        return str(chrome_bin)
-
-    return None
-
-
-def _kill_port_process(port: int) -> None:
-    import signal
-
-    try:
-        if sys.platform == "darwin" or sys.platform.startswith("linux"):
-            out = subprocess.check_output(
-                ["lsof", "-ti", f"tcp:{port}"], stderr=subprocess.DEVNULL
-            )
-            for pid_s in out.decode().strip().split("\n"):
-                pid_s = pid_s.strip()
-                if pid_s:
-                    try:
-                        os.kill(int(pid_s), signal.SIGTERM)
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-
-def _ensure_executable(path: Path) -> None:
-    if sys.platform == "win32":
-        return
-    try:
-        st = path.stat()
-        path.chmod(st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    except Exception:
-        pass
 
 
 # ── Location resolution (for Raspberry Pi / headless without geo IP) ───
@@ -384,7 +247,7 @@ class WeatherChannel:
             LOG.warning("websocket-client not installed")
             return False
 
-        chrome_path = _ensure_chromium()
+        chrome_path = ensure_chromium(log_label="weather channel")
         if chrome_path is None:
             LOG.warning("Chrome not found – weather channel unavailable")
             return False
@@ -400,7 +263,7 @@ class WeatherChannel:
 
     def _start_once(self, chrome_path: str) -> bool:
         """Single Chrome + CDP connect attempt. Caller handles retries."""
-        _kill_port_process(CDP_PORT)
+        kill_port_process(CDP_PORT)
         time.sleep(0.3)
 
         # Isolated profile: avoids clashing with a running Google Chrome
@@ -433,7 +296,7 @@ class WeatherChannel:
             self._cleanup_user_data()
             return False
 
-        ws_url = self._wait_for_page_ws(timeout=12.0)
+        ws_url = wait_for_page_ws(CDP_PORT, chrome=self._chrome, timeout=12.0)
         if ws_url is None:
             LOG.warning("No CDP page target found for weather channel")
             return False
@@ -552,36 +415,6 @@ class WeatherChannel:
         except Exception:
             pass
         self._user_data_dir = None
-
-    def _wait_for_page_ws(self, timeout: float) -> str | None:
-        """Poll CDP /json until a page target with a WebSocket URL appears."""
-        deadline = time.time() + timeout
-        last_err: str | None = None
-        while time.time() < deadline:
-            if self._chrome is not None and self._chrome.poll() is not None:
-                LOG.warning("Chrome exited early (code %s)", self._chrome.returncode)
-                return None
-            try:
-                resp = urllib.request.urlopen(
-                    f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=1
-                )
-                targets = json.loads(resp.read())
-            except Exception as exc:
-                last_err = str(exc)
-                time.sleep(0.25)
-                continue
-
-            for target in targets:
-                if target.get("type") != "page":
-                    continue
-                ws = target.get("webSocketDebuggerUrl")
-                if ws:
-                    return ws
-            time.sleep(0.25)
-
-        if last_err:
-            LOG.warning("CDP /json poll failed: %s", last_err)
-        return None
 
     def _next_id(self) -> int:
         self._cmd_id += 1
