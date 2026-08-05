@@ -180,6 +180,14 @@ class ChannelChangeFX:
             if self._audio_player is not None:
                 self._audio_player.play()
 
+    def extend(self, extra_ms: int | None = None) -> None:
+        """Keep snow visible without replaying the audio stab."""
+        if not self.snow_enabled:
+            return
+        now = pygame.time.get_ticks()
+        duration = FX_DURATION_MS if extra_ms is None else max(1, int(extra_ms))
+        self._active_until = max(self._active_until, now + duration)
+
     def _precache_snow_frames(self) -> None:
         """Pre-generate every static frame for one channel-tune burst."""
         self._snow_frames = [

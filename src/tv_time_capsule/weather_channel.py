@@ -43,6 +43,10 @@ LOG = logging.getLogger(__name__)
 CDP_PORT = 9224
 WEATHER_URL = "https://weather.com/retro/"
 
+# Public key embedded in weather.com/retro (same key the site uses for search).
+_TWC_API_KEY = "b7f0783d80e94fd4b0783d80e94fd48b"
+_TWC_LOCATION_SEARCH = "https://api.weather.com/v3/location/search"
+
 # Playwright-published Chromium builds.
 _CHROMIUM_REVISIONS: dict[str, str] = {
     "linux": "1097",
@@ -177,6 +181,145 @@ def _ensure_executable(path: Path) -> None:
         pass
 
 
+# ── Location resolution (for Raspberry Pi / headless without geo IP) ───
+
+
+def _twc_search(query: str, *, location_type: str | None = None) -> dict | None:
+    """Return first match from weather.com location search, or None."""
+    import urllib.parse
+
+    q = (query or "").strip()
+    if len(q) < 2:
+        return None
+    params: dict[str, str] = {
+        "query": q,
+        "language": "en-US",
+        "format": "json",
+        "apiKey": _TWC_API_KEY,
+    }
+    # Omit locationType for zips — ``city`` returns 404 for pure postal codes.
+    if location_type:
+        params["locationType"] = location_type
+    url = f"{_TWC_LOCATION_SEARCH}?{urllib.parse.urlencode(params)}"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "tv-time-capsule/weather-channel"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:
+        LOG.warning("Weather location search failed for %r: %s", q, exc)
+        return None
+
+    loc = data.get("location") if isinstance(data, dict) else None
+    if not isinstance(loc, dict):
+        return None
+    place_ids = loc.get("placeId") or []
+    if not place_ids:
+        return None
+
+    # Prefer an actual city when the API returns mixed types.
+    types = loc.get("type") or []
+    idx = 0
+    if isinstance(types, list):
+        for i, t in enumerate(types):
+            if t == "city":
+                idx = i
+                break
+
+    def _at(key: str, default: str = "") -> str:
+        vals = loc.get(key)
+        if isinstance(vals, list) and idx < len(vals) and vals[idx] is not None:
+            return str(vals[idx])
+        return default
+
+    try:
+        lat = float(loc["latitude"][idx])
+        lon = float(loc["longitude"][idx])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+    name = _at("displayName") or _at("city") or q
+    context = _at("displayContext") or _at("adminDistrict") or ""
+    return {
+        "geocode": f"{lat},{lon}",
+        "latitude": lat,
+        "longitude": lon,
+        "name": name,
+        "context": context,
+    }
+
+
+def resolve_weather_location(cfg: dict | None) -> dict | None:
+    """Resolve optional weather config into a location dict for the Chrome cookie.
+
+    Returns ``{"geocode", "name", "context", "latitude", "longitude"}`` or None
+    when nothing is configured / resolution fails.
+    """
+    weather = cfg or {}
+    if not isinstance(weather, dict):
+        return None
+
+    lat = weather.get("latitude")
+    lon = weather.get("longitude")
+    name = (weather.get("name") or "").strip() or None
+    zip_code = (weather.get("zip") or "").strip() or None
+    query = (weather.get("query") or "").strip() or None
+
+    if lat is not None and lon is not None:
+        try:
+            la = float(lat)
+            lo = float(lon)
+        except (TypeError, ValueError):
+            la = lo = None  # type: ignore[assignment]
+        if la is not None and lo is not None:
+            if not name:
+                # Optional reverse label via reverse of search query.
+                hit = _twc_search(f"{la},{lo}") or _twc_search(f"{la:g},{lo:g}")
+                if hit:
+                    return hit
+                name = f"{la:.2f}, {lo:.2f}"
+            return {
+                "geocode": f"{la},{lo}",
+                "latitude": la,
+                "longitude": lo,
+                "name": name,
+                "context": (
+                    weather.get("context")
+                    if isinstance(weather.get("context"), str)
+                    else ""
+                )
+                or "",
+            }
+
+    search_q = zip_code or query
+    if not search_q:
+        return None
+
+    # Zip codes: no locationType. City names: try city first then open search.
+    hit = None
+    if zip_code and zip_code.replace("-", "").isdigit():
+        hit = _twc_search(zip_code)
+    else:
+        hit = _twc_search(search_q, location_type="city") or _twc_search(search_q)
+
+    if hit is None:
+        LOG.warning("Could not resolve weather location for %r", search_q)
+        return None
+    if name:
+        hit = dict(hit)
+        hit["name"] = name
+    # Normalize geocode string from lat/lon
+    hit["geocode"] = f"{hit['latitude']},{hit['longitude']}"
+    LOG.info(
+        "Weather location resolved: %s (%s) @ %s",
+        hit.get("name"),
+        hit.get("context"),
+        hit.get("geocode"),
+    )
+    return hit
+
+
 # ── WeatherChannel ──────────────────────────────────────────────────────
 
 
@@ -190,11 +333,22 @@ class WeatherChannel:
     The thread continuously polls for **Start RetroCast** / **Unmute audio**
     buttons (they reappear after session resets) and applies media gain for
     volume (Howler / HTML media inside Chrome — not a site volume widget).
+
+    Optional *location* (from resolve_weather_location / config ``weather``)
+    is injected via the site's ``user-location`` cookie so forecasts work on
+    devices without meaningful GeoIP (e.g. a Raspberry Pi on home ISP NAT).
     """
 
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        *,
+        location: dict | None = None,
+    ) -> None:
         self._width = max(width, 320)
         self._height = max(height, 240)
+        self._location = location  # {geocode, name, context, latitude?, longitude?}
         self._chrome: subprocess.Popen | None = None
         self._user_data_dir: str | None = None
         self._ws = None
@@ -268,7 +422,8 @@ class WeatherChannel:
                     "--disable-gpu",
                     "--force-device-scale-factor=1",
                     f"--window-size={self._width},{self._height}",
-                    WEATHER_URL,
+                    # Start blank so we can set location cookies before weather.com loads.
+                    "about:blank",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -399,7 +554,7 @@ class WeatherChannel:
         self._user_data_dir = None
 
     def _wait_for_page_ws(self, timeout: float) -> str | None:
-        """Poll CDP /json until a weather.com page target appears."""
+        """Poll CDP /json until a page target with a WebSocket URL appears."""
         deadline = time.time() + timeout
         last_err: str | None = None
         while time.time() < deadline:
@@ -416,23 +571,12 @@ class WeatherChannel:
                 time.sleep(0.25)
                 continue
 
-            # Prefer the weather page; fall back to any page target.
-            page_urls: list[tuple[str, str]] = []
             for target in targets:
                 if target.get("type") != "page":
                     continue
-                url = target.get("url") or ""
                 ws = target.get("webSocketDebuggerUrl")
-                if not ws:
-                    continue
-                if "weather.com" in url:
+                if ws:
                     return ws
-                page_urls.append((url, ws))
-            if page_urls:
-                # Page still navigating to weather.com — wait a bit more
-                # unless we're near the deadline.
-                if time.time() + 1.5 >= deadline:
-                    return page_urls[0][1]
             time.sleep(0.25)
 
         if last_err:
@@ -448,6 +592,65 @@ class WeatherChannel:
         if params:
             msg["params"] = params
         ws.send(json.dumps(msg))
+
+    def _apply_location(self, ws) -> None:
+        """Set user-location cookie + CDP geolocation before Page.navigate."""
+        loc = self._location
+        if not loc:
+            return
+
+        geocode = loc.get("geocode")
+        name = loc.get("name") or "Home"
+        context = loc.get("context") or ""
+        try:
+            lat = float(loc.get("latitude") if loc.get("latitude") is not None
+                        else str(geocode).split(",")[0])
+            lon = float(loc.get("longitude") if loc.get("longitude") is not None
+                        else str(geocode).split(",")[1])
+        except (TypeError, ValueError, IndexError):
+            LOG.warning("Invalid weather location; skipping inject: %s", loc)
+            return
+
+        cookie_body = {
+            "geocode": geocode or f"{lat},{lon}",
+            "name": name,
+            "context": context,
+        }
+        # Retro reads Nuxt useCookie("user-location") — raw JSON works.
+        self._send(ws, "Network.enable")
+        self._send(
+            ws,
+            "Network.setCookie",
+            {
+                "name": "user-location",
+                "value": json.dumps(cookie_body, separators=(",", ":")),
+                "domain": ".weather.com",
+                "path": "/",
+                "secure": True,
+                "sameSite": "Lax",
+            },
+        )
+        try:
+            self._send(
+                ws,
+                "Browser.grantPermissions",
+                {
+                    "origin": "https://weather.com",
+                    "permissions": ["geolocation"],
+                },
+            )
+        except Exception:
+            pass
+        self._send(
+            ws,
+            "Emulation.setGeolocationOverride",
+            {
+                "latitude": lat,
+                "longitude": lon,
+                "accuracy": 100,
+            },
+        )
+        LOG.info("Weather location cookie set: %s @ %s", name, cookie_body["geocode"])
 
     # Continuously look for Start / Unmute — both can reappear after a
     # session ends or when re-entering the experience.
@@ -554,6 +757,28 @@ class WeatherChannel:
             )
         except Exception as exc:
             LOG.warning("Device metrics override failed: %s", exc)
+
+        # Inject forecast location before the retro app hydrates (Pi has no
+        # useful GeoIP; weather.com stores the user's choice in a cookie).
+        try:
+            self._apply_location(ws)
+        except Exception as exc:
+            LOG.warning("Weather location inject failed: %s", exc)
+
+        try:
+            self._send(ws, "Page.navigate", {"url": WEATHER_URL})
+            # Allow HTML/JS shell to begin before screencast + Start buttons.
+            time.sleep(2.5)
+        except Exception as exc:
+            self._error = f"navigate failed: {exc}"
+            LOG.warning("Page.navigate failed: %s", exc)
+            self._available = False
+            self._running = False
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return
 
         try:
             self._send(

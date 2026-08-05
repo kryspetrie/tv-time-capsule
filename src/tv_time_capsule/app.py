@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
+import threading
 import warnings
 from contextlib import contextmanager
 from datetime import datetime
@@ -111,7 +113,7 @@ from .safe_zone import (
     safe_zone_to_config,
 )
 from .test_patterns import is_show_list_test_dial, pattern_asset_path
-from .weather_channel import WeatherChannel
+from .weather_channel import WeatherChannel, resolve_weather_location
 from .state import (
     clear_resume_ep,
     reset_episode_progress,
@@ -124,6 +126,8 @@ from .state import (
     watch_summary,
 )
 from .web_admin import AdminServer, DeferredAdminBridge, start_admin_if_enabled
+
+LOG = logging.getLogger(__name__)
 
 FOOTER_BAR_H = 34
 NAV_BAR_H = 28
@@ -2011,17 +2015,89 @@ class TVTimeCapsule:
         return True
 
     def _enter_weather_channel(self) -> None:
-        """Switch to the Weather Channel view (Chrome-embedded weather.com/retro)."""
-        if self._weather_channel is None:
-            self._weather_channel = WeatherChannel(self.canvas_w, self.canvas_h)
-        if not self._weather_channel.is_available():
-            if not self._weather_channel.start():
-                self.channel_error = "Weather Unavailable"
-                self.channel_error_time = pygame.time.get_ticks()
-                return
+        """Switch to the Weather Channel (Chrome-embedded weather.com/retro).
+
+        Snow / static starts *immediately* so Chrome CDP startup does not feel
+        like a freeze.  The burst continues (retriggered as needed) until the
+        channel reports ready or fails.
+        """
         self._weather_previous_view = self.view
         self.view = self.WEATHER
-        self._animate_channel_snow_burst()
+        self.channel_flash = "004"
+        self.channel_flash_time = pygame.time.get_ticks()
+
+        if self._weather_channel is None:
+            weather_cfg = self.config.get("weather") or {}
+            location = resolve_weather_location(weather_cfg)
+            self._weather_channel = WeatherChannel(
+                self.canvas_w,
+                self.canvas_h,
+                location=location,
+            )
+
+        # Instant tuning feedback before any blocking work.
+        if self._channel_fx.snow_enabled:
+            self._channel_fx.trigger()
+            self._paint_weather_tune_frame()
+            self.present()
+
+        if self._weather_channel.is_available():
+            self._animate_channel_snow_burst()
+            return
+
+        result: dict = {"ok": False}
+
+        def _boot() -> None:
+            try:
+                result["ok"] = bool(self._weather_channel.start())
+            except Exception:
+                LOG.exception("Weather channel start failed")
+                result["ok"] = False
+
+        boot = threading.Thread(target=_boot, daemon=True, name="weather-boot")
+        boot.start()
+
+        min_ms = FX_DURATION_MS
+        max_ms = 45_000
+        t0 = pygame.time.get_ticks()
+        while True:
+            pygame.event.pump()
+            now = pygame.time.get_ticks()
+            elapsed = now - t0
+
+            # Keep static going for the whole wait (visual only — no audio loop).
+            if self._channel_fx.snow_enabled and not self._channel_fx.is_active():
+                self._channel_fx.extend()
+
+            self._paint_weather_tune_frame()
+            self.present()
+            self.clock.tick(60)
+
+            if not boot.is_alive() and elapsed >= min_ms:
+                break
+            if elapsed >= max_ms:
+                break
+
+        boot.join(timeout=2.0)
+
+        if not result.get("ok") or not self._weather_channel.is_available():
+            self.channel_error = "Weather Unavailable"
+            self.channel_error_time = pygame.time.get_ticks()
+            self._exit_weather_channel()
+
+    def _paint_weather_tune_frame(self) -> None:
+        """Draw weather destination under channel snow (safe-zone aware)."""
+        if self.view == self.SAFE_ZONE_EDIT:
+            self._draw_channel_tune_frame()
+            self.draw_channel_overlay()
+            self._draw_rescan_banner()
+        else:
+            with self._ui_layout(letterbox=True):
+                self._draw_channel_tune_frame()
+                self.draw_channel_overlay()
+                self._draw_rescan_banner()
+        if self._channel_fx.snow_enabled:
+            self._channel_fx.draw(self.screen)
 
     def _exit_weather_channel(self) -> None:
         """Leave the Weather Channel and return to the previous browse view."""

@@ -358,6 +358,49 @@ def _parse_accessibility(raw: dict | None) -> dict[str, Any]:
     }
 
 
+def _parse_weather(raw: dict | None) -> dict[str, Any]:
+    """Optional forecast location for the weather channel (004).
+
+    Prefer ``latitude``/``longitude`` when both are set; otherwise ``zip`` or
+    a free-text ``query`` (city name) is geocoded via weather.com.  Empty
+    config leaves location to weather.com server geo / browser default.
+    """
+    weather = raw or {}
+    if not isinstance(weather, dict):
+        weather = {}
+    defaults = _default_config()["weather"]
+
+    def _opt_str(key: str) -> str | None:
+        val = weather.get(key, defaults.get(key))
+        if val is None:
+            return None
+        text = str(val).strip()
+        return text or None
+
+    lat = weather.get("latitude", defaults.get("latitude"))
+    lon = weather.get("longitude", defaults.get("longitude"))
+    try:
+        latitude = float(lat) if lat is not None and str(lat).strip() != "" else None
+    except (TypeError, ValueError):
+        latitude = None
+    try:
+        longitude = float(lon) if lon is not None and str(lon).strip() != "" else None
+    except (TypeError, ValueError):
+        longitude = None
+    # Both or neither — partial pairs are ignored.
+    if latitude is None or longitude is None:
+        latitude = None
+        longitude = None
+
+    return {
+        "zip": _opt_str("zip"),
+        "query": _opt_str("query"),
+        "name": _opt_str("name"),
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
 def _parse_admin(raw: dict | None) -> dict[str, Any]:
     admin = raw or {}
     if not isinstance(admin, dict):
@@ -437,6 +480,13 @@ def _default_config() -> dict[str, Any]:
             "high_contrast": False,
             "play_all_unwatched": False,
         },
+        "weather": {
+            "zip": "02108",
+            "query": None,
+            "name": "Boston",
+            "latitude": None,
+            "longitude": None,
+        },
     }
 
 
@@ -479,6 +529,7 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "cache": _parse_cache(raw.get("cache")),
         "admin": _parse_admin(raw.get("admin")),
         "accessibility": _parse_accessibility(raw.get("accessibility")),
+        "weather": _parse_weather(raw.get("weather")),
     }
 
 

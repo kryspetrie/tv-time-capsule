@@ -135,6 +135,15 @@
     "bind": "0.0.0.0"
   },
 
+  "weather": {
+    "_about": "Optional forecast location for dial 004 (weather.com/retro). Headless Pi has no GPS and often wrong GeoIP — set a zip or city. latitude+longitude override zip/query when both are set. Default: Boston, MA.",
+    "zip": "02108",
+    "query": null,
+    "name": "Boston",
+    "latitude": null,
+    "longitude": null
+  },
+
   "_channels": {
     "order": "Show folder names in desired browse / priority order (unknown names skipped)",
     "numbers": "Optional fixed channel numbers; unlisted shows use 1-based position in the ordered lineup"
@@ -160,6 +169,14 @@
     "enabled": "Local web UI — see docs/usage/web-admin.md",
     "port": "Default 8765",
     "bind": "0.0.0.0 for LAN phones; 127.0.0.1 for SSH tunnel only"
+  },
+
+  "_weather": {
+    "zip": "US ZIP / postal code (e.g. 10001). Resolved via weather.com location search.",
+    "query": "Free-text city search when zip is unset (e.g. \"Austin, TX\").",
+    "name": "Optional display name override for the location.",
+    "latitude": "Optional; if set with longitude, used directly (overrides zip/query).",
+    "longitude": "Optional; pair with latitude."
   },
 
   "_playback": {

@@ -75,6 +75,27 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertTrue(cfg["screensaver"]["enabled"])
         self.assertEqual(cfg["screensaver"]["timeout_seconds"], 30)
         self.assertTrue(cfg["admin"]["enabled"])
+        self.assertEqual(cfg["weather"]["zip"], "02108")
+        self.assertEqual(cfg["weather"]["name"], "Boston")
+        self.assertIsNone(cfg["weather"]["latitude"])
+
+
+class WeatherConfigTests(unittest.TestCase):
+    def test_parse_weather_zip(self):
+        w = config_mod._parse_weather({"zip": " 90210 "})
+        self.assertEqual(w["zip"], "90210")
+        self.assertIsNone(w["latitude"])
+
+    def test_parse_weather_coords(self):
+        w = config_mod._parse_weather({"latitude": "40.7", "longitude": -74.0, "name": "NYC"})
+        self.assertEqual(w["latitude"], 40.7)
+        self.assertEqual(w["longitude"], -74.0)
+        self.assertEqual(w["name"], "NYC")
+
+    def test_parse_weather_partial_coords_cleared(self):
+        w = config_mod._parse_weather({"latitude": 40.0})
+        self.assertIsNone(w["latitude"])
+        self.assertIsNone(w["longitude"])
 
     def test_kids_mode_enabled_persisted_field(self):
         km = _parse_kids_mode({"default_enabled": False, "enabled": True})
