@@ -86,6 +86,20 @@ class TestPatternDialViewsTests(unittest.TestCase):
                 app._process_browse_action("back")
                 self.assertIsNone(app._show_list_test_pattern)
 
+    def test_dial_000_opens_secret_directory(self):
+        app = self._app("SHOW_LIST")
+        with patch.object(app, "_animate_channel_snow_burst"):
+            for digit in (0, 0, 0):
+                app._append_dial_digit(digit)
+            with patch(
+                "pygame.time.get_ticks", return_value=app.channel_timer + CHANNEL_PENDING_MS
+            ):
+                app._tick_dial_timeout()
+        self.assertTrue(app._hidden_channels_guide)
+        self.assertEqual(app.channel_error, "")
+        app._process_browse_action("back")
+        self.assertFalse(app._hidden_channels_guide)
+
     def test_kids_mode_does_not_show_patterns(self):
         app = self._app("SHOW_LIST")
         app._kids_mode_active = True

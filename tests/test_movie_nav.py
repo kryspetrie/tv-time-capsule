@@ -128,6 +128,11 @@ class MovieNavTests(unittest.TestCase):
         self.assertIn("keyboard only", pad_overview["kids / parent mode"])
         self.assertIn("channel / index", kb_overview)
         self.assertIn("channel / page codes", pad_overview)
+        secret_pages = dict(kb_pages["Secrets"])
+        self.assertIn("directory", secret_pages)
+        self.assertEqual(secret_pages["directory"], "press 000")
+        self.assertIn("001", secret_pages)
+        self.assertIn("004", secret_pages)
 
 if __name__ == "__main__":
     unittest.main()

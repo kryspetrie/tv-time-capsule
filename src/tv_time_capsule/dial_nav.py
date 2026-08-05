@@ -11,6 +11,7 @@ class DialKind(Enum):
     PAGE_UP = auto()
     PAGE_DOWN = auto()
     LETTER_MENU = auto()
+    HIDDEN_GUIDE = auto()
     TEST_PATTERN = auto()
     WEATHER = auto()
     CHANNEL = auto()
@@ -34,6 +35,9 @@ def classify_dial(digits: str) -> DialResult:
 
     if digits == "00":
         return DialResult(DialKind.LETTER_MENU, digits)
+
+    if digits == "000":
+        return DialResult(DialKind.HIDDEN_GUIDE, digits)
 
     if digits == "01":
         return DialResult(DialKind.PAGE_UP, digits)

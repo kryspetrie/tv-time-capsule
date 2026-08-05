@@ -113,6 +113,10 @@ from .safe_zone import (
     safe_zone_to_config,
 )
 from .test_patterns import is_show_list_test_dial, pattern_asset_path
+from .hidden_channels import (
+    format_hidden_help_rows,
+    hidden_channels_for_guide,
+)
 from .weather_channel import WeatherChannel, resolve_weather_location
 from .state import (
     clear_resume_ep,
@@ -319,6 +323,7 @@ class TVTimeCapsule:
             rate_per_minute=artifact_rate,
         )
         self._show_list_test_pattern: str | None = None
+        self._hidden_channels_guide = False
         self._weather_channel: WeatherChannel | None = None
         gp_cfg = self.config.get("gamepad") or {}
         gp_bindings = load_gamepad_bindings(self.config)
@@ -1057,6 +1062,7 @@ class TVTimeCapsule:
         self.cursor = page_cursor(self.cursor, total, page_size, direction)
         self._marquee_key = None
         self._clear_show_list_test_pattern()
+        self._clear_hidden_channels_guide()
 
     def _close_letter_menu(self) -> None:
         self._letter_menu_open = False
@@ -1285,6 +1291,13 @@ class TVTimeCapsule:
         if result.kind == DialKind.LETTER_MENU:
             self._open_letter_menu()
             return
+        if result.kind == DialKind.HIDDEN_GUIDE:
+            if self._test_pattern_dial_allowed():
+                self._enter_hidden_channels_guide()
+            else:
+                self.channel_error = f"Ch {digits} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
+            return
         if result.kind == DialKind.TEST_PATTERN:
             if self._test_pattern_dial_allowed():
                 if self._commit_show_list_test_pattern(digits):
@@ -1293,7 +1306,11 @@ class TVTimeCapsule:
             self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.WEATHER:
-            self._enter_weather_channel()
+            if self._test_pattern_dial_allowed():
+                self._enter_weather_channel()
+            else:
+                self.channel_error = f"Ch {digits} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.CHANNEL and result.channel is not None:
             success = self.jump_to_channel(result.channel)
@@ -1314,7 +1331,7 @@ class TVTimeCapsule:
             if elapsed >= CHANNEL_PENDING_MS:
                 self._commit_dial_digits()
             return
-        # 00x special channels (004 weather, 001-003 test patterns) — short hold.
+        # 00x specials (000 guide, 001–003 patterns, 004 weather) — short hold.
         if len(digits) == 3 and digits.startswith("00"):
             if elapsed >= CHANNEL_PENDING_MS:
                 self._commit_dial_digits()
@@ -1940,6 +1957,59 @@ class TVTimeCapsule:
     def _clear_show_list_test_pattern(self) -> None:
         self._show_list_test_pattern = None
 
+    def _clear_hidden_channels_guide(self) -> None:
+        self._hidden_channels_guide = False
+
+    def _enter_hidden_channels_guide(self) -> None:
+        """Show the secret-channels directory (dial 000)."""
+        self._clear_show_list_test_pattern()
+        self._hidden_channels_guide = True
+        self.channel_flash = "000"
+        self.channel_flash_time = pygame.time.get_ticks()
+        self._animate_channel_snow_burst()
+
+    def _draw_hidden_channels_guide(self) -> None:
+        """Full-screen directory of easter-egg channels."""
+        self.screen.fill(C.BLACK)
+        margin_x = max(32, int(self.sw * 0.06))
+        dial_x = margin_x
+        title_x = margin_x + self.font_md.size("000  ")[0]
+        max_w = max(80, self.sw - title_x - margin_x)
+
+        header = self.font_lg.render("CH 000", True, C.GREEN)
+        sub = self.font_md.render("SECRET CHANNELS", True, C.WHITE)
+        self.screen.blit(header, header.get_rect(centerx=self.sw // 2, y=36))
+        self.screen.blit(sub, sub.get_rect(centerx=self.sw // 2, y=96))
+
+        y = 168
+        line_gap = 2
+        row_gap = 18
+        for ch in hidden_channels_for_guide():
+            dial_s = self.font_md.render(ch.dial, True, C.GREEN)
+            name_s = self.font_md.render(ch.title, True, C.WHITE)
+            self.screen.blit(dial_s, (dial_x, y))
+            self.screen.blit(name_s, (title_x, y))
+            y += self.font_md.get_linesize()
+
+            if ch.description:
+                y += line_gap
+                for line in self._wrap_text(ch.description, self.font_sm, max_w):
+                    desc_s = self.font_sm.render(line, True, self._dim_color())
+                    self.screen.blit(desc_s, (title_x, y))
+                    y += self.font_sm.get_linesize() + 1
+                y += row_gap
+            else:
+                y += row_gap
+
+        hint = self.font_sm.render(
+            f"type a code  |  {format_action_keys(self.keymap, 'back')} or 0 back",
+            True,
+            self._dim_color(),
+        )
+        self.screen.blit(
+            hint, hint.get_rect(centerx=self.sw // 2, bottom=self.sh - 28)
+        )
+
     def _draw_test_pattern_screen(self) -> None:
         """Full-screen easter egg pattern, drawn over whichever browse screen is active."""
         self.screen.fill(C.BLACK)
@@ -2010,6 +2080,7 @@ class TVTimeCapsule:
             self.channel_error = f"Ch {dial} Not Found"
             self.channel_error_time = pygame.time.get_ticks()
             return False
+        self._clear_hidden_channels_guide()
         self._show_list_test_pattern = dial
         self._animate_channel_snow_burst()
         return True
@@ -2020,6 +2091,8 @@ class TVTimeCapsule:
         Snow / static starts *immediately* and keeps animating while Chrome
         boots on a background thread (no main-thread network / CDP wait).
         """
+        self._clear_hidden_channels_guide()
+        self._clear_show_list_test_pattern()
         self._weather_previous_view = self.view
         self.view = self.WEATHER
         self.channel_flash = "004"
@@ -2115,6 +2188,9 @@ class TVTimeCapsule:
 
     def _draw_browse_content(self) -> None:
         """Menu layers only — no snow, channel overlay, or rescan banner."""
+        if self._hidden_channels_guide:
+            self._draw_hidden_channels_guide()
+            return
         if self._show_list_test_pattern:
             self._draw_test_pattern_screen()
             return
@@ -3866,13 +3942,14 @@ class TVTimeCapsule:
                 ("back", "press 0"),
                 ("prev / next page", "press 01 / 02"),
                 ("alphabet jump", "press 00  or  " + bind("letter_menu")),
-                ("test patterns", "press 001 / 002 / 003"),
+                ("secret channels", "press 000  |  see Secrets page"),
             ]
             if device == "keyboard"
             else [
                 ("NUMBER KEYS", None),
                 ("channel / page codes", "use keyboard number keys"),
                 ("alphabet / kids / help", "keyboard only on this pad"),
+                ("secret channels", "use keyboard 000-004  |  see Secrets"),
             ]
         )
         pages: list[tuple[str, list[tuple[str, str | None]]]] = [
@@ -3886,6 +3963,14 @@ class TVTimeCapsule:
                     ("kids / parent mode", bind("kids_mode_toggle")),
                     ("quit", bind("quit")),
                     *number_section,
+                ],
+            ),
+            (
+                "Secrets",
+                [
+                    *format_hidden_help_rows(),
+                    ("notes", "Works on library / show / movie browse (parent mode)"),
+                    ("weather tip", "Set weather zip in config for dial 004"),
                 ],
             ),
             (
@@ -5222,6 +5307,7 @@ class TVTimeCapsule:
     def move_cursor(self, direction):
         if self.view == self.SHOW_LIST:
             self._clear_show_list_test_pattern()
+            self._clear_hidden_channels_guide()
         total = self.total_items()
         if not total:
             return
@@ -5254,7 +5340,7 @@ class TVTimeCapsule:
             self._in_channel_tune = False
 
     def select(self):
-        if self._show_list_test_pattern:
+        if self._show_list_test_pattern or self._hidden_channels_guide:
             return
         items = self.current_items()
         if not items or self.cursor >= len(items):
@@ -5830,6 +5916,9 @@ class TVTimeCapsule:
         elif action == "left":
             self.go_back()
         elif action == "back":
+            if self._hidden_channels_guide:
+                self._clear_hidden_channels_guide()
+                return
             if self._show_list_test_pattern:
                 self._clear_show_list_test_pattern()
                 return

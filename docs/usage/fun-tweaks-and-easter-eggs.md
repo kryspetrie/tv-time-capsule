@@ -103,28 +103,40 @@ Same actions as the keyboard. See [Controls → Gamepad](controls.md#gamepad).
 
 ## Easter eggs
 
-Hidden or discoverable extras — no config switch; they are always available when assets and context match.
+Hidden or discoverable extras — no config switch; they are always available when assets and context match. In-app **Help → Secrets** lists the same codes; dialing **`000`** opens an on-screen secret-channel directory.
 
-### Secret test patterns (show browser)
+### Secret channel directory (`000`)
 
 **Label:** easter egg
 
-On any **parent** browse screen (library picker, shows, movies, seasons, episodes), press these codes (third digit commits immediately):
+On parent browse screens, press **`000`** for a full-screen listing of the special channels below. Esc / `0` backs out. Help Overview points at this page under number keys.
+
+### Secret test patterns (parent browse)
+
+**Label:** easter egg
+
+On any **parent** browse screen (library picker, shows, movies, seasons, episodes), press these codes (third digit commits after a short hold with other `00x` codes):
 
 | Press | Pattern | Asset file |
 |------|---------|------------|
-| `001` | Color bars | `src/tv_time_capsule/assets/colorbars.png` |
-| `002` | Grid | `src/tv_time_capsule/assets/grid.png` |
-| `003` | Indian head | `src/tv_time_capsule/assets/indianhead.png` |
+| `001` | SMPTE Color Bars | `src/tv_time_capsule/assets/colorbars.png` |
+| `002` | Grid Test Pattern | `src/tv_time_capsule/assets/grid.png` |
+| `003` | RCA Indian Head | `src/tv_time_capsule/assets/indianhead.png` |
 
-Bare `0` is **Back**; `00` opens the alphabet menu — patterns use the `00x` special family only.
+### Weather Channel (`004`)
 
-- Full-screen display (no header, footer, or channel chrome).
-- **Escape** exits the pattern (does not open the quit dialog).
+**Label:** easter egg
+
+Dial **`004`** for a live weather.com/retro screencast (Chromium CDP). Configure `weather.zip` / location in config (default Boston). Volume keys control the embedded player; Esc / back exits to the previous browse view.
+
+Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use the `00x` special family only.
+
+- Full-screen pattern display (no header, footer, or channel chrome).
+- **Escape** exits the pattern or guide (does not open the quit dialog).
 - Typing more digits stays on the pattern until commit or Esc.
-- The app **never generates or overwrites** these PNGs — supply your own (classic broadcast test art works well).
+- The app **never generates or overwrites** test-pattern PNGs — supply your own (classic broadcast test art works well).
 - If a file is missing, you get a “not found” error like any invalid channel.
-- Channel snow still plays when a pattern loads (if snow is enabled).
+- Channel snow still plays when a pattern or the directory loads (if snow is enabled).
 
 **Install note:** Packaged installs include the `assets/` folder; drop your PNGs next to `vcr_osd_mono.ttf` and `vhs.bmp` in the installed package data directory, or rebuild after adding files under `src/tv_time_capsule/assets/` in a checkout.
 
@@ -142,6 +154,8 @@ Bare `0` is **Back**; `00` opens the alphabet menu — patterns use the `00x` sp
 | Autoplay | QoL | `playback.autoplay` | `next_in_season_only` |
 | Gamepad | Input | `gamepad.enabled` | on |
 | Test patterns `001` / `002` / `003` | Easter egg | *(none)* | always if PNGs exist |
+| Secret directory `000` | Easter egg | *(none)* | always |
+| Weather `004` | Easter egg | `weather.zip` etc. | always (Chrome required) |
 
 Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` when the new keys are absent.
 

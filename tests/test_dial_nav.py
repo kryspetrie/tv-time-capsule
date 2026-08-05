@@ -27,6 +27,8 @@ class DialNavTests(unittest.TestCase):
         self.assertEqual(classify_dial("02").kind, DialKind.PAGE_DOWN)
         self.assertEqual(classify_dial("03").kind, DialKind.INVALID)
         self.assertEqual(classify_dial("001").kind, DialKind.TEST_PATTERN)
+        self.assertEqual(classify_dial("000").kind, DialKind.HIDDEN_GUIDE)
+        self.assertEqual(classify_dial("004").kind, DialKind.WEATHER)
         self.assertEqual(classify_dial("1").kind, DialKind.CHANNEL)
         self.assertEqual(classify_dial("1").channel, 1)
         self.assertEqual(classify_dial("12").channel, 12)
@@ -47,6 +49,8 @@ class DialNavTests(unittest.TestCase):
         self.assertTrue(dial_needs_more_input("02"))
         self.assertTrue(dial_needs_more_input("12"))
         self.assertFalse(dial_needs_more_input("001"))
+        self.assertFalse(dial_needs_more_input("000"))
+        self.assertFalse(dial_needs_more_input("004"))
         self.assertFalse(dial_needs_more_input("03"))
 
     def test_test_pattern_dials(self):
