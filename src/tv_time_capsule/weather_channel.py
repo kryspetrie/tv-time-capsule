@@ -186,6 +186,10 @@ class WeatherChannel:
     A background thread owns the WebSocket (connect, send, recv, ack).
     :meth:`get_frame` only reads the latest JPEG from shared state — never
     blocks the UI event loop.
+
+    The thread continuously polls for **Start RetroCast** / **Unmute audio**
+    buttons (they reappear after session resets) and applies media gain for
+    volume (Howler / HTML media inside Chrome — not a site volume widget).
     """
 
     def __init__(self, width: int, height: int) -> None:
@@ -203,6 +207,11 @@ class WeatherChannel:
         self._start_time = 0.0
         self._cmd_id = 0
         self._error: str | None = None
+        # 0–100, applied to Chrome page media gain via CDP.
+        self._volume = 100
+        self._volume_dirty = False
+        self._last_start_log = 0.0
+        self._last_unmute_log = 0.0
 
     # ------------------------------------------------------------------
     # public API
@@ -278,6 +287,7 @@ class WeatherChannel:
         self._frame_count = 0
         self._start_time = time.time()
         self._error = None
+        self._volume_dirty = True  # apply gain once the page streams
         self._thread = threading.Thread(
             target=self._ws_thread, args=(ws_url,), daemon=True, name="weather-cdp"
         )
@@ -354,6 +364,26 @@ class WeatherChannel:
     def is_available(self) -> bool:
         return self._available
 
+    @property
+    def volume(self) -> int:
+        """Current gain 0–100 applied to Chrome page media."""
+        with self._lock:
+            return self._volume
+
+    def adjust_volume(self, delta: int) -> int:
+        """Adjust Chrome media gain by *delta* (e.g. +10 / -10). Returns new level."""
+        with self._lock:
+            self._volume = max(0, min(100, self._volume + int(delta)))
+            self._volume_dirty = True
+            return self._volume
+
+    def set_volume(self, level: int) -> int:
+        """Set Chrome media gain to *level* (0–100). Returns clamped level."""
+        with self._lock:
+            self._volume = max(0, min(100, int(level)))
+            self._volume_dirty = True
+            return self._volume
+
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
@@ -418,8 +448,75 @@ class WeatherChannel:
             msg["params"] = params
         ws.send(json.dumps(msg))
 
+    # Continuously look for Start / Unmute — both can reappear after a
+    # session ends or when re-entering the experience.
+    _JS_WATCHDOG = r"""
+(() => {
+  const out = {start: false, unmute: false};
+  const visible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const s = getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0)
+      return false;
+    return true;
+  };
+  const start = [...document.querySelectorAll(
+    'button, a, [role="button"], input[type="button"], input[type="submit"]'
+  )].find((el) =>
+    /start\s*retro\s*cast/i.test(
+      ((el.innerText || el.textContent || el.value || "") + " " +
+        (el.getAttribute("aria-label") || "")).trim()
+    )
+  );
+  if (visible(start)) {
+    start.click();
+    out.start = true;
+  }
+  const unmute =
+    document.querySelector('[aria-label="Unmute audio"]') ||
+    document.querySelector('[aria-label*="Unmute" i]') ||
+    [...document.querySelectorAll("button, [role=button], [aria-label]")].find(
+      (el) => /unmute\s*audio/i.test(el.getAttribute("aria-label") || "")
+    );
+  if (visible(unmute)) {
+    unmute.click();
+    out.unmute = true;
+  }
+  return out;
+})()
+""".strip()
+
+    @staticmethod
+    def _js_set_media_gain(level_0_100: int) -> str:
+        """Set gain on all page media / Howler (Chrome's output for this tab)."""
+        v = max(0.0, min(1.0, level_0_100 / 100.0))
+        return f"""
+(() => {{
+  const v = {v:.4f};
+  try {{
+    if (window.Howler) {{
+      Howler.mute(false);
+      Howler.volume(v);
+    }}
+  }} catch (e) {{}}
+  for (const m of document.querySelectorAll("audio, video")) {{
+    try {{ m.volume = v; }} catch (e) {{}}
+  }}
+  try {{
+    if (window.__ttcAudioCtxs) {{
+      for (const ctx of window.__ttcAudioCtxs) {{
+        if (ctx && ctx.gainNode) ctx.gainNode.gain.value = v;
+      }}
+    }}
+  }} catch (e) {{}}
+  return v;
+}})()
+""".strip()
+
     def _ws_thread(self, ws_url: str) -> None:
-        """Create the WebSocket, start screencast, and pump frames."""
+        """Create the WebSocket, start screencast, drive UI, and pump frames."""
         LOG.info("Weather WS thread connecting…")
         try:
             ws = websocket.create_connection(
@@ -436,7 +533,6 @@ class WeatherChannel:
 
         self._ws = ws
         # Bounded timeout so we can notice stop() without a hard hang.
-        # Confirmed safe for full frames on websocket-client 1.9.x.
         ws.settimeout(1.0)
 
         try:
@@ -463,11 +559,52 @@ class WeatherChannel:
                 pass
             return
 
+        # Eval bookkeeping: id → "watchdog" | "volume"
+        pending: dict[int, str] = {}
+        last_watchdog = 0.0
+        WATCHDOG_INTERVAL = 1.0
+
+        def fire_eval(kind: str, expression: str) -> None:
+            eid = self._next_id()
+            pending[eid] = kind
+            ws.send(
+                json.dumps(
+                    {
+                        "id": eid,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": expression,
+                            "returnByValue": True,
+                            "userGesture": True,
+                        },
+                    }
+                )
+            )
+
+        def pump_side_effects() -> None:
+            """Periodic Start/Unmute + pending volume apply."""
+            nonlocal last_watchdog
+            now = time.time()
+            if now - last_watchdog >= WATCHDOG_INTERVAL:
+                last_watchdog = now
+                fire_eval("watchdog", self._JS_WATCHDOG)
+
+            with self._lock:
+                dirty = self._volume_dirty
+                vol = self._volume
+                if dirty:
+                    self._volume_dirty = False
+            if dirty:
+                fire_eval("volume", self._js_set_media_gain(vol))
+
+        # Immediate first probes.
+        pump_side_effects()
+
         while self._running:
+            pump_side_effects()
             try:
                 data = ws.recv()
             except Exception as exc:
-                # Timeout → loop to re-check _running.
                 name = type(exc).__name__
                 if "Timeout" in name or "timed out" in str(exc).lower():
                     continue
@@ -484,6 +621,28 @@ class WeatherChannel:
             except json.JSONDecodeError:
                 continue
 
+            mid = msg.get("id")
+            if mid is not None and mid in pending:
+                kind = pending.pop(mid)
+                if kind == "watchdog":
+                    value = (
+                        ((msg.get("result") or {}).get("result") or {}).get("value")
+                    )
+                    if isinstance(value, dict):
+                        now = time.time()
+                        if value.get("start") and now - self._last_start_log > 3.0:
+                            LOG.info("Weather UI: Start RetroCast clicked")
+                            self._last_start_log = now
+                            # Re-apply gain after a fresh program start.
+                            with self._lock:
+                                self._volume_dirty = True
+                        if value.get("unmute") and now - self._last_unmute_log > 3.0:
+                            LOG.info("Weather UI: Unmute audio clicked")
+                            self._last_unmute_log = now
+                            with self._lock:
+                                self._volume_dirty = True
+                continue
+
             if msg.get("method") != "Page.screencastFrame":
                 continue
 
@@ -491,7 +650,6 @@ class WeatherChannel:
             data_b64 = params.get("data") or ""
             session_id = params.get("sessionId", 0)
 
-            # Always ack so Chrome keeps streaming.
             try:
                 self._send(
                     ws, "Page.screencastFrameAck", {"sessionId": session_id}

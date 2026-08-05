@@ -1868,7 +1868,7 @@ class TVTimeCapsule:
         """Margin fill matching the active screen so the UI appears inset, not framed."""
         if self._screensaver_active:
             return C.BLACK
-        if self.view == self.PLAYING:
+        if self.view in (self.PLAYING, self.WEATHER):
             return C.BLACK
         return C.BG
 
@@ -1946,7 +1946,12 @@ class TVTimeCapsule:
         self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
 
     def _draw_weather_channel(self) -> None:
-        """Render the Weather Channel screencast frame."""
+        """Render the Weather Channel screencast frame.
+
+        Fills the active UI surface (``sw``×``sh``) edge-to-edge.  Safe-zone
+        letterboxing is handled only by :meth:`_ui_layout` when margins are set —
+        we do not add a second aspect-ratio letterbox here.
+        """
         if self._weather_channel is None or not self._weather_channel.is_available():
             self.screen.fill(C.BLACK)
             t = self.font_md.render("WEATHER UNAVAILABLE", True, self._dim_color())
@@ -1954,19 +1959,35 @@ class TVTimeCapsule:
             return
         frame = self._weather_channel.get_frame()
         if frame is not None:
-            # Scale the frame to fill the canvas while preserving aspect ratio.
-            fw, fh = frame.get_size()
-            scale = min(self.canvas_w / fw, self.canvas_h / fh)
-            new_w, new_h = int(fw * scale), int(fh * scale)
-            scaled = pygame.transform.smoothscale(frame, (new_w, new_h))
-            x = (self.canvas_w - new_w) // 2
-            y = (self.canvas_h - new_h) // 2
-            self.screen.fill(C.BLACK)
-            self.screen.blit(scaled, (x, y))
+            # Full-bleed like embedded video: scale to the draw surface.
+            # (Preserving aspect left black bars even at 0% safe zone.)
+            if frame.get_size() != (self.sw, self.sh):
+                frame = pygame.transform.smoothscale(frame, (self.sw, self.sh))
+            self.screen.blit(frame, (0, 0))
         else:
             self.screen.fill(C.BLACK)
             t = self.font_sm.render("LOADING...", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+        self.draw_volume_overlay()
+
+    def _process_weather_action(self, action: str | None) -> bool:
+        """Handle volume / back while weather is on. Returns True if action consumed."""
+        if not action:
+            return False
+        if action == "up":
+            if self._weather_channel is not None:
+                self._weather_channel.adjust_volume(10)
+                self.volume_overlay_timer = pygame.time.get_ticks()
+            return True
+        if action == "down":
+            if self._weather_channel is not None:
+                self._weather_channel.adjust_volume(-10)
+                self.volume_overlay_timer = pygame.time.get_ticks()
+            return True
+        if action == "back":
+            self._exit_weather_channel()
+            return True
+        return False
 
     def _test_pattern_dial_allowed(self) -> bool:
         """Easter egg dials work on any parent browse screen."""
@@ -3694,7 +3715,12 @@ class TVTimeCapsule:
 
     def draw_volume_overlay(self):
         """Simple retro volume bar — upper-right, below the metadata bar."""
-        if not self.player:
+        vol = None
+        if self.view == self.WEATHER and self._weather_channel is not None:
+            vol = min(self._weather_channel.volume, 100)
+        elif self.player:
+            vol = min(self.player.volume, 100)
+        else:
             return
 
         now = pygame.time.get_ticks()
@@ -3703,7 +3729,6 @@ class TVTimeCapsule:
         if self.volume_overlay_timer <= 0 or elapsed >= OVERLAY_SHOW_MS:
             return
 
-        vol = min(self.player.volume, 100)
         rect, scale = self._playback_overlay_layout()
         pad = HUD_PAD
         top_bar_h = HUD_TOP_BAR_H
@@ -6484,7 +6509,18 @@ class TVTimeCapsule:
                         key_action = self._action_for_key(event.key)
 
                         if self.view == self.WEATHER:
-                            self._exit_weather_channel()
+                            digit = digit_for_key(self.keymap, event.key)
+                            if digit is not None:
+                                self._append_dial_digit(digit)
+                                continue
+                            if key_action in ("up", "down", "back"):
+                                self._process_weather_action(key_action)
+                                continue
+                            if key_action == "quit":
+                                self._exit_weather_channel()
+                                self._request_quit(source="quit-key")
+                                continue
+                            # Ignore other keys so they don't exit the channel.
                             continue
 
                         if self.view == self.KEY_CAPTURE:
@@ -6699,7 +6735,9 @@ class TVTimeCapsule:
                             continue
                         self._note_gamepad_input()
                         if self.view == self.WEATHER:
-                            self._exit_weather_channel()
+                            if not self._process_weather_action(action):
+                                # Ignore unhandled gamepad actions (keep watching).
+                                pass
                             continue
                         if self.view == self.CONFIRM_EXIT:
                             self._process_confirm_exit_action(action)
