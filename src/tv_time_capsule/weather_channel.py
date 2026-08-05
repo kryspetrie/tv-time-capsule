@@ -266,6 +266,7 @@ class WeatherChannel:
                     "--disable-sync",
                     "--autoplay-policy=no-user-gesture-required",
                     "--disable-gpu",
+                    "--force-device-scale-factor=1",
                     f"--window-size={self._width},{self._height}",
                     WEATHER_URL,
                 ],
@@ -535,6 +536,25 @@ class WeatherChannel:
         # Bounded timeout so we can notice stop() without a hard hang.
         ws.settimeout(1.0)
 
+        # Headless Chrome often ignores --window-size for the CSS viewport
+        # (we saw 640×393 with ~58px black pillars).  Force layout metrics
+        # to match the TV canvas so weather.com fills edge-to-edge.
+        try:
+            self._send(
+                ws,
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": self._width,
+                    "height": self._height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                    "screenWidth": self._width,
+                    "screenHeight": self._height,
+                },
+            )
+        except Exception as exc:
+            LOG.warning("Device metrics override failed: %s", exc)
+
         try:
             self._send(
                 ws,
@@ -547,7 +567,7 @@ class WeatherChannel:
                     "everyNthFrame": 1,
                 },
             )
-            LOG.info("Weather screencast started")
+            LOG.info("Weather screencast started (%dx%d)", self._width, self._height)
         except Exception as exc:
             self._error = f"startScreencast failed: {exc}"
             LOG.warning("Page.startScreencast failed: %s", exc)
