@@ -186,6 +186,10 @@ class ChannelChangeFX:
             return
         now = pygame.time.get_ticks()
         duration = FX_DURATION_MS if extra_ms is None else max(1, int(extra_ms))
+        if self._active_start <= 0 or now >= self._active_until:
+            # If snow had expired, restart the timebase so frames keep cycling.
+            if now >= self._active_until:
+                self._active_start = now
         self._active_until = max(self._active_until, now + duration)
 
     def _precache_snow_frames(self) -> None:
@@ -213,8 +217,10 @@ class ChannelChangeFX:
     def _snow_frame_index(self) -> int:
         if not self._snow_frames:
             return 0
+        # Loop the cached grain so long holds (e.g. weather boot) keep
+        # animating instead of freezing on the last pre-generated frame.
         elapsed = max(0, pygame.time.get_ticks() - self._active_start)
-        return min(len(self._snow_frames) - 1, elapsed // SNOW_FRAME_MS)
+        return (elapsed // SNOW_FRAME_MS) % len(self._snow_frames)
 
     def draw(self, screen: pygame.Surface) -> None:
         if not self.is_active() or not self._snow_frames:

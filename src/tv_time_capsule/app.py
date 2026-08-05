@@ -2017,31 +2017,21 @@ class TVTimeCapsule:
     def _enter_weather_channel(self) -> None:
         """Switch to the Weather Channel (Chrome-embedded weather.com/retro).
 
-        Snow / static starts *immediately* so Chrome CDP startup does not feel
-        like a freeze.  The burst continues (retriggered as needed) until the
-        channel reports ready or fails.
+        Snow / static starts *immediately* and keeps animating while Chrome
+        boots on a background thread (no main-thread network / CDP wait).
         """
         self._weather_previous_view = self.view
         self.view = self.WEATHER
         self.channel_flash = "004"
         self.channel_flash_time = pygame.time.get_ticks()
 
-        if self._weather_channel is None:
-            weather_cfg = self.config.get("weather") or {}
-            location = resolve_weather_location(weather_cfg)
-            self._weather_channel = WeatherChannel(
-                self.canvas_w,
-                self.canvas_h,
-                location=location,
-            )
-
-        # Instant tuning feedback before any blocking work.
+        # Instant tuning feedback *before* location resolve / Chrome launch.
         if self._channel_fx.snow_enabled:
             self._channel_fx.trigger()
             self._paint_weather_tune_frame()
             self.present()
 
-        if self._weather_channel.is_available():
+        if self._weather_channel is not None and self._weather_channel.is_available():
             self._animate_channel_snow_burst()
             return
 
@@ -2049,6 +2039,14 @@ class TVTimeCapsule:
 
         def _boot() -> None:
             try:
+                if self._weather_channel is None:
+                    weather_cfg = self.config.get("weather") or {}
+                    location = resolve_weather_location(weather_cfg)
+                    self._weather_channel = WeatherChannel(
+                        self.canvas_w,
+                        self.canvas_h,
+                        location=location,
+                    )
                 result["ok"] = bool(self._weather_channel.start())
             except Exception:
                 LOG.exception("Weather channel start failed")
@@ -2062,11 +2060,10 @@ class TVTimeCapsule:
         t0 = pygame.time.get_ticks()
         while True:
             pygame.event.pump()
-            now = pygame.time.get_ticks()
-            elapsed = now - t0
+            elapsed = pygame.time.get_ticks() - t0
 
             # Keep static going for the whole wait (visual only — no audio loop).
-            if self._channel_fx.snow_enabled and not self._channel_fx.is_active():
+            if self._channel_fx.snow_enabled:
                 self._channel_fx.extend()
 
             self._paint_weather_tune_frame()
@@ -2080,7 +2077,9 @@ class TVTimeCapsule:
 
         boot.join(timeout=2.0)
 
-        if not result.get("ok") or not self._weather_channel.is_available():
+        if not result.get("ok") or (
+            self._weather_channel is None or not self._weather_channel.is_available()
+        ):
             self.channel_error = "Weather Unavailable"
             self.channel_error_time = pygame.time.get_ticks()
             self._exit_weather_channel()
