@@ -15,6 +15,7 @@ __EXTRA_ENVIRONMENT__
 ExecStart=__EXEC_START__
 Restart=on-failure
 RestartSec=5
+WatchdogSec=20
 StandardOutput=journal
 StandardError=journal
 

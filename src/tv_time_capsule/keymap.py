@@ -38,6 +38,9 @@ KEY_ACTIONS = [
     ("digit_7", "Channel 7"),
     ("digit_8", "Channel 8"),
     ("digit_9", "Channel 9"),
+    ("large_text_toggle", "Large text on/off"),
+    ("high_contrast_toggle", "High contrast on/off"),
+    ("play_all_unwatched", "Play all unwatched"),
 ]
 
 DEFAULT_KEYMAP: dict[str, list[int]] = {
@@ -72,6 +75,9 @@ DEFAULT_KEYMAP: dict[str, list[int]] = {
     "digit_7": [pygame.K_7, pygame.K_KP7],
     "digit_8": [pygame.K_8, pygame.K_KP8],
     "digit_9": [pygame.K_9, pygame.K_KP9],
+    "large_text_toggle": [pygame.K_F6],
+    "high_contrast_toggle": [pygame.K_F7],
+    "play_all_unwatched": [pygame.K_p],
 }
 
 KEY_CONFIG_ROWS = 6

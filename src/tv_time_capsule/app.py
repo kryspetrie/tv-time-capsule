@@ -111,6 +111,7 @@ from .safe_zone import (
     safe_zone_to_config,
 )
 from .test_patterns import is_show_list_test_dial, pattern_asset_path
+from .weather_channel import WeatherChannel
 from .state import (
     clear_resume_ep,
     reset_episode_progress,
@@ -165,6 +166,7 @@ class TVTimeCapsule:
     MOVIE_LIST = 9
     GAMEPAD_CONFIG = 11
     GAMEPAD_CAPTURE = 12
+    WEATHER = 13
 
     def __init__(
         self,
@@ -251,9 +253,7 @@ class TVTimeCapsule:
             self.embedded_player = False
 
         # ─── Font hierarchy: 3 sizes only ───
-        self.font_lg = make_font(60)    # Large: channel numbers, splash, key config values
-        self.font_md = make_font(36)    # Medium: titles, labels, card text
-        self.font_sm = make_font(24)    # Small: info, hints, footer
+        self._init_fonts()
 
         if "keymap" in self.state:
             if not self.config.get("keymap"):
@@ -284,6 +284,9 @@ class TVTimeCapsule:
         self._load_kids_mode_config()
         ui_cfg = self.config.get("ui") or {}
         self._footer_hints_enabled = bool(ui_cfg.get("footer_hints", True))
+        acc_cfg = self.config.get("accessibility") or {}
+        self._high_contrast = bool(acc_cfg.get("high_contrast", False))
+        self._play_all_unwatched = bool(acc_cfg.get("play_all_unwatched", False))
         snow = (
             bool(channel_snow)
             if channel_snow is not None
@@ -312,6 +315,7 @@ class TVTimeCapsule:
             rate_per_minute=artifact_rate,
         )
         self._show_list_test_pattern: str | None = None
+        self._weather_channel: WeatherChannel | None = None
         gp_cfg = self.config.get("gamepad") or {}
         gp_bindings = load_gamepad_bindings(self.config)
         self._gamepad_bindings = gp_bindings
@@ -655,6 +659,76 @@ class TVTimeCapsule:
         )
         self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
         self._persist_footer_hints()
+
+    # ─── Accessibility toggles ───────────────────────────────────────────
+
+    def _persist_accessibility(self) -> None:
+        acc = dict(self.config.get("accessibility") or {})
+        acc["large_text"] = self._large_text
+        acc["high_contrast"] = self._high_contrast
+        acc["play_all_unwatched"] = self._play_all_unwatched
+        self.config["accessibility"] = acc
+        save_config(self.config)
+
+    def _toggle_large_text(self) -> None:
+        self._large_text = not self._large_text
+        self._persist_accessibility()
+        self._reinit_fonts()
+        self._mode_toast_message = (
+            "Large text on" if self._large_text else "Large text off"
+        )
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+
+    def _toggle_high_contrast(self) -> None:
+        self._high_contrast = not self._high_contrast
+        self._mode_toast_message = (
+            "High contrast on" if self._high_contrast else "High contrast off"
+        )
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+        self._persist_accessibility()
+
+    def _dim_color(self) -> tuple[int, int, int]:
+        """Return the appropriate dim color based on high_contrast setting."""
+        return C.WHITE if self._high_contrast else C.DIM
+
+    def _dim_border_color(self) -> tuple[int, int, int]:
+        """Border/rectangle color — brighter in high contrast."""
+        return C.WHITE if self._high_contrast else C.DIM
+
+    def _green_dim_color(self) -> tuple[int, int, int]:
+        """Dim green — brighter in high contrast."""
+        return C.GREEN if self._high_contrast else C.GREEN_DIM
+
+    def _play_all_unwatched_action(self) -> None:
+        """Queue all unwatched episodes in the current show and start playing."""
+        if self.view not in (self.SHOW_LIST, self.SEASON_SELECT, self.EPISODE_SELECT):
+            return
+        if self._kids_mode_active:
+            return
+        show_name = self.cur_show
+        if not show_name:
+            return
+        show = self.shows.get(show_name)
+        if not show:
+            return
+        # Collect all unwatched episodes across all seasons
+        episodes: list[dict] = []
+        for s_num in sorted(show.get("seasons", {}).keys()):
+            season = show["seasons"][s_num]
+            watched = get_watched_episodes(self.state, show_name, s_num)
+            for ep in season.get("episodes", []):
+                if ep["number"] not in watched:
+                    episodes.append(ep)
+        if not episodes:
+            self._mode_toast_message = "All episodes watched"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
+        self.playing_episodes = episodes
+        self.playing_index = 0
+        self.playing_show = show_name
+        self._playing_is_movie = False
+        self.cur_movie = None
+        self._start_current_episode(show_splash=True)
 
     def _kids_play_show(self, show_name: str) -> None:
         if not self.player_cmd and not self.player:
@@ -1095,7 +1169,7 @@ class TVTimeCapsule:
         }
         for d in "123456789":
             active = band_has_titles(titles, d)
-            color = C.GREEN if active else C.DIM
+            color = C.GREEN if active else self._dim_color()
             surf = self.font_sm.render(f"{d}:{labels[d]}", True, color)
             col = (int(d) - 1) % 3
             row = (int(d) - 1) // 3
@@ -1110,12 +1184,12 @@ class TVTimeCapsule:
         self.screen.blit(big, big_rect)
 
         # Directional cue around the focused letter.
-        arrow = self.font_lg.render("<", True, C.DIM)
+        arrow = self.font_lg.render("<", True, self._dim_color())
         self.screen.blit(
             arrow,
             arrow.get_rect(right=big_rect.left - 18, centery=focus_y),
         )
-        arrow = self.font_lg.render(">", True, C.DIM)
+        arrow = self.font_lg.render(">", True, self._dim_color())
         self.screen.blit(
             arrow,
             arrow.get_rect(left=big_rect.right + 18, centery=focus_y),
@@ -1127,12 +1201,12 @@ class TVTimeCapsule:
         )
         while self.font_sm.size(strip)[0] > box_w - 40 and len(strip) > 10:
             strip = strip[:-1]
-        strip_surf = self.font_sm.render(strip, True, C.DIM)
+        strip_surf = self.font_sm.render(strip, True, self._dim_color())
         self.screen.blit(
             strip_surf,
             strip_surf.get_rect(centerx=self.sw // 2, bottom=box_y + box_h - 48),
         )
-        hint = self.font_sm.render("< > choose  |  0 back", True, C.DIM)
+        hint = self.font_sm.render("< > choose  |  0 back", True, self._dim_color())
         self.screen.blit(
             hint, hint.get_rect(centerx=self.sw // 2, bottom=box_y + box_h - 16)
         )
@@ -1166,7 +1240,8 @@ class TVTimeCapsule:
 
         if buf == "00":
             self.channel_digits = "00" + d
-            self._commit_dial_digits(immediate=True)
+            # Brief pause so "004" etc. is visible before committing.
+            self.channel_timer = now
             return
 
         if buf in ("01", "02"):
@@ -1213,6 +1288,9 @@ class TVTimeCapsule:
             self.channel_error = f"Ch {digits} Not Found"
             self.channel_error_time = pygame.time.get_ticks()
             return
+        if result.kind == DialKind.WEATHER:
+            self._enter_weather_channel()
+            return
         if result.kind == DialKind.CHANNEL and result.channel is not None:
             success = self.jump_to_channel(result.channel)
             if success:
@@ -1229,6 +1307,11 @@ class TVTimeCapsule:
         digits = self.channel_digits
         # Page flips use a short hold so "01"/"02" are visible on screen.
         if digits in ("01", "02"):
+            if elapsed >= CHANNEL_PENDING_MS:
+                self._commit_dial_digits()
+            return
+        # 00x special channels (004 weather, 001-003 test patterns) — short hold.
+        if len(digits) == 3 and digits.startswith("00"):
             if elapsed >= CHANNEL_PENDING_MS:
                 self._commit_dial_digits()
             return
@@ -1541,6 +1624,36 @@ class TVTimeCapsule:
             offset = parse_safe_zone_offset(raw if isinstance(raw, dict) else None)
         return margins, offset
 
+    def _init_fonts(self) -> None:
+        """Create font objects at the current size tier."""
+        acc = self.config.get("accessibility") or {}
+        large = bool(acc.get("large_text", False))
+        self._large_text = large
+        if large:
+            self.font_lg = make_font(68)
+            self.font_md = make_font(40)
+            self.font_sm = make_font(28)
+        else:
+            self.font_lg = make_font(60)
+            self.font_md = make_font(36)
+            self.font_sm = make_font(24)
+
+    def _reinit_fonts(self) -> None:
+        """Recreate fonts after a large_text toggle."""
+        self._init_fonts()
+
+    def _footer_bar_h(self) -> int:
+        return 40 if self._large_text else FOOTER_BAR_H
+
+    def _nav_bar_h(self) -> int:
+        return 34 if self._large_text else NAV_BAR_H
+
+    def _header_bar_h(self) -> int:
+        return HEADER_BAR_H
+
+    def _kids_nav_bar_h(self) -> int:
+        return 50 if self._large_text else KIDS_NAV_BAR_H
+
     def _init_safe_zone_state(self) -> None:
         margins, offset = self._parse_safe_zone_sources()
         self._safe_zone_margins = margins
@@ -1829,8 +1942,31 @@ class TVTimeCapsule:
         pattern_path = pattern_asset_path(self._show_list_test_pattern or "")
         if pattern_path and self._blit_fullscreen_asset(pattern_path):
             return
-        t = self.font_md.render("TEST PATTERN NOT FOUND", True, C.DIM)
+        t = self.font_md.render("TEST PATTERN NOT FOUND", True, self._dim_color())
         self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+
+    def _draw_weather_channel(self) -> None:
+        """Render the Weather Channel screencast frame."""
+        if self._weather_channel is None or not self._weather_channel.is_available():
+            self.screen.fill(C.BLACK)
+            t = self.font_md.render("WEATHER UNAVAILABLE", True, self._dim_color())
+            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+            return
+        frame = self._weather_channel.get_frame()
+        if frame is not None:
+            # Scale the frame to fill the canvas while preserving aspect ratio.
+            fw, fh = frame.get_size()
+            scale = min(self.canvas_w / fw, self.canvas_h / fh)
+            new_w, new_h = int(fw * scale), int(fh * scale)
+            scaled = pygame.transform.smoothscale(frame, (new_w, new_h))
+            x = (self.canvas_w - new_w) // 2
+            y = (self.canvas_h - new_h) // 2
+            self.screen.fill(C.BLACK)
+            self.screen.blit(scaled, (x, y))
+        else:
+            self.screen.fill(C.BLACK)
+            t = self.font_sm.render("LOADING...", True, self._dim_color())
+            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
 
     def _test_pattern_dial_allowed(self) -> bool:
         """Easter egg dials work on any parent browse screen."""
@@ -1853,6 +1989,26 @@ class TVTimeCapsule:
         self._animate_channel_snow_burst()
         return True
 
+    def _enter_weather_channel(self) -> None:
+        """Switch to the Weather Channel view (Chrome-embedded weather.com/retro)."""
+        if self._weather_channel is None:
+            self._weather_channel = WeatherChannel(self.canvas_w, self.canvas_h)
+        if not self._weather_channel.is_available():
+            if not self._weather_channel.start():
+                self.channel_error = "Weather Unavailable"
+                self.channel_error_time = pygame.time.get_ticks()
+                return
+        self._weather_previous_view = self.view
+        self.view = self.WEATHER
+        self._animate_channel_snow_burst()
+
+    def _exit_weather_channel(self) -> None:
+        """Leave the Weather Channel and return to the previous browse view."""
+        if self._weather_channel is not None:
+            self._weather_channel.stop()
+            self._weather_channel = None
+        self.view = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
+
     def _apply_channel_fx(self):
         """Brief static burst when tuning channels (if enabled)."""
         if self._channel_fx.is_active():
@@ -1865,6 +2021,9 @@ class TVTimeCapsule:
         """Menu layers only — no snow, channel overlay, or rescan banner."""
         if self._show_list_test_pattern:
             self._draw_test_pattern_screen()
+            return
+        if self.view == self.WEATHER:
+            self._draw_weather_channel()
             return
         if self.view == self.LIBRARY_SELECT:
             self.draw_library_selector()
@@ -1946,7 +2105,7 @@ class TVTimeCapsule:
             sub_color = C.GREEN
         else:
             sub = show.upper()
-            sub_color = C.DIM
+            sub_color = self._dim_color()
         sn = self._truncate_overlay_text(
             sub, self.font_sm, sub_color, rect.w - pad * 2, scale=scale
         )
@@ -1956,7 +2115,7 @@ class TVTimeCapsule:
 
         if footer:
             hint = self._scale_overlay_surface(
-                self.font_sm.render(footer, True, C.DIM), scale
+                self.font_sm.render(footer, True, self._dim_color()), scale
             )
             self.screen.blit(
                 hint,
@@ -1975,7 +2134,9 @@ class TVTimeCapsule:
     def _draw_channel_tune_frame(self) -> None:
         """Destination screen drawn under a channel-change snow burst."""
         deferred = self._deferred_splash
-        if self.view == self.PLAYING and deferred is not None:
+        if self.view == self.WEATHER:
+            self._draw_weather_channel()
+        elif self.view == self.PLAYING and deferred is not None:
             self._blit_now_playing_content(*deferred)
         elif self.view == self.CONFIRM_EXIT:
             self.draw_confirm_exit()
@@ -2019,22 +2180,22 @@ class TVTimeCapsule:
         """
         if not self._parent_footer_visible():
             return
-        bar_h = FOOTER_BAR_H
+        bar_h = self._footer_bar_h()
         fy = self.sh - bar_h
         pygame.draw.rect(self.screen, C.BG_FOOTER, (0, fy, self.sw, bar_h))
         pygame.draw.line(self.screen, C.BLUE, (0, fy), (self.sw, fy), 1)
 
         clock = datetime.now().strftime("%I:%M %p").lstrip("0")
-        clock_surf = self.font_sm.render(clock, True, C.DIM)
+        clock_surf = self.font_sm.render(clock, True, self._dim_color())
         help_label = f"{format_action_keys(self.keymap, 'help')} help"
-        help_surf = self.font_sm.render(help_label, True, C.DIM)
+        help_surf = self.font_sm.render(help_label, True, self._dim_color())
         cy = fy + bar_h // 2
         self.screen.blit(clock_surf, clock_surf.get_rect(left=16, centery=cy))
         self.screen.blit(help_surf, help_surf.get_rect(right=self.sw - 16, centery=cy))
 
     def _draw_header(self, left_text, right_text="", ch_num=None, badge_text=""):
         """Draw a consistent header bar at the top of the screen."""
-        bar_h = HEADER_BAR_H
+        bar_h = self._header_bar_h()
         pygame.draw.rect(self.screen, C.BG_HEADER, (0, 0, self.sw, bar_h))
         pygame.draw.line(self.screen, C.BLUE, (0, bar_h), (self.sw, bar_h), 1)
 
@@ -2121,8 +2282,8 @@ class TVTimeCapsule:
 
     def _show_browser_layout(self, header_h: int, *, kids: bool = False):
         """Vertical layout for the cable-TV show browser."""
-        nav_h = KIDS_NAV_BAR_H if kids else NAV_BAR_H
-        footer_h = 0 if kids or not self._footer_hints_enabled else FOOTER_BAR_H
+        nav_h = self._kids_nav_bar_h() if kids else self._nav_bar_h()
+        footer_h = 0 if kids or not self._footer_hints_enabled else self._footer_bar_h()
         # Leave visible background between the title bar and page navigation.
         up_y = header_h + 4
         down_y = self.sh - footer_h - nav_h
@@ -2141,9 +2302,9 @@ class TVTimeCapsule:
 
     def _stack_browser_layout(self):
         """Shared vertical layout for season/episode stack browsers."""
-        nav_h = NAV_BAR_H
-        footer_h = FOOTER_BAR_H if self._footer_hints_enabled else 0
-        header_h = HEADER_BAR_H
+        nav_h = self._nav_bar_h()
+        footer_h = self._footer_bar_h() if self._footer_hints_enabled else 0
+        header_h = self._header_bar_h()
         # Without this gap, the navigation strip reads as part of the title bar.
         up_y = header_h + 4
         down_y = self.sh - footer_h - nav_h
@@ -2418,7 +2579,7 @@ class TVTimeCapsule:
                 if self._kids_mode_active and self._kids_allowlist is not None
                 else "No shows found"
             )
-            t = self.font_md.render(msg, True, C.DIM)
+            t = self.font_md.render(msg, True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -2475,7 +2636,7 @@ class TVTimeCapsule:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
             ch = str(self._display_channel(name))
-            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else self._dim_color())
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -2499,7 +2660,7 @@ class TVTimeCapsule:
                 info = f"{len(seasons)} seasons - {n_total} ep"
             else:
                 info = f"{n_total} ep"
-            info_surf = self.font_sm.render(info, True, C.DIM)
+            info_surf = self.font_sm.render(info, True, self._dim_color())
             line1_h = self.font_md.get_height()
             total_text_h = line1_h + info_surf.get_height() + 2
             text_top = rect.y + (rect.height - total_text_h) // 2
@@ -2530,7 +2691,7 @@ class TVTimeCapsule:
         self.screen.fill(C.BG)
         items = self.current_items()
         if not items:
-            t = self.font_md.render("No library", True, C.DIM)
+            t = self.font_md.render("No library", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -2551,7 +2712,7 @@ class TVTimeCapsule:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
             ch = str(i + 1)
-            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else self._dim_color())
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -2562,7 +2723,7 @@ class TVTimeCapsule:
             label_x = rect.x + 14 + ch_surf.get_width() + 16
             title = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
             info = self.font_sm.render(
-                f"{count} title{'s' if count != 1 else ''}", True, C.DIM
+                f"{count} title{'s' if count != 1 else ''}", True, self._dim_color()
             )
             self.screen.blit(title, (label_x, rect.y + 12))
             self.screen.blit(info, (rect.right - info.get_width() - 16, rect.y + 14))
@@ -2687,14 +2848,14 @@ class TVTimeCapsule:
             pygame.draw.rect(self.screen, C.CYAN, rect.inflate(4, 4), 3, border_radius=radius)
         else:
             pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=radius)
-            pygame.draw.rect(self.screen, C.DIM, rect, 1, border_radius=radius)
+            pygame.draw.rect(self.screen, self._dim_border_color(), rect, 1, border_radius=radius)
 
         pad = 12
         inner = rect.inflate(-pad * 2, -pad * 2)
         inner.w = max(1, inner.w)
         inner.h = max(1, inner.h)
 
-        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else C.DIM)
+        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else self._dim_color())
         count_text = f"{count} title{'s' if count != 1 else ''}"
         count_surf = self.font_sm.render(count_text, True, C.BLUE)
         sidebar_w = max(
@@ -2743,7 +2904,7 @@ class TVTimeCapsule:
             cell = pygame.Rect(x0 + i * (cell_w + gap), y0, cell_w, cell_h)
             pygame.draw.rect(self.screen, (20, 28, 45), cell, border_radius=4)
             if not self._blit_image_fit(path, cell):
-                ph = self.font_sm.render("?", True, C.DIM)
+                ph = self.font_sm.render("?", True, self._dim_color())
                 self.screen.blit(ph, ph.get_rect(center=cell.center))
 
     def _draw_kids_carousel_panel(
@@ -2765,7 +2926,7 @@ class TVTimeCapsule:
             pygame.draw.rect(self.screen, C.CYAN, rect.inflate(4, 4), 3, border_radius=radius)
         else:
             pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=radius)
-            pygame.draw.rect(self.screen, C.DIM, rect, 1, border_radius=radius)
+            pygame.draw.rect(self.screen, self._dim_border_color(), rect, 1, border_radius=radius)
 
         pad = 12
         inner = rect.inflate(-pad * 2, -pad * 2)
@@ -2773,7 +2934,7 @@ class TVTimeCapsule:
         inner.h = max(1, inner.h)
 
         # Sidebar: channel number + count
-        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else C.DIM)
+        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else self._dim_color())
         count_text = f"{count} title{'s' if count != 1 else ''}"
         count_surf = self.font_sm.render(count_text, True, C.BLUE)
         sidebar_w = max(ch_surf.get_width() + 20, count_surf.get_width() + 20)
@@ -2849,21 +3010,21 @@ class TVTimeCapsule:
         left_rect = pygame.Rect(left_x, thumb_area.y + (thumb_area.h - side_h) // 2, side_w, side_h)
         pygame.draw.rect(self.screen, (20, 28, 45), left_rect, border_radius=4)
         if not self._blit_image_fit(all_paths[idx0], left_rect):
-            ph = self.font_sm.render("?", True, C.DIM)
+            ph = self.font_sm.render("?", True, self._dim_color())
             self.screen.blit(ph, ph.get_rect(center=left_rect.center))
 
         # Draw center (big)
         center_rect = pygame.Rect(center_x, thumb_area.y, center_w, center_h)
         pygame.draw.rect(self.screen, (20, 28, 45), center_rect, border_radius=4)
         if not self._blit_image_fit(all_paths[idx1], center_rect):
-            ph = self.font_sm.render("?", True, C.DIM)
+            ph = self.font_sm.render("?", True, self._dim_color())
             self.screen.blit(ph, ph.get_rect(center=center_rect.center))
 
         # Draw right (small)
         right_rect = pygame.Rect(right_x, thumb_area.y + (thumb_area.h - side_h) // 2, side_w, side_h)
         pygame.draw.rect(self.screen, (20, 28, 45), right_rect, border_radius=4)
         if not self._blit_image_fit(all_paths[idx2], right_rect):
-            ph = self.font_sm.render("?", True, C.DIM)
+            ph = self.font_sm.render("?", True, self._dim_color())
             self.screen.blit(ph, ph.get_rect(center=right_rect.center))
 
     def _draw_kids_library_selector(self) -> None:
@@ -2872,7 +3033,7 @@ class TVTimeCapsule:
         self.screen.fill(C.BG)
         items = self.current_items()
         if not items:
-            t = self.font_md.render("No library", True, C.DIM)
+            t = self.font_md.render("No library", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -2921,7 +3082,7 @@ class TVTimeCapsule:
                 if self._kids_mode_active and self._kids_allowlist is not None
                 else "No movies found"
             )
-            t = self.font_md.render(msg, True, C.DIM)
+            t = self.font_md.render(msg, True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -2980,7 +3141,7 @@ class TVTimeCapsule:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
             ch = str(self._display_movie_channel(key))
-            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else self._dim_color())
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -3038,7 +3199,7 @@ class TVTimeCapsule:
                 if self._kids_allowlist is not None
                 else "Nothing to watch"
             )
-            t = self.font_md.render(msg, True, C.DIM)
+            t = self.font_md.render(msg, True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -3049,7 +3210,7 @@ class TVTimeCapsule:
         ch_num = get_ch(key)
         self._draw_header(title.upper())
 
-        layout = self._show_browser_layout(HEADER_BAR_H, kids=True)
+        layout = self._show_browser_layout(self._header_bar_h(), kids=True)
         nav_h = layout["nav_h"]
         up_y = layout["up_y"]
         down_y = layout["down_y"]
@@ -3114,7 +3275,7 @@ class TVTimeCapsule:
         total = len(seasons)
 
         if not seasons:
-            t = self.font_md.render("No seasons", True, C.DIM)
+            t = self.font_md.render("No seasons", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -3166,7 +3327,7 @@ class TVTimeCapsule:
 
             # Channel number — unique per page (1-based position in this list)
             ch_label = str(item_idx + 1)
-            ch_surf = self.font_lg.render(ch_label, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch_label, True, C.GREEN if selected else self._dim_color())
             self.screen.blit(ch_surf, (rect.x + 14,
                                        rect.y + (rect.height - ch_surf.get_height()) // 2))
 
@@ -3204,17 +3365,17 @@ class TVTimeCapsule:
             info_y = rect.y + (rect.height - self.font_sm.get_height()) // 2
             if n_eps > 0 and watched_count >= n_eps:
                 info = f"{count_part}  [done]"
-                it = self.font_sm.render(info, True, C.DIM)
+                it = self.font_sm.render(info, True, self._dim_color())
                 self.screen.blit(it, (info_x - it.get_width(), info_y))
             elif watched_count > 0 and nxt is not None:
                 next_part = f"E-{nxt['number']:02d} next"
                 next_surf = self.font_sm.render(next_part, True, C.GREEN)
-                count_surf = self.font_sm.render(f"{count_part}  ", True, C.DIM)
+                count_surf = self.font_sm.render(f"{count_part}  ", True, self._dim_color())
                 total_w = count_surf.get_width() + next_surf.get_width()
                 self.screen.blit(count_surf, (info_x - total_w, info_y))
                 self.screen.blit(next_surf, (info_x - next_surf.get_width(), info_y))
             else:
-                it = self.font_sm.render(count_part, True, C.DIM)
+                it = self.font_sm.render(count_part, True, self._dim_color())
                 self.screen.blit(it, (info_x - it.get_width(), info_y))
 
         self._draw_nav_bar(layout["down_y"], down_label, "down", down_active)
@@ -3231,7 +3392,7 @@ class TVTimeCapsule:
         total = len(episodes)
 
         if not episodes:
-            t = self.font_md.render("No episodes", True, C.DIM)
+            t = self.font_md.render("No episodes", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
@@ -3299,7 +3460,7 @@ class TVTimeCapsule:
 
             # Channel number on the left (consistent with show browser)
             ch_label = str(item_idx + 1)
-            ch_surf = self.font_lg.render(ch_label, True, C.GREEN if selected else C.DIM)
+            ch_surf = self.font_lg.render(ch_label, True, C.GREEN if selected else self._dim_color())
             self.screen.blit(
                 ch_surf,
                 (rect.x + 14, rect.y + (rect.height - ch_surf.get_height()) // 2),
@@ -3317,7 +3478,7 @@ class TVTimeCapsule:
 
             # Status indicator (right of card)
             status_text = ""
-            status_color = C.DIM
+            status_color = self._dim_color()
             if is_in_progress and not selected:
                 status_text = "RESUME"
                 status_color = C.GREEN
@@ -3326,7 +3487,7 @@ class TVTimeCapsule:
                 status_color = C.GREEN
             elif is_watched and not is_next and not is_in_progress:
                 status_text = "WATCHED"
-                status_color = C.DIM
+                status_color = self._dim_color()
             st = self.font_sm.render(status_text, True, status_color) if status_text else None
 
             # Calculate available width for text and right-side indicators.
@@ -3345,7 +3506,7 @@ class TVTimeCapsule:
             # Vertically center the one or two lines
             dur_text = self._get_duration(ep['path'])
             line2_text = dur_text
-            line2_color = C.DIM
+            line2_color = self._dim_color()
             if is_in_progress:
                 mins = int(pos_secs) // 60
                 secs = int(pos_secs) % 60
@@ -3566,7 +3727,7 @@ class TVTimeCapsule:
         bar_x = x + label.get_width() + 16
         for i in range(n_bars):
             bx = bar_x + i * (bar_w + bar_gap)
-            color = C.GREEN if i < filled else C.GREEN_DIM
+            color = C.GREEN if i < filled else self._green_dim_color()
             pygame.draw.rect(self.screen, color, (bx, y, bar_w, bar_h))
 
     # ─── Pause overlay ────────────────────────────────────────────────────
@@ -3801,6 +3962,7 @@ class TVTimeCapsule:
     def _draw_help_lines(self, lines, y_start, content_max_y, section_gap=16) -> None:
         y = y_start
         first_section = True
+        hdr_font = self.font_md if self._large_text else self.font_sm
         for label, detail in lines:
             if y >= content_max_y:
                 break
@@ -3808,7 +3970,7 @@ class TVTimeCapsule:
                 if not first_section:
                     y += section_gap
                 first_section = False
-                hdr = self.font_sm.render(label, True, C.CYAN)
+                hdr = hdr_font.render(label, True, C.CYAN)
                 if y + hdr.get_height() > content_max_y:
                     break
                 self.screen.blit(hdr, (50, y))
@@ -3872,7 +4034,7 @@ class TVTimeCapsule:
                 blurb = self.font_sm.render(
                     "Your media library, cable-style",
                     True,
-                    C.DIM,
+                    self._dim_color(),
                 )
                 self.screen.blit(
                     blurb, blurb.get_rect(centerx=self.sw // 2, centery=self.sh // 2 + 8)
@@ -3889,7 +4051,7 @@ class TVTimeCapsule:
                 hint = self.font_sm.render(
                     f"Press any key to continue...  {remaining}s",
                     True,
-                    C.DIM,
+                    self._dim_color(),
                 )
                 self.screen.blit(
                     hint, hint.get_rect(centerx=self.sw // 2, bottom=self.sh - 24)
@@ -3988,7 +4150,7 @@ class TVTimeCapsule:
                     hint_text = f"{toggle}: view {other}  |  Esc: close"
                 else:
                     hint_text = "Esc: close"
-                hint = self.font_sm.render(hint_text, True, C.DIM)
+                hint = self.font_sm.render(hint_text, True, self._dim_color())
                 self.screen.blit(
                     hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh - 18)
                 )
@@ -4071,7 +4233,7 @@ class TVTimeCapsule:
             hint.get_rect(centerx=rect.x + rect.w // 2, centery=track_y - int(14 * scale)),
         )
         footer_surf = self._scale_overlay_surface(
-            self.font_sm.render(footer, True, C.DIM), scale
+            self.font_sm.render(footer, True, self._dim_color()), scale
         )
         self.screen.blit(
             footer_surf,
@@ -4262,12 +4424,12 @@ class TVTimeCapsule:
             )
             pygame.draw.rect(
                 self.screen,
-                C.CYAN if yes_sel else C.DIM,
+                C.CYAN if yes_sel else self._dim_color(),
                 yes_rect,
                 2,
                 border_radius=6,
             )
-            yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else C.DIM)
+            yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else self._dim_color())
             self.screen.blit(yes_txt, yes_txt.get_rect(center=yes_rect.center))
 
             # No button
@@ -4282,12 +4444,12 @@ class TVTimeCapsule:
             )
             pygame.draw.rect(
                 self.screen,
-                C.CYAN if no_sel else C.DIM,
+                C.CYAN if no_sel else self._dim_color(),
                 no_rect,
                 2,
                 border_radius=6,
             )
-            no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else C.DIM)
+            no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else self._dim_color())
             self.screen.blit(no_txt, no_txt.get_rect(center=no_rect.center))
 
 
@@ -4435,13 +4597,13 @@ class TVTimeCapsule:
         pygame.draw.line(
             surface, C.BLACK, safe_rect.topright, safe_rect.bottomleft, 2
         )
-        pygame.draw.rect(surface, C.DIM, (0, 0, cw, ch), 1)
+        pygame.draw.rect(surface, self._dim_border_color(), (0, 0, cw, ch), 1)
 
         zoom_active = self._safe_zone_edit_mode == "zoom"
         pos_active = not zoom_active
         mode_y = 24
-        zoom_color = C.GREEN if zoom_active else C.DIM
-        pos_color = C.GREEN if pos_active else C.DIM
+        zoom_color = C.GREEN if zoom_active else self._dim_color()
+        pos_color = C.GREEN if pos_active else self._dim_color()
         zoom_label = self.font_md.render("ZOOM", True, zoom_color)
         pos_label = self.font_md.render("POSITION", True, pos_color)
         gap = 24
@@ -4481,14 +4643,14 @@ class TVTimeCapsule:
                 f"{format_action_keys(km, 'select')}: zoom  |  "
                 f"{format_action_keys(km, 'back')}: save"
             )
-        hint = self.font_sm.render(hint_text, True, C.DIM)
+        hint = self.font_sm.render(hint_text, True, self._dim_color())
         max_hint_w = cw - 32
         if hint.get_width() > max_hint_w:
             # Truncate to fit
             text = hint_text
             while self.font_sm.size(text + "...")[0] > max_hint_w and len(text) > 3:
                 text = text[:-1]
-            hint = self.font_sm.render(text + "...", True, C.DIM)
+            hint = self.font_sm.render(text + "...", True, self._dim_color())
         surface.blit(hint, hint.get_rect(centerx=cw // 2, bottom=ch - 16))
 
         if self._safe_zone_save_prompt:
@@ -4530,12 +4692,12 @@ class TVTimeCapsule:
         )
         pygame.draw.rect(
             surface,
-            C.CYAN if yes_sel else C.DIM,
+            C.CYAN if yes_sel else self._dim_color(),
             yes_rect,
             2,
             border_radius=6,
         )
-        yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else C.DIM)
+        yes_txt = self.font_sm.render("Yes", True, C.BRIGHT if yes_sel else self._dim_color())
         surface.blit(yes_txt, yes_txt.get_rect(center=yes_rect.center))
 
         no_x = btn_start_x + btn_w + gap
@@ -4549,12 +4711,12 @@ class TVTimeCapsule:
         )
         pygame.draw.rect(
             surface,
-            C.CYAN if no_sel else C.DIM,
+            C.CYAN if no_sel else self._dim_color(),
             no_rect,
             2,
             border_radius=6,
         )
-        no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else C.DIM)
+        no_txt = self.font_sm.render("No", True, C.BRIGHT if no_sel else self._dim_color())
         surface.blit(no_txt, no_txt.get_rect(center=no_rect.center))
 
     # ─── Key configuration ────────────────────────────────────────────────
@@ -4577,7 +4739,7 @@ class TVTimeCapsule:
             page_label = self.font_sm.render(
                 f"Page {page + 1} / {page_count}",
                 True,
-                C.DIM,
+                self._dim_color(),
             )
             self.screen.blit(page_label, page_label.get_rect(centerx=self.sw // 2, centery=82))
 
@@ -4610,7 +4772,7 @@ class TVTimeCapsule:
 
                 key_name = format_action_keys(km, action_id)
                 label_color = C.BRIGHT if selected else C.WHITE
-                key_color = C.BRIGHT if selected else C.DIM
+                key_color = C.BRIGHT if selected else self._dim_color()
 
                 # Action label (left side) — truncate if needed
                 label_text = action_label
@@ -4647,7 +4809,7 @@ class TVTimeCapsule:
                     )
 
             # Bottom bar
-            bar_h = FOOTER_BAR_H
+            bar_h = self._footer_bar_h()
             fy = self.sh - bar_h
             pygame.draw.rect(self.screen, C.BG_FOOTER, (0, fy, self.sw, bar_h))
             pygame.draw.line(self.screen, C.BLUE, (0, fy), (self.sw, fy), 1)
@@ -4660,7 +4822,7 @@ class TVTimeCapsule:
                     f"{format_action_keys(km, 'back')} done  |  "
                     f"{format_action_keys(km, 'keymap_reset')} reset"
                 )
-            hint = self.font_sm.render(hint_text, True, C.DIM)
+            hint = self.font_sm.render(hint_text, True, self._dim_color())
             self.screen.blit(
                 hint, hint.get_rect(centerx=self.sw // 2, centery=fy + bar_h // 2)
             )
@@ -4737,7 +4899,7 @@ class TVTimeCapsule:
             page_label = self.font_sm.render(
                 f"Page {page + 1} / {page_count}",
                 True,
-                C.DIM,
+                self._dim_color(),
             )
             self.screen.blit(page_label, page_label.get_rect(centerx=self.sw // 2, centery=82))
 
@@ -4770,7 +4932,7 @@ class TVTimeCapsule:
 
                 binding_text = format_action_bindings(bindings, action_id)
                 label_color = C.BRIGHT if selected else C.WHITE
-                key_color = C.BRIGHT if selected else C.DIM
+                key_color = C.BRIGHT if selected else self._dim_color()
 
                 # Action label (left side) — truncate if needed
                 label_text = action_label
@@ -4807,7 +4969,7 @@ class TVTimeCapsule:
                     )
 
             # Bottom bar
-            bar_h = FOOTER_BAR_H
+            bar_h = self._footer_bar_h()
             fy = self.sh - bar_h
             pygame.draw.rect(self.screen, C.BG_FOOTER, (0, fy, self.sw, bar_h))
             pygame.draw.line(self.screen, C.BLUE, (0, fy), (self.sw, fy), 1)
@@ -4825,7 +4987,7 @@ class TVTimeCapsule:
                     f"{format_action_keys(km, 'back')} done  |  "
                     f"{format_action_keys(km, 'keymap_reset')} reset"
                 )
-            hint = self.font_sm.render(hint_text, True, C.DIM)
+            hint = self.font_sm.render(hint_text, True, self._dim_color())
             self.screen.blit(
                 hint, hint.get_rect(centerx=self.sw // 2, centery=fy + bar_h // 2)
             )
@@ -5259,7 +5421,7 @@ class TVTimeCapsule:
                 f"{format_action_keys(self.keymap, 'select')} retry  |  "
                 f"{format_action_keys(self.keymap, 'back')} back",
                 True,
-                C.DIM,
+                self._dim_color(),
             ),
             scale,
         )
@@ -5571,6 +5733,9 @@ class TVTimeCapsule:
             if self._show_list_test_pattern:
                 self._clear_show_list_test_pattern()
                 return
+            if self.view == self.WEATHER:
+                self._exit_weather_channel()
+                return
             if self._kids_mode_active:
                 if self.view == self.SHOW_LIST and self._is_split_library():
                     self.view = self.LIBRARY_SELECT
@@ -5779,6 +5944,7 @@ class TVTimeCapsule:
             self.GAMEPAD_CAPTURE,
             self.CONFIRM_EXIT,
             self.SAFE_ZONE_EDIT,
+            self.WEATHER,
         )
 
     def _enter_screensaver(self):
@@ -6154,6 +6320,9 @@ class TVTimeCapsule:
         if self.player:
             self.player.stop()
         self._playback_cache.shutdown()
+        if self._weather_channel is not None:
+            self._weather_channel.stop()
+            self._weather_channel = None
         if shutdown_snapshot is not None:
             self._channel_fx.play_shutdown(
                 self.screen,
@@ -6314,6 +6483,10 @@ class TVTimeCapsule:
                         self._note_keyboard_input()
                         key_action = self._action_for_key(event.key)
 
+                        if self.view == self.WEATHER:
+                            self._exit_weather_channel()
+                            continue
+
                         if self.view == self.KEY_CAPTURE:
                             if key_action == "back":
                                 self.view = self.KEY_CONFIG
@@ -6447,6 +6620,18 @@ class TVTimeCapsule:
                             self._toggle_footer_hints()
                             continue
 
+                        if key_action == "large_text_toggle":
+                            self._toggle_large_text()
+                            continue
+
+                        if key_action == "high_contrast_toggle":
+                            self._toggle_high_contrast()
+                            continue
+
+                        if key_action == "play_all_unwatched":
+                            self._play_all_unwatched_action()
+                            continue
+
                         if key_action == "letter_menu" and not self._kids_mode_active:
                             self._open_letter_menu()
                             continue
@@ -6513,6 +6698,9 @@ class TVTimeCapsule:
                         if not action:
                             continue
                         self._note_gamepad_input()
+                        if self.view == self.WEATHER:
+                            self._exit_weather_channel()
+                            continue
                         if self.view == self.CONFIRM_EXIT:
                             self._process_confirm_exit_action(action)
                             continue
@@ -6543,7 +6731,13 @@ class TVTimeCapsule:
                 if self.view == self.PLAYING:
                     continue
 
-                if self.view == self.CONFIRM_EXIT:
+                if self.view == self.WEATHER:
+                    with self._ui_layout(letterbox=True):
+                        self._draw_weather_channel()
+                        self.draw_channel_overlay()
+                    self._apply_channel_fx()
+                    self.present()
+                elif self.view == self.CONFIRM_EXIT:
                     self.draw_confirm_exit()
                     self._apply_channel_fx()
                     self.present()

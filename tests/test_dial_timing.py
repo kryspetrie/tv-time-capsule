@@ -75,6 +75,9 @@ class DialTimingAppTests(unittest.TestCase):
             self.assertEqual(app.channel_digits, "00")
             self.assertFalse(app._letter_menu_open)
             app._append_dial_digit(1)
+            # 00x dials now have a short hold; tick the timeout to commit.
+            with patch("pygame.time.get_ticks", return_value=app.channel_timer + CHANNEL_PENDING_MS):
+                app._tick_dial_timeout()
         self.assertEqual(app._show_list_test_pattern, "001")
         self.assertFalse(app._letter_menu_open)
         self.assertEqual(app.channel_error, "")

@@ -38,7 +38,7 @@ class KeymapDisplayTests(unittest.TestCase):
 
     def test_keymap_for_display(self):
         rows = keymap_for_display(DEFAULT_KEYMAP)
-        self.assertEqual(len(rows), 31)
+        self.assertEqual(len(rows), 34)
         up_row = next(r for r in rows if r["action"] == "up")
         self.assertEqual(up_row["key"], "up")
 

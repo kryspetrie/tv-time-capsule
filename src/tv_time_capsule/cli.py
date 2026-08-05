@@ -126,6 +126,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _is_raspberry_pi() -> bool:
+    """Return True when running on a Raspberry Pi."""
+    for path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
+        try:
+            with open(path) as f:
+                if "raspberry pi" in f.read().lower():
+                    return True
+        except (FileNotFoundError, OSError):
+            continue
+    return False
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -254,11 +266,33 @@ def main(argv: list[str] | None = None) -> None:
             print("\nWARNING: numpy not found. Embedded video requires numpy.")
             print("  Install: pip install numpy")
 
+    # Start systemd watchdog on Raspberry Pi (production hardware only).
+    watchdog_started = False
+    if _is_raspberry_pi():
+        try:
+            from .systemd_watchdog import start_watchdog_thread
+
+            start_watchdog_thread(interval_sec=10.0)
+            watchdog_started = True
+            LOG.info("systemd watchdog enabled (10s interval)")
+        except ImportError:
+            LOG.debug("systemd watchdog not available (sdnotify not installed)")
+        except Exception as e:
+            LOG.debug("systemd watchdog initialization skipped: %s", e)
+
     try:
         app.run()
     except KeyboardInterrupt:
         LOG.info("interrupted (Ctrl+C)")
     finally:
+        if watchdog_started:
+            try:
+                from .systemd_watchdog import stop_watchdog_thread
+
+                stop_watchdog_thread()
+                LOG.debug("systemd watchdog stopped")
+            except Exception:
+                pass
         if admin_server is not None:
             admin_server.stop()
         if pygame.get_init():

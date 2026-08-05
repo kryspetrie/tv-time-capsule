@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pygame
 
 from tv_time_capsule.analog_artifacts import AnalogArtifacts
+from tv_time_capsule.config import CHANNEL_PENDING_MS
 from tv_time_capsule.test_patterns import (
     SHOW_LIST_TEST_PATTERNS,
     is_show_list_test_dial,
@@ -74,8 +75,12 @@ class TestPatternDialViewsTests(unittest.TestCase):
         ):
             with self.subTest(view=view_name):
                 app = self._app(view_name)
-                for digit in (0, 0, 1):
-                    app._append_dial_digit(digit)
+                with patch.object(app, "_animate_channel_snow_burst"):
+                    for digit in (0, 0, 1):
+                        app._append_dial_digit(digit)
+                    # 00x dials now have a short hold; tick the timeout to commit.
+                    with patch("pygame.time.get_ticks", return_value=app.channel_timer + CHANNEL_PENDING_MS):
+                        app._tick_dial_timeout()
                 self.assertEqual(app._show_list_test_pattern, "001")
                 self.assertEqual(app.channel_error, "")
                 app._process_browse_action("back")

@@ -346,6 +346,18 @@ def _parse_cache(raw: dict | None) -> dict[str, Any]:
     }
 
 
+def _parse_accessibility(raw: dict | None) -> dict[str, Any]:
+    acc = raw or {}
+    if not isinstance(acc, dict):
+        acc = {}
+    defaults = _default_config()["accessibility"]
+    return {
+        "large_text": bool(acc.get("large_text", defaults["large_text"])),
+        "high_contrast": bool(acc.get("high_contrast", defaults["high_contrast"])),
+        "play_all_unwatched": bool(acc.get("play_all_unwatched", defaults["play_all_unwatched"])),
+    }
+
+
 def _parse_admin(raw: dict | None) -> dict[str, Any]:
     admin = raw or {}
     if not isinstance(admin, dict):
@@ -420,6 +432,11 @@ def _default_config() -> dict[str, Any]:
             "port": 8765,
             "bind": "0.0.0.0",
         },
+        "accessibility": {
+            "large_text": False,
+            "high_contrast": False,
+            "play_all_unwatched": False,
+        },
     }
 
 
@@ -461,6 +478,7 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "network": _parse_network(raw.get("network")),
         "cache": _parse_cache(raw.get("cache")),
         "admin": _parse_admin(raw.get("admin")),
+        "accessibility": _parse_accessibility(raw.get("accessibility")),
     }
 
 
