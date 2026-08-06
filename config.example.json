@@ -150,6 +150,56 @@
     "volume": null
   },
 
+  "youtube_channels": [
+    {
+      "_about": "Virtual shows from YouTube (channels or a specific playlist URL). Optional title override. Set playlists_as_shows to unroll each public playlist into its own show (e.g. 90s Project). Dial numbers use channels.order / channels.numbers like local shows (web admin Channel lineup). Catalog cached under ~/.local/share/tv-time-capsule/youtube/; playback uses headless Chrome."
+    },
+    { "url": "https://www.youtube.com/@msrachel/", "title": "Ms Rachel" },
+    { "url": "https://www.youtube.com/@BlueyOfficialChannel", "title": "Bluey" },
+    { "url": "https://www.youtube.com/@MisterRogersNeighborhood", "title": "Mister Rogers' Neighborhood" },
+    { "url": "https://www.youtube.com/@Raffi", "title": "Raffi" },
+    { "url": "https://www.youtube.com/@SciShowKids", "title": "SciShow Kids" },
+    { "url": "https://www.youtube.com/@PBSKIDS", "title": "PBS KIDS" },
+    { "url": "https://www.youtube.com/channel/UCOXkrXRpNfUu6mypF7NZxnA", "title": "Ms Moni" },
+    { "url": "https://www.youtube.com/@thomasandfriends", "title": "Thomas & Friends" },
+    { "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/", "title": "Bill Nye the Science Guy" },
+    {
+      "url": "https://www.youtube.com/watch?v=yzPeIKhMUOU&list=PL8SFNbbOmAYNMcH8uywT24j5YXJTC2WTZ",
+      "title": "Beakman's World"
+    },
+    { "url": "https://www.youtube.com/@ReadingRainbowOfficial", "title": "Reading Rainbow" },
+    { "url": "https://www.youtube.com/@SesameStreet", "title": "Sesame Street" },
+    {
+      "url": "https://www.youtube.com/watch?v=-rJ0nxLQ8wU&list=PLCeScks4FrgKF4Vp8-1C4OWbgJrn5BbkW",
+      "title": "The Magic School Bus"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=dcBNHNs6TdY&list=PLCeScks4FrgJTUTbM19xR52SM1ss3I65U",
+      "title": "Clifford the Big Red Dog"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=2ptL3fim9Uw&list=PLCeScks4FrgKPU26Y3gZeLTIdqK6ZggYg",
+      "title": "Animorphs"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=WHIod8ulH3E&list=PLCeScks4FrgIg0_AKYL2UiAJRH6jiGWJ_",
+      "title": "Goosebumps"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=elf250uvecY&list=PLCeScks4FrgK-ZOSpDTZmfVz7xtGY5yXv",
+      "title": "Clifford's Puppy Days"
+    },
+    {
+      "url": "https://www.youtube.com/watch?v=cRe1cta5nZk&list=PLBSUN2PpOgePQlEtu-ZSMcHJf1zDA8a_M",
+      "title": "Arthur"
+    },
+    {
+      "url": "https://www.youtube.com/@90sProject",
+      "title": "90s Project",
+      "playlists_as_shows": true
+    }
+  ],
+
   "_channels": {
     "order": "Show folder names in desired browse / priority order (unknown names skipped)",
     "numbers": "Optional fixed channel numbers; unlisted shows use 1-based position in the ordered lineup"

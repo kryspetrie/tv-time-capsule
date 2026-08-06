@@ -460,6 +460,151 @@ def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
     }
 
 
+def _parse_youtube_channels(raw: list | None) -> list[dict[str, Any]]:
+    """YouTube channels/playlists listed as virtual shows.
+
+    Each entry needs ``handle`` (``@name``) and/or ``url`` (channel URL,
+    ``/channel/UC…``, or a playlist / watch?list= URL). Optional ``title``
+    overrides the show name. Set ``playlists_as_shows`` to unroll public
+    playlists (except All Videos) into distinct shows. Dial numbers use the
+    same ``channels.order`` / ``channels.numbers`` path as local shows (web
+    admin); optional ``channel`` on an entry is still accepted as a convenience
+    merge into numbers.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        handle = item.get("handle")
+        url = item.get("url")
+        handle_s = str(handle).strip() if handle is not None else ""
+        url_s = str(url).strip() if url is not None else ""
+        if not handle_s and not url_s:
+            continue
+        if handle_s and not handle_s.startswith("@") and not handle_s.startswith("UC"):
+            # Bare name → @handle
+            if "/" not in handle_s and " " not in handle_s:
+                handle_s = f"@{handle_s}"
+        title = item.get("title")
+        title_s = str(title).strip() if title is not None else ""
+        channel_num = item.get("channel")
+        try:
+            channel_i = int(channel_num) if channel_num is not None else None
+        except (TypeError, ValueError):
+            channel_i = None
+        if channel_i is not None and channel_i < 1:
+            channel_i = None
+        entry: dict[str, Any] = {}
+        if handle_s:
+            entry["handle"] = handle_s
+        if url_s:
+            entry["url"] = url_s
+        if title_s:
+            entry["title"] = title_s
+        if channel_i is not None:
+            entry["channel"] = channel_i
+        if bool(item.get("playlists_as_shows")):
+            entry["playlists_as_shows"] = True
+            # When unrolling playlists, skip the mega "All Videos" channel show
+            # unless the user explicitly keeps it.
+            if "include_all_videos" in item:
+                entry["include_all_videos"] = bool(item.get("include_all_videos"))
+            else:
+                entry["include_all_videos"] = False
+        elif "include_all_videos" in item:
+            entry["include_all_videos"] = bool(item.get("include_all_videos"))
+        out.append(entry)
+    return out
+
+
+def _default_youtube_channels() -> list[dict[str, Any]]:
+    """Kids / classic YouTube shows preloaded in the example and default config."""
+    return [
+        {"url": "https://www.youtube.com/@msrachel/", "title": "Ms Rachel"},
+        {"url": "https://www.youtube.com/@BlueyOfficialChannel", "title": "Bluey"},
+        {
+            "url": "https://www.youtube.com/@MisterRogersNeighborhood",
+            "title": "Mister Rogers' Neighborhood",
+        },
+        {"url": "https://www.youtube.com/@Raffi", "title": "Raffi"},
+        {"url": "https://www.youtube.com/@SciShowKids", "title": "SciShow Kids"},
+        {"url": "https://www.youtube.com/@PBSKIDS", "title": "PBS KIDS"},
+        {
+            "url": "https://www.youtube.com/channel/UCOXkrXRpNfUu6mypF7NZxnA",
+            "title": "Ms Moni",
+        },
+        {
+            "url": "https://www.youtube.com/@thomasandfriends",
+            "title": "Thomas & Friends",
+        },
+        {
+            "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/",
+            "title": "Bill Nye the Science Guy",
+        },
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=yzPeIKhMUOU"
+                "&list=PL8SFNbbOmAYNMcH8uywT24j5YXJTC2WTZ"
+            ),
+            "title": "Beakman's World",
+        },
+        {
+            "url": "https://www.youtube.com/@ReadingRainbowOfficial",
+            "title": "Reading Rainbow",
+        },
+        {"url": "https://www.youtube.com/@SesameStreet", "title": "Sesame Street"},
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=-rJ0nxLQ8wU"
+                "&list=PLCeScks4FrgKF4Vp8-1C4OWbgJrn5BbkW"
+            ),
+            "title": "The Magic School Bus",
+        },
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=dcBNHNs6TdY"
+                "&list=PLCeScks4FrgJTUTbM19xR52SM1ss3I65U"
+            ),
+            "title": "Clifford the Big Red Dog",
+        },
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=2ptL3fim9Uw"
+                "&list=PLCeScks4FrgKPU26Y3gZeLTIdqK6ZggYg"
+            ),
+            "title": "Animorphs",
+        },
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=WHIod8ulH3E"
+                "&list=PLCeScks4FrgIg0_AKYL2UiAJRH6jiGWJ_"
+            ),
+            "title": "Goosebumps",
+        },
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=elf250uvecY"
+                "&list=PLCeScks4FrgK-ZOSpDTZmfVz7xtGY5yXv"
+            ),
+            "title": "Clifford's Puppy Days",
+        },
+        {
+            "url": (
+                "https://www.youtube.com/watch?v=cRe1cta5nZk"
+                "&list=PLBSUN2PpOgePQlEtu-ZSMcHJf1zDA8a_M"
+            ),
+            "title": "Arthur",
+        },
+        {
+            "url": "https://www.youtube.com/@90sProject",
+            "title": "90s Project",
+            "playlists_as_shows": True,
+        },
+    ]
+
+
 def _parse_admin(raw: dict | None) -> dict[str, Any]:
     admin = raw or {}
     if not isinstance(admin, dict):
@@ -550,6 +695,7 @@ def _default_config() -> dict[str, Any]:
             "filters": None,
             "volume": None,
         },
+        "youtube_channels": _default_youtube_channels(),
     }
 
 
@@ -594,6 +740,11 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "accessibility": _parse_accessibility(raw.get("accessibility")),
         "weather": _parse_weather(raw.get("weather")),
         "retro_tv": _parse_retro_tv(raw.get("retro_tv")),
+        "youtube_channels": _parse_youtube_channels(
+            raw["youtube_channels"]
+            if "youtube_channels" in raw
+            else _default_youtube_channels()
+        ),
     }
 
 

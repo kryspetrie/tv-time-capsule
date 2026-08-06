@@ -494,6 +494,36 @@ Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated 
 
 See [Fun tweaks & easter eggs → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
 
+## `youtube_channels`
+
+List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Long-press **R** / admin rescan refreshes the cache. Playback opens `youtube.com/watch?v=…` in Chrome CDP screencast (requires Chrome/Chromium, same as Weather and Retro TV).
+
+**Channel numbers** work like local shows: auto 1-based position in the ordered lineup, with optional overrides via `channels.order` / `channels.numbers` or the web admin **Channel lineup** page.
+
+```json
+{
+  "youtube_channels": [
+    { "url": "https://www.youtube.com/@msrachel/", "title": "Ms Rachel" },
+    {
+      "url": "https://www.youtube.com/playlist?list=PL8SFNbbOmAYNMcH8uywT24j5YXJTC2WTZ",
+      "title": "Beakman's World"
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `handle` | one of `handle` / `url` | Channel handle (`@name`, bare name, or `UC…` id) |
+| `url` | one of `handle` / `url` | Channel URL, `/channel/UC…`, or a playlist / `watch?…&list=` URL |
+| `title` | no | Show name override (defaults to the YouTube channel or playlist title) |
+| `channel` | no | Optional fixed dial number (merged into `channels.numbers`; prefer web admin) |
+| `playlists_as_shows` | no | When true, each public playlist (except **All Videos**) becomes its own show on the browse list — useful when a channel is a library of series playlists (e.g. 90s Project) |
+| `include_all_videos` | no | With `playlists_as_shows`, also keep the parent channel as an **All Videos** show (default **false** when unrolling) |
+
+For full channels, season **0** is **All Videos** (uploads); other seasons are public playlists — unless `playlists_as_shows` is set, in which case those playlists appear as separate shows (flat episode lists). A playlist-only URL becomes a single-season show. Private/unlisted playlists are not included. If Chrome is missing, shows still appear from cache when available; play shows **YOUTUBE UNAVAILABLE**.
+
+The default / example config preloads a kids and classic set (Ms Rachel, Bluey, Sesame Street, Beakman’s World playlist, **90s Project with `playlists_as_shows`**, etc.). Set `"youtube_channels": []` to disable.
 ## Precedence
 
 ### Config file search

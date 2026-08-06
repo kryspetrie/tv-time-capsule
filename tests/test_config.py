@@ -80,6 +80,10 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertIsNone(cfg["weather"]["latitude"])
         self.assertIsNone(cfg["retro_tv"]["filters"])
         self.assertIsNone(cfg["retro_tv"]["volume"])
+        self.assertGreaterEqual(len(cfg["youtube_channels"]), 10)
+        self.assertTrue(
+            any(c.get("title") == "Ms Rachel" for c in cfg["youtube_channels"])
+        )
 
 
 class WeatherConfigTests(unittest.TestCase):

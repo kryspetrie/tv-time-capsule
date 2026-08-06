@@ -146,7 +146,7 @@ so it never changes monitor resolution or disturbs desktop scaling.
 3. Discover shows under media paths (+ mountpoints)  
 4. Open the pygame UI  
 
-If no shows are found, the process exits with a short message pointing at the config file.
+If no shows are found, the process exits with a short message pointing at the config file (unless `youtube_channels` is configured — those load as virtual shows on startup).
 
 ## Next steps
 

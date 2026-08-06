@@ -79,8 +79,9 @@ make_clip() {
         return 0
     fi
     echo "  clip $(basename "$out") (${dur}s from $(basename "$src") @ ${ss}s)"
+    rm -f "$out"
     ffmpeg -y -loglevel error -ss "$ss" -t "$dur" -i "$src" \
-        -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
+        -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
         -an "$out"
     validate_video "$out"
     local got
@@ -88,24 +89,22 @@ make_clip() {
     if awk -v g="$got" -v want="$dur" 'BEGIN { exit !(g < want - 1.5 || g > want + 1.5) }'; then
         echo "  warn: $(basename "$out") is ${got}s (wanted ${dur}s), re-trimming"
         ffmpeg -y -loglevel error -t "$dur" -i "$out" \
-            -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -an "$out.tmp"
+            -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -an "$out.tmp"
         mv "$out.tmp" "$out"
     fi
 }
 
 make_concat_clip() {
-    # Concatenate equal slices from two 10s sources into one re-encoded clip.
-    local out="$1" dur="$2" a="$3" b="$4"
+    # Loop a short source to the requested duration. Avoid filter_complex
+    # concat — it has hung / ballooned on some ffmpeg builds with BBB+Sintel.
+    local out="$1" dur="$2" a="$3" _b="$4"
     if [[ -f "$out" && "$FORCE" -eq 0 ]]; then
         return 0
     fi
-    local half=$((dur / 2))
-    local rest=$((dur - half))
-    echo "  clip $(basename "$out") (${dur}s concat)"
-    ffmpeg -y -loglevel error \
-        -t "$half" -i "$a" -t "$rest" -i "$b" \
-        -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]" -map "[v]" \
-        -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
+    echo "  clip $(basename "$out") (${dur}s looped from $(basename "$a"))"
+    rm -f "$out"
+    ffmpeg -y -loglevel error -stream_loop 2 -t "$dur" -i "$a" \
+        -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
         -an "$out"
     validate_video "$out"
 }

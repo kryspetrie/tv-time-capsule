@@ -121,6 +121,12 @@ from .hidden_channels import (
 )
 from .weather_channel import WeatherChannel, resolve_weather_location
 from .retro_tv_channel import RetroTvChannel, url_for_decade
+from .youtube_catalog import (
+    is_youtube_episode,
+    load_youtube_shows,
+    merge_youtube_channel_numbers,
+)
+from .youtube_player import YouTubePlayer
 from .state import (
     clear_resume_ep,
     reset_episode_progress,
@@ -336,6 +342,10 @@ class TVTimeCapsule:
         self._retro_tv_year_flash: str = ""
         self._retro_tv_menu_open = False
         self._retro_tv_menu_cursor = 0
+        self._youtube_lock = threading.Lock()
+        self._youtube_pending: dict[str, dict] | None = None
+        self._youtube_worker: threading.Thread | None = None
+        self._youtube_refresh_force = False
         gp_cfg = self.config.get("gamepad") or {}
         gp_bindings = load_gamepad_bindings(self.config)
         self._gamepad_bindings = gp_bindings
@@ -743,6 +753,10 @@ class TVTimeCapsule:
             self._mode_toast_message = "All episodes watched"
             self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
             return
+        if not self._can_start_episode(episodes[0]):
+            self.channel_error = "NO PLAYER"
+            self.channel_error_time = pygame.time.get_ticks()
+            return
         self.playing_episodes = episodes
         self.playing_index = 0
         self.playing_show = show_name
@@ -751,10 +765,6 @@ class TVTimeCapsule:
         self._start_current_episode(show_splash=True)
 
     def _kids_play_show(self, show_name: str) -> None:
-        if not self.player_cmd and not self.player:
-            self.channel_error = "NO PLAYER"
-            self.channel_error_time = pygame.time.get_ticks()
-            return
         show = self.shows.get(show_name)
         if not show:
             return
@@ -769,6 +779,10 @@ class TVTimeCapsule:
         self.cur_season = season
         episodes = show.get("seasons", {}).get(season, {}).get("episodes", [])
         if not episodes:
+            return
+        if not self._can_start_episode(episodes[0]):
+            self.channel_error = "NO PLAYER"
+            self.channel_error_time = pygame.time.get_ticks()
             return
 
         watched_eps = get_watched_episodes(self.state, show_name, season)
@@ -809,7 +823,10 @@ class TVTimeCapsule:
 
     def _apply_channel_lineup(self):
         """Order ``show_names`` and rebuild channel maps from config."""
-        channels_cfg = self.config.get("channels") or {}
+        channels_cfg = merge_youtube_channel_numbers(
+            self.config.get("channels") or {},
+            self.shows,
+        )
         ordered, show_to_ch, ch_to_show = build_channel_lineup(
             self.shows.keys(), channels_cfg
         )
@@ -834,21 +851,230 @@ class TVTimeCapsule:
             return self.MOVIE_LIST
         return self.SHOW_LIST
 
+    def _merge_youtube_into_shows(
+        self,
+        *,
+        force_refresh: bool = False,
+        schedule_refresh: bool = True,
+    ) -> None:
+        """Overlay YouTube channels from cache/stubs; scrape runs in the background."""
+        yt_shows = load_youtube_shows(
+            self.config,
+            force_refresh=False,
+            allow_scrape=False,
+            include_stubs=True,
+        )
+        if yt_shows:
+            self.shows.update(yt_shows)
+            if self.library_layout in ("legacy", "movies_only") and not self.movies:
+                if all(
+                    isinstance(s, dict) and s.get("source") == "youtube"
+                    for s in self.shows.values()
+                ):
+                    self.library_layout = "legacy"
+        if schedule_refresh and (self.config.get("youtube_channels") or []):
+            self._schedule_youtube_catalog_refresh(force=force_refresh)
+
+    def _schedule_youtube_catalog_refresh(self, *, force: bool = False) -> None:
+        """Kick off a background Chrome scrape if one is not already running."""
+        if force:
+            self._youtube_refresh_force = True
+        worker = self._youtube_worker
+        if worker is not None and worker.is_alive():
+            return
+
+        def _run() -> None:
+            try:
+                do_force = self._youtube_refresh_force
+                self._youtube_refresh_force = False
+                LOG.info("YouTube catalog refresh starting (force=%s)", do_force)
+                # One pass including public playlists as seasons. Publish after
+                # each channel so the UI never gets stuck on uploads-only.
+                from .youtube_catalog import (
+                    _build_catalog_from_ws,
+                    _close_catalog_chrome,
+                    _open_catalog_chrome,
+                    _write_cache,
+                    cache_key_for_entry,
+                    expand_youtube_shows,
+                    load_youtube_shows,
+                    normalize_channel_ref,
+                    sanitize_display_title,
+                    show_from_cache_payload,
+                    youtube_cache_dir,
+                )
+
+                accumulated = load_youtube_shows(
+                    self.config,
+                    force_refresh=False,
+                    allow_scrape=False,
+                    include_stubs=False,
+                )
+                if accumulated:
+                    with self._youtube_lock:
+                        self._youtube_pending = dict(accumulated)
+
+                entries = [
+                    e
+                    for e in (self.config.get("youtube_channels") or [])
+                    if isinstance(e, dict)
+                ]
+                if not entries:
+                    return
+
+                cdir = youtube_cache_dir()
+                need: list[dict] = []
+                for entry in entries:
+                    key = cache_key_for_entry(entry)
+                    from .youtube_catalog import _cache_fresh, _read_cache, playlist_id_from_url
+
+                    payload = _read_cache(cdir / f"{key}.json")
+                    seasons = (payload or {}).get("seasons") or {}
+                    has_extra = any(str(k) != "0" for k in seasons.keys())
+                    playlists_done = bool((payload or {}).get("playlists_fetched"))
+                    url = (entry.get("url") or "").strip()
+                    is_playlist_only = bool(playlist_id_from_url(url))
+                    # Refresh when forced, missing, stale, or an uploads-only cache
+                    # that never completed a playlist pass.
+                    if do_force or payload is None or not _cache_fresh(payload):
+                        need.append(entry)
+                    elif not is_playlist_only and not has_extra and not playlists_done:
+                        need.append(entry)
+
+                if not need:
+                    LOG.info("YouTube catalog refresh: nothing to scrape")
+                    return
+
+                opened = _open_catalog_chrome()
+                if opened is None:
+                    LOG.warning("YouTube catalog Chrome unavailable")
+                    return
+                chrome, ws, user_data = opened
+                try:
+                    for entry in need:
+                        ref = normalize_channel_ref(entry)
+                        if not ref:
+                            continue
+                        key = cache_key_for_entry(entry)
+                        try:
+                            fresh = _build_catalog_from_ws(
+                                ws, ref, include_channel_playlists=True
+                            )
+                        except Exception as exc:
+                            LOG.warning("YouTube scrape failed for %s: %s", ref, exc)
+                            fresh = None
+                        if not fresh:
+                            continue
+                        fresh["cache_key"] = key
+                        if entry.get("handle"):
+                            fresh["handle"] = entry["handle"]
+                        _write_cache(cdir / f"{key}.json", fresh)
+                        show = show_from_cache_payload(fresh, entry=entry)
+                        if not show:
+                            continue
+                        title = sanitize_display_title(
+                            (entry.get("title") or "").strip()
+                            or str(fresh.get("title") or "").strip()
+                            or key
+                        ) or key
+                        # Drop prior shows from this entry before merging expansion.
+                        parent = title
+                        accumulated = {
+                            n: s
+                            for n, s in accumulated.items()
+                            if not (
+                                isinstance(s, dict)
+                                and s.get("source") == "youtube"
+                                and (
+                                    n == parent
+                                    or s.get("youtube_parent_title") == parent
+                                    or (
+                                        entry.get("url")
+                                        and s.get("youtube_url") == entry.get("url")
+                                    )
+                                    or (
+                                        entry.get("handle")
+                                        and s.get("youtube_handle")
+                                        == entry.get("handle")
+                                    )
+                                )
+                            )
+                        }
+                        expanded = expand_youtube_shows(
+                            title, show, entry, used_names=set(accumulated.keys())
+                        )
+                        accumulated.update(expanded)
+                        with self._youtube_lock:
+                            self._youtube_pending = dict(accumulated)
+                        LOG.info(
+                            "YouTube catalog updated %s → %d show(s)",
+                            title,
+                            len(expanded),
+                        )
+                finally:
+                    _close_catalog_chrome(chrome, ws, user_data)
+
+                LOG.info(
+                    "YouTube catalog refresh finished (%d show(s))", len(accumulated)
+                )
+            except Exception:
+                LOG.exception("YouTube catalog refresh failed")
+            finally:
+                self._youtube_worker = None
+
+        self._youtube_worker = threading.Thread(
+            target=_run, daemon=True, name="youtube-catalog"
+        )
+        self._youtube_worker.start()
+
+    def _tick_youtube_catalog(self) -> None:
+        """Apply background catalog results on the main thread."""
+        with self._youtube_lock:
+            pending = self._youtube_pending
+            self._youtube_pending = None
+        if pending is None:
+            return
+
+        # Drop previous YouTube entries, then apply the refreshed set.
+        self.shows = {
+            k: v
+            for k, v in self.shows.items()
+            if not (isinstance(v, dict) and v.get("source") == "youtube")
+        }
+        self.shows.update(pending)
+        self._apply_channel_lineup()
+        self.library = Library(
+            shows=self.shows,
+            movies=self.movies,
+            show_names=tuple(self.show_names),
+            movie_names=tuple(self.movie_names),
+            show_uuids=self.show_uuids,
+            movie_uuids=self.movie_uuids,
+            layout=self.library_layout,
+        )
+        if self.view == self.SHOW_LIST and self.show_names:
+            self.cursor = min(self.cursor, len(self.show_names) - 1)
+
     def _apply_library_discovery(
         self,
         discovery: dict | None = None,
         *,
         set_initial_view: bool = False,
+        force_youtube_refresh: bool = False,
     ) -> None:
         if discovery is None:
             discovery = discover_library(self.media_paths, device_name=self._device_name)
         self.library_layout = discovery.get("layout", "legacy")
-        self.shows = discovery.get("shows") or {}
+        self.shows = dict(discovery.get("shows") or {})
         self.movies = discovery.get("movies") or {}
         self.show_uuids = discovery.get("show_uuids") or {}
         self.movie_uuids = discovery.get("movie_uuids") or {}
         self._uuid_to_show = {v: k for k, v in self.show_uuids.items()}
         self._uuid_to_movie = {v: k for k, v in self.movie_uuids.items()}
+        self._merge_youtube_into_shows(
+            force_refresh=force_youtube_refresh,
+            schedule_refresh=True,
+        )
         self._apply_channel_lineup()
         self._apply_movie_lineup()
         self.library = Library(
@@ -866,6 +1092,42 @@ class TVTimeCapsule:
 
     def _display_channel(self, show_name: str) -> int:
         return self._show_channel.get(show_name, 0)
+
+    def _is_youtube_show(self, show_name: str | None) -> bool:
+        if not show_name:
+            return False
+        show = self.shows.get(show_name)
+        return isinstance(show, dict) and show.get("source") == "youtube"
+
+    def _title_badge_text(self, *, show: str | None = None, movie: str | None = None) -> str:
+        """Header badge for kids-tagged titles (parent mode only)."""
+        kids = False
+        if show:
+            kids = self._title_kids_tagged(show=show)
+        elif movie:
+            kids = self._title_kids_tagged(movie=movie)
+        if not self._kids_mode_active and kids:
+            return "[kids]"
+        return ""
+
+    def _show_info_line(self, show_name: str, data: dict | None = None) -> str:
+        """Subtitle under a show title (episode count, optional YouTube marker)."""
+        data = data if data is not None else self.shows.get(show_name, {})
+        is_yt = isinstance(data, dict) and data.get("source") == "youtube"
+        n_total = self._count_total_eps(data) if isinstance(data, dict) else 0
+        loading = bool(isinstance(data, dict) and data.get("youtube_loading")) or (
+            is_yt and n_total == 0
+        )
+        if loading:
+            return "Scanning... - Youtube"
+        seasons = self.seasons_for_show(show_name)
+        if len(seasons) > 1:
+            info = f"{len(seasons)} seasons - {n_total} ep"
+        else:
+            info = f"{n_total} ep"
+        if is_yt:
+            info = f"{info} - Youtube"
+        return info
 
     def _display_movie_channel(self, movie_key: str) -> int:
         return self._movie_channel.get(movie_key, 0)
@@ -887,30 +1149,35 @@ class TVTimeCapsule:
         if self.view == self.PLAYING:
             return False
 
+        has_youtube = bool(self.config.get("youtube_channels"))
+
         # Check each media path for presence before scanning.
         # If no media is present (unplugged USB, unmounted share), preserve
-        # the current in-memory library and don't prune.
+        # the current in-memory library and don't prune — unless YouTube
+        # channels are configured (catalog refresh is still useful).
         any_present = False
         for mp in self.media_paths:
             if is_media_present(mp, self._device_name):
                 any_present = True
                 break
 
-        if not any_present:
+        if not any_present and not has_youtube:
             LOG.info("No media present — skipping rescan, preserving state")
             return False
 
-        # Check directory signatures — skip expensive rescan if nothing changed.
+        # Check directory signatures — skip expensive disk rescan if nothing
+        # changed (YouTube TTL refresh still runs when channels are configured).
         all_unchanged = True
-        for mp in self.media_paths:
-            sig = directory_signature(mp)
-            cached = self._media_signatures.get(mp)
-            if cached is None or sig != cached:
-                all_unchanged = False
-                self._media_signatures[mp] = sig
-        if all_unchanged and self._media_signatures:
-            LOG.debug("Media signatures unchanged — skipping rescan")
-            return False
+        if any_present:
+            for mp in self.media_paths:
+                sig = directory_signature(mp)
+                cached = self._media_signatures.get(mp)
+                if cached is None or sig != cached:
+                    all_unchanged = False
+                    self._media_signatures[mp] = sig
+            if all_unchanged and self._media_signatures and not has_youtube:
+                LOG.debug("Media signatures unchanged — skipping rescan")
+                return False
 
         prev_show = None
         prev_movie = None
@@ -924,8 +1191,28 @@ class TVTimeCapsule:
         ):
             prev_movie = self.movie_names[self.cursor]
 
-        discovery = discover_library(self.media_paths, device_name=self._device_name)
-        self._apply_library_discovery(discovery)
+        if any_present and not (all_unchanged and self._media_signatures and has_youtube):
+            discovery = discover_library(self.media_paths, device_name=self._device_name)
+            self._apply_library_discovery(discovery, force_youtube_refresh=True)
+        elif has_youtube:
+            # Media unchanged (or absent): refresh YouTube catalog in background.
+            disk_shows = {
+                k: v
+                for k, v in self.shows.items()
+                if not (isinstance(v, dict) and v.get("source") == "youtube")
+            }
+            self.shows = disk_shows
+            self._merge_youtube_into_shows(force_refresh=True, schedule_refresh=True)
+            self._apply_channel_lineup()
+            self.library = Library(
+                shows=self.shows,
+                movies=self.movies,
+                show_names=tuple(self.show_names),
+                movie_names=tuple(self.movie_names),
+                show_uuids=self.show_uuids,
+                movie_uuids=self.movie_uuids,
+                layout=self.library_layout,
+            )
 
         if prev_view == self.LIBRARY_SELECT and self.library_layout == "split":
             self.view = self.LIBRARY_SELECT
@@ -1372,6 +1659,13 @@ class TVTimeCapsule:
     def _draw_rescan_banner(self):
         if pygame.time.get_ticks() >= self._rescan_banner_until:
             return
+        # Avoid stacking on top of channel_error / mode toast snackbars.
+        now = pygame.time.get_ticks()
+        if self.channel_error and self.channel_error_time > 0:
+            if now - self.channel_error_time < CHANNEL_ERROR_MS:
+                return
+        if self._mode_toast_message and now < self._mode_toast_until:
+            return
         self._draw_popup_banner("Updating channels...")
 
     def _tick_reset_hold(self):
@@ -1409,6 +1703,8 @@ class TVTimeCapsule:
 
     def _get_duration(self, filepath):
         """Lazy ffprobe duration lookup, cached. Returns 'MM:SS' or empty string."""
+        if not filepath or str(filepath).startswith("youtube:"):
+            return ""
         if filepath in self._duration_cache:
             return self._duration_cache[filepath]
         try:
@@ -1932,6 +2228,38 @@ class TVTimeCapsule:
         return self._scale_overlay_surface(
             font.render((trimmed + "...") if trimmed else "...", True, color), scale
         )
+
+    def _blit_wrapped_overlay_text(
+        self,
+        text: str,
+        font,
+        color,
+        *,
+        centerx: int,
+        top: int,
+        max_w: int,
+        scale: float,
+        line_gap: int = 4,
+        max_lines: int = 4,
+    ) -> int:
+        """Word-wrap and blit overlay text. Returns the y just below the last line."""
+        if not text or max_w <= 8:
+            return top
+        unscaled_max = max(8, int(max_w / max(scale, 0.01)))
+        lines = self._wrap_text(text, font, unscaled_max)
+        if len(lines) > max_lines:
+            lines = lines[: max_lines - 1] + [lines[max_lines - 1] + "…"]
+        y = top
+        for line in lines:
+            surf = self._scale_overlay_surface(font.render(line, True, color), scale)
+            # If a single word still overflows, truncate that line.
+            if surf.get_width() > max_w:
+                surf = self._truncate_overlay_text(
+                    line, font, color, max_w, scale=scale
+                )
+            self.screen.blit(surf, surf.get_rect(centerx=centerx, top=y))
+            y += surf.get_height() + line_gap
+        return y - line_gap if lines else top
 
     def _ui_letterbox_color(self) -> tuple[int, int, int]:
         """Margin fill matching the active screen so the UI appears inset, not framed."""
@@ -2626,29 +2954,41 @@ class TVTimeCapsule:
 
         ep_num = episode["number"]
         ep_name = episode.get("name") or ""
+        centerx = rect.x + rect.w // 2
+        text_max_w = rect.w - pad * 2
+        sub_top = mid_y + 55
+
         if getattr(self, "_playing_is_movie", False) or season is None:
-            label = show
-            s = self._scale_overlay_surface(
-                self.font_md.render(label, True, C.WHITE), scale
+            title = ep_name or show
+            bottom = self._blit_wrapped_overlay_text(
+                title,
+                self.font_md,
+                C.WHITE,
+                centerx=centerx,
+                top=mid_y - 20,
+                max_w=text_max_w,
+                scale=scale,
             )
-            self.screen.blit(
-                s, s.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y - 10)
-            )
+            sub_top = max(sub_top, bottom + 14)
         else:
             label = f"S-{season:02d} - E-{ep_num:02d}"
             s = self._scale_overlay_surface(
                 self.font_md.render(label, True, C.WHITE), scale
             )
             self.screen.blit(
-                s, s.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y - 30)
+                s, s.get_rect(centerx=centerx, centery=mid_y - 30)
             )
             if ep_name:
-                n = self._truncate_overlay_text(
-                    ep_name, self.font_md, C.BLUE, rect.w - pad * 2, scale=scale
+                bottom = self._blit_wrapped_overlay_text(
+                    ep_name,
+                    self.font_md,
+                    C.BLUE,
+                    centerx=centerx,
+                    top=mid_y + 4,
+                    max_w=text_max_w,
+                    scale=scale,
                 )
-                self.screen.blit(
-                    n, n.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y + 10)
-                )
+                sub_top = max(sub_top, bottom + 14)
 
         if resume_secs and resume_secs > 0:
             mins = int(resume_secs) // 60
@@ -2659,11 +2999,13 @@ class TVTimeCapsule:
             sub = show.upper()
             sub_color = self._dim_color()
         sn = self._truncate_overlay_text(
-            sub, self.font_sm, sub_color, rect.w - pad * 2, scale=scale
+            sub, self.font_sm, sub_color, text_max_w, scale=scale
         )
-        self.screen.blit(
-            sn, sn.get_rect(centerx=rect.x + rect.w // 2, centery=mid_y + 55)
-        )
+        # Keep subtitle above the footer if present.
+        footer_y = rect.y + rect.h - pad - 12
+        if footer:
+            sub_top = min(sub_top, footer_y - sn.get_height() - 16)
+        self.screen.blit(sn, sn.get_rect(centerx=centerx, top=sub_top))
 
         if footer:
             hint = self._scale_overlay_surface(
@@ -2671,7 +3013,7 @@ class TVTimeCapsule:
             )
             self.screen.blit(
                 hint,
-                hint.get_rect(centerx=rect.x + rect.w // 2, centery=rect.y + rect.h - pad - 12),
+                hint.get_rect(centerx=centerx, centery=footer_y),
             )
 
     def _blit_now_playing_content(
@@ -2993,6 +3335,10 @@ class TVTimeCapsule:
         if now >= self._mode_toast_until:
             self._mode_toast_message = ""
             return
+        # Don't stack on an active channel-error snackbar.
+        if self.channel_error and self.channel_error_time > 0:
+            if now - self.channel_error_time < CHANNEL_ERROR_MS:
+                return
         self._draw_popup_banner(self._mode_toast_message)
 
     def seasons_for_show(self, show):
@@ -3141,13 +3487,9 @@ class TVTimeCapsule:
         self.cursor = min(self.cursor, total - 1)
         show_name = shows[self.cursor]
         ch_num = self._display_channel(show_name)
-        tagged = (
-            not self._kids_mode_active
-            and self._title_kids_tagged(show=show_name)
-        )
         self._draw_header(
             show_name.upper(),
-            badge_text="[kids]" if tagged else "",
+            badge_text=self._title_badge_text(show=show_name),
         )
 
         kids = self._kids_mode_active
@@ -3208,12 +3550,7 @@ class TVTimeCapsule:
                 )
                 text_right = thumb_x - 10
 
-            n_total = self._count_total_eps(data)
-            seasons = self.seasons_for_show(name)
-            if len(seasons) > 1:
-                info = f"{len(seasons)} seasons - {n_total} ep"
-            else:
-                info = f"{n_total} ep"
+            info = self._show_info_line(name, data)
             info_surf = self.font_sm.render(info, True, self._dim_color())
             line1_h = self.font_md.get_height()
             total_text_h = line1_h + info_surf.get_height() + 2
@@ -3762,7 +4099,10 @@ class TVTimeCapsule:
         key = names[self.cursor]
         title = get_title(key)
         ch_num = get_ch(key)
-        self._draw_header(title.upper())
+        if self.view == self.SHOW_LIST:
+            self._draw_header(key.upper(), badge_text=self._title_badge_text(show=key))
+        else:
+            self._draw_header(title.upper())
 
         layout = self._show_browser_layout(self._header_bar_h(), kids=True)
         nav_h = layout["nav_h"]
@@ -3836,12 +4176,7 @@ class TVTimeCapsule:
         # Header
         self._draw_header(
             self.cur_show.upper(),
-            badge_text=(
-                "[kids]"
-                if not self._kids_mode_active
-                and self._title_kids_tagged(show=self.cur_show)
-                else ""
-            ),
+            badge_text=self._title_badge_text(show=self.cur_show),
         )
 
         layout = self._stack_browser_layout()
@@ -3953,12 +4288,7 @@ class TVTimeCapsule:
         # Header
         self._draw_header(
             f"{self.cur_show.upper()}  -  S-{self.cur_season:02d}",
-            badge_text=(
-                "[kids]"
-                if not self._kids_mode_active
-                and self._title_kids_tagged(show=self.cur_show)
-                else ""
-            ),
+            badge_text=self._title_badge_text(show=self.cur_show),
         )
 
         layout = self._stack_browser_layout()
@@ -4059,6 +4389,18 @@ class TVTimeCapsule:
 
             # Vertically center the one or two lines
             dur_text = self._get_duration(ep['path'])
+            if not dur_text and ep.get("duration"):
+                try:
+                    d = int(ep["duration"])
+                    if d > 0:
+                        m, s = divmod(d, 60)
+                        if d >= 3600:
+                            h, m = divmod(m, 60)
+                            dur_text = f"{h}:{m:02d}:{s:02d}"
+                        else:
+                            dur_text = f"{m}:{s:02d}"
+                except (TypeError, ValueError):
+                    pass
             line2_text = dur_text
             line2_color = self._dim_color()
             if is_in_progress:
@@ -5936,6 +6278,15 @@ class TVTimeCapsule:
         player.hw_decode_mode = self._hw_decode_mode
         return player
 
+    def _create_youtube_player(self) -> YouTubePlayer:
+        return YouTubePlayer(self.canvas_w, self.canvas_h)
+
+    def _can_start_episode(self, episode: dict | None) -> bool:
+        """True when local ffmpeg/omx or YouTube Chrome playback can run."""
+        if is_youtube_episode(episode):
+            return True
+        return bool(self.player_cmd or self.player)
+
     def _retry_playback(self, resume_secs=None):
         """Restart the current episode after a stall."""
         if not self.playing_episodes or self.playing_episode is None:
@@ -6010,6 +6361,7 @@ class TVTimeCapsule:
         self.playing_episode = episode
         source_path = episode["path"]
         self._playing_source_path = source_path
+        youtube = is_youtube_episode(episode)
 
         splash_args = (
             self._splash_show_label(self.playing_show),
@@ -6019,7 +6371,9 @@ class TVTimeCapsule:
             resume_secs,
         )
 
-        if self._playback_cache.should_cache_before_play(source_path):
+        if youtube:
+            wait_result = None
+        elif self._playback_cache.should_cache_before_play(source_path):
             wait_result = self._wait_for_playback_cache(source_path, splash_args)
             if wait_result == "cancelled":
                 self.view = self._playback_return_view()
@@ -6035,15 +6389,23 @@ class TVTimeCapsule:
         self._playback_cache_suppressed = False
         self._playback_cache_switched = False
         self._playback_allow_hot_swap = (
-            not self._playback_cache.cache_before_playing or wait_result == "stream"
+            not youtube
+            and (
+                not self._playback_cache.cache_before_playing
+                or wait_result == "stream"
+            )
         )
 
-        if wait_result == "stream":
+        if youtube or wait_result == "stream":
             play_path = source_path
         else:
             play_path = self._playback_cache.resolve_playback_path(source_path)
 
-        if wait_result is None and not self._playback_cache.cache_before_playing:
+        if (
+            not youtube
+            and wait_result is None
+            and not self._playback_cache.cache_before_playing
+        ):
             self._playback_cache.schedule_cache(source_path)
 
         if (
@@ -6058,7 +6420,10 @@ class TVTimeCapsule:
                 self.draw_now_playing(*splash_args)
 
         self._enter_playback_display()
-        self.player = self._create_player()
+        if youtube:
+            self.player = self._create_youtube_player()
+        else:
+            self.player = self._create_player()
         if self.player is None:
             self._exit_playback_display()
             self.channel_error = "NO PLAYER"
@@ -6072,7 +6437,9 @@ class TVTimeCapsule:
         if not self.player.start(play_path, resume_pos=resume_secs):
             self.player = None
             self._exit_playback_display()
-            self.channel_error = "PLAY FAILED"
+            self.channel_error = (
+                "YOUTUBE UNAVAILABLE" if youtube else "PLAY FAILED"
+            )
             self.channel_error_time = pygame.time.get_ticks()
             self.view = self._playback_return_view()
             if self._playing_is_movie:
@@ -6097,6 +6464,8 @@ class TVTimeCapsule:
         ):
             return
         if not self.player or not self._playing_source_path or self._playback_stalled:
+            return
+        if is_youtube_episode(self.playing_episode):
             return
         if self.player.paused:
             return
@@ -6169,7 +6538,7 @@ class TVTimeCapsule:
 
     def _run_up_next_countdown(self, episode, season, channel):
         """Countdown before autoplay. Returns True to continue, False if cancelled."""
-        if self._playback_cache.prefetch_next:
+        if self._playback_cache.prefetch_next and not is_youtube_episode(episode):
             self._playback_cache.schedule_cache(episode["path"])
 
         total = self._autoplay_countdown
@@ -6355,10 +6724,6 @@ class TVTimeCapsule:
             self.cur_movie = None
 
     def play_from_cursor(self):
-        if not self.player_cmd and not self.player:
-            self.channel_error = "NO PLAYER"
-            self.channel_error_time = pygame.time.get_ticks()
-            return
         show = self.shows.get(self.cur_show, {})
         season_data = show.get('seasons', {}).get(self.cur_season, {})
         episodes = season_data.get('episodes', [])
@@ -6366,6 +6731,10 @@ class TVTimeCapsule:
             return
 
         start = min(self.cursor, len(episodes) - 1)
+        if not self._can_start_episode(episodes[start]):
+            self.channel_error = "NO PLAYER"
+            self.channel_error_time = pygame.time.get_ticks()
+            return
 
         self._playing_is_movie = False
         self.cur_movie = None
@@ -6844,7 +7213,10 @@ class TVTimeCapsule:
         scan_list = [p for p in (paths or self.media_paths) if p]
         result = scan_paths(scan_list)
         if apply and result.get("ok") and self.view != self.PLAYING:
-            self._apply_library_discovery(result.get("discovery") or discover_library(scan_list, device_name=self._device_name))
+            self._apply_library_discovery(
+                result.get("discovery") or discover_library(scan_list, device_name=self._device_name),
+                force_youtube_refresh=True,
+            )
             self._duration_cache.clear()
             self._img_cache.clear()
             self._img_cache_order.clear()
@@ -7349,6 +7721,7 @@ class TVTimeCapsule:
                 self._tick_dial_timeout()
                 self._tick_reset_hold()
                 self._tick_periodic_rescan()
+                self._tick_youtube_catalog()
 
                 if self.view == self.PLAYING:
                     continue

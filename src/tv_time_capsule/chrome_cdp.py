@@ -1,6 +1,7 @@
 """Shared Chromium discovery and Chrome DevTools Protocol helpers.
 
-Used by Weather Channel and MyRetroTVs decade screencasts.
+Used by Weather Channel, MyRetroTVs decade screencasts, and YouTube
+catalog/playback.
 """
 
 from __future__ import annotations

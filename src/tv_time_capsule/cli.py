@@ -190,13 +190,20 @@ def main(argv: list[str] | None = None) -> None:
     shows = discovery.get("shows") or {}
     movies = discovery.get("movies") or {}
     layout = discovery.get("layout", "legacy")
+    youtube_channels = cfg.get("youtube_channels") or []
 
-    if not shows and not movies:
+    if not shows and not movies and not youtube_channels:
         print(f"No shows or movies found in: {', '.join(media_paths)}")
         print("Expected: <media-dir>/Show Name/s01/s01e01.mp4")
         print("Or split layout: <media-dir>/shows/ ... and <media-dir>/movies/ ...")
+        print("Or configure youtube_channels in config.json")
         print(f"Configure paths / mounts in: {config_file()}")
         sys.exit(1)
+
+    if youtube_channels and not shows:
+        print(
+            f"No local shows found; {len(youtube_channels)} YouTube channel(s) configured"
+        )
 
     total_eps = sum(
         len(season["episodes"])

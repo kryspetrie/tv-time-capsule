@@ -134,6 +134,12 @@ By default, shows appear alphabetically and channel numbers match list position 
 
 Shows not listed in `order` append alphabetically after the ordered ones.
 
+## YouTube channels
+
+Configured YouTube channels appear on the show list like local folders. By default, season **All Videos** is the channel uploads tab and other seasons are public playlists. Set ``playlists_as_shows`` on a channel to unroll those playlists into distinct shows instead (except All Videos). A playlist URL (or `watch?…&list=`) becomes a single-season show. Dial numbers follow the same auto-numbering / web-admin lineup as disk shows. Playback uses headless Chrome (same stack as Weather / Retro TV), not ffmpeg.
+
+See [Configuration → youtube_channels](configuration.md#youtube_channels).
+
 ## Sample library (for testing)
 
 Download short clips from [SampleLib](https://samplelib.com/sample-mp4.html) and build a tree covering every naming/thumbnail combination:
