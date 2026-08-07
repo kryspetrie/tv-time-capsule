@@ -12,3 +12,4 @@ Docs for working on the TV Time Capsule codebase. For running the app as an oper
 6. [Remote mount testing](remote-mount-testing.md) — local Docker harness for Samba / SFTP / FTP  
 7. [WSL2 on Windows](wsl2.md) — develop on Windows via Linux  
 8. [Improvement plan](improvement-plan.md) — phased roadmap and retros  
+9. [Pi features & offline YouTube](pi-features-offline-youtube-plan.md) — feature gates, adaptive Weather, forever yt-dlp cache, crop parity, test plans

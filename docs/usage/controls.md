@@ -75,7 +75,7 @@ When a split library is configured, **←** from the show or movie list returns 
 
 **Next up:** the first unwatched episode in the season shows **NEXT** (green border).
 
-**Out of order:** each finished episode is tracked individually in `state.json` (`watched: [2, 5, 7]`). You can watch episodes in any order.
+**Out of order:** each finished episode is tracked individually in `state.json` (`watched: [2, 5, 7]` for local files; `watched_ids` for YouTube videos). You can watch episodes in any order.
 
 **Reset watch status** (tap **R**) clears watched flags and in-progress bookmarks for the current context:
 

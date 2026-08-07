@@ -136,7 +136,7 @@ Shows not listed in `order` append alphabetically after the ordered ones.
 
 ## YouTube channels
 
-Configured YouTube channels appear on the show list like local folders. By default, season **All Videos** is the channel uploads tab and other seasons are public playlists. Set ``playlists_as_shows`` on a channel to unroll those playlists into distinct shows instead (except All Videos). A playlist URL (or `watch?…&list=`) becomes a single-season show. Dial numbers follow the same auto-numbering / web-admin lineup as disk shows. Playback uses headless Chrome (same stack as Weather / Retro TV), not ffmpeg.
+Configured YouTube channels appear on the show list like local folders. By default, season **All Videos** is the channel uploads tab and other seasons are public playlists. Set ``playlists_as_shows`` / ``playlist_shows`` on a channel to unroll selected playlists into distinct shows (group related playlists such as Ghostwriter Season 1–3 into one multi-season show). Use ``include_playlists`` to keep a single channel show but only chosen playlist seasons. A playlist URL (or `watch?…&list=`) becomes a single-season show. Dial numbers follow the same auto-numbering / web-admin lineup as disk shows. Playback uses headless Chrome (same stack as Weather / Retro TV), not ffmpeg.
 
 See [Configuration → youtube_channels](configuration.md#youtube_channels).
 

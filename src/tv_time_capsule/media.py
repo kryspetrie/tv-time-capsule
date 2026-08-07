@@ -269,7 +269,7 @@ def discover_shows(media_paths):
                     }
 
                 new_show = {
-                    "has_seasons": True,
+                    "has_seasons": len(seasons) > 1,
                     "seasons": seasons,
                     "thumbnail": show_thumb,
                 }

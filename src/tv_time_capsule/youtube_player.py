@@ -3,6 +3,9 @@
 Navigates to ``https://www.youtube.com/watch?v=…``, hides page chrome,
 autoplays the player, and exposes an :class:`EmbeddedPlayer`-compatible API
 so the main app can treat YouTube episodes like local files.
+
+Direct ``/embed/`` URLs are avoided — YouTube increasingly rejects them with
+Error 153 / 152-4 unless a fully validated embed host is used.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import numpy as np
 import pygame
 
 from .chrome_cdp import ensure_chromium, kill_port_process, wait_for_page_ws
+from .youtube_crop_cache import load_pillarbox_crop_entry, save_pillarbox_crop
 
 try:
     import websocket  # type: ignore[import-untyped]
@@ -32,36 +36,280 @@ LOG = logging.getLogger(__name__)
 
 CDP_PORT = 9227  # 9226 = catalog scrape; avoid colliding while a video plays
 
+# Prefer a first-party watch URL. Direct /embed loads often hit Error 153 / 152-4
+# (missing embed identity or "embedding disabled") even when /watch plays fine.
+_EMBED_REFERRER = "https://www.youtube.com/"
+# Keep the HTML5 / YT player silent until Python clears the hold (avoids the
+# autoplay blip during navigate settle + crop probe seeks).
+_HOLD_MUTE_GUARD_JS = """
+(() => {
+  window.__ttcHoldMute = true;
+  if (window.__ttcMuteGuard) return true;
+  window.__ttcMuteGuard = true;
+  const enforce = () => {
+    if (!window.__ttcHoldMute) return;
+    try {
+      const video = document.querySelector('video');
+      if (video) {
+        video.muted = true;
+        video.volume = 0;
+      }
+      const mp = document.getElementById('movie_player');
+      if (mp) {
+        if (typeof mp.mute === 'function') mp.mute();
+        if (typeof mp.setVolume === 'function') mp.setVolume(0);
+      }
+    } catch (e) {}
+  };
+  enforce();
+  setInterval(enforce, 40);
+  try {
+    const obs = new MutationObserver(enforce);
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+  return true;
+})()
+""".strip()
 
-def detect_letterbox_rect(
-    surf: pygame.Surface,
-    *,
-    black_max: int = 22,
-    min_bar_px: int = 6,
-    min_bar_frac: float = 0.03,
-) -> tuple[int, int, int, int] | None:
-    """Return content ``(x, y, w, h)`` for pillarboxed (side-bar) frames only.
+_CLEAR_HOLD_MUTE_JS = """
+(() => {
+  window.__ttcHoldMute = false;
+  return true;
+})()
+""".strip()
 
-    Used to recover 4:3 (or other) picture that was re-rendered inside a wider
-    frame with black side mattes. True widescreen with only top/bottom bars is
-    left alone — those letterbox bars are intentional and must not be cropped
-    away (cropping then filling the canvas would non-uniformly stretch).
+_CHROME_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
-    Returns ``None`` for full-bleed frames and for letterbox-only (no side bars).
-    """
-    w, h = surf.get_size()
-    if w < 32 or h < 32:
-        return None
+# Auto-recover when YouTube shows "Something went wrong" (etc.).
+_MAX_ERROR_RECOVERIES = 5
+_ERROR_STREAK_BEFORE_RECOVER = 3
+_RECOVER_COOLDOWN_S = 10.0
+_RECOVER_SETTLE_S = 2.8
+
+
+def _surface_rgb(surf: pygame.Surface) -> np.ndarray | None:
+    """Return HxWx3 uint16 RGB copy, or ``None`` if unavailable."""
     try:
-        # pygame surfarray is (w, h, 3); transpose to (h, w) for row scans.
         arr = pygame.surfarray.pixels3d(surf)
-        # Copy so we can unlock the surface immediately.
         rgb = np.asarray(arr, dtype=np.uint16).transpose(1, 0, 2).copy()
         del arr
+        return rgb
     except Exception:
         return None
 
-    # Approximate luma without float math.
+
+def _color_dist(a: np.ndarray | tuple, b: np.ndarray | tuple) -> float:
+    return float(
+        max(
+            abs(int(a[0]) - int(b[0])),
+            abs(int(a[1]) - int(b[1])),
+            abs(int(a[2]) - int(b[2])),
+        )
+    )
+
+
+def is_near_solid_frame(
+    surf: pygame.Surface,
+    *,
+    mad_max: float = 7.0,
+    center_mad_max: float = 8.0,
+    center_mean_max: float = 20.0,
+) -> bool:
+    """True for flat full-frame holds (solid black/color fades, empty cards).
+
+    These have no readable pillarbox signal and must not be recorded as
+    "no crop" evidence.
+    """
+    w, h = surf.get_size()
+    if w < 16 or h < 16:
+        return True
+    rgb = _surface_rgb(surf)
+    if rgb is None:
+        return False
+    pix = rgb.astype(np.float64)
+    mean = pix.mean(axis=(0, 1))
+    mad = float(np.abs(pix - mean).mean())
+    if mad <= mad_max:
+        return True
+    # Soft fades: center is also a flat field matching the overall mean.
+    cy0, cy1 = h // 3, (2 * h) // 3
+    cx0, cx1 = w // 3, (2 * w) // 3
+    center = pix[cy0:cy1, cx0:cx1]
+    if center.size == 0:
+        return False
+    c_mean = center.mean(axis=(0, 1))
+    c_mad = float(np.abs(center - c_mean).mean())
+    return c_mad <= center_mad_max and _color_dist(c_mean, mean) <= center_mean_max
+
+
+def sample_side_matte(
+    surf: pygame.Surface,
+    *,
+    probe_frac: float = 0.05,
+    min_probe_px: int = 6,
+    flat_mad_max: float = 14.0,
+    side_match_max: float = 22.0,
+) -> tuple[float, float, float] | None:
+    """Mean RGB of matching flat left/right edge rectangles, or ``None``."""
+    w, h = surf.get_size()
+    if w < 32 or h < 32:
+        return None
+    rgb = _surface_rgb(surf)
+    if rgb is None:
+        return None
+
+    probe = max(min_probe_px, int(w * probe_frac))
+    probe = min(probe, max(6, w // 6))
+    y0, y1 = int(h * 0.18), int(h * 0.82)
+    if y1 - y0 < 16:
+        y0, y1 = 0, h
+
+    left_patch = rgb[y0:y1, 0:probe]
+    right_patch = rgb[y0:y1, w - probe : w]
+    left_mean = left_patch.mean(axis=(0, 1))
+    right_mean = right_patch.mean(axis=(0, 1))
+    left_mad = float(np.abs(left_patch.astype(np.int16) - left_mean).mean())
+    right_mad = float(np.abs(right_patch.astype(np.int16) - right_mean).mean())
+    if left_mad > flat_mad_max or right_mad > flat_mad_max:
+        return None
+    if _color_dist(left_mean, right_mean) > side_match_max:
+        return None
+    mid = (left_mean + right_mean) * 0.5
+    return (float(mid[0]), float(mid[1]), float(mid[2]))
+
+
+def _finalize_crop(
+    w: int, h: int, x: int, y: int, rw: int, rh: int, *, pad: int = 2,
+    windowboxed: bool = False,
+) -> tuple[int, int, int, int] | None:
+    x = min(max(0, x + pad), w - 8)
+    y = min(max(0, y + pad), h - 8)
+    rw = max(8, min(rw - 2 * pad, w - x))
+    rh = max(8, min(rh - 2 * pad, h - y))
+    if rw >= w * 0.98 and rh >= h * 0.98:
+        return None
+    # Reject absurd windowboxes from dark scenes / chrome (e.g. a thin
+    # title-card slice carved out of an already-4:3 frame).
+    if rw < w * 0.45 or rh < h * 0.55:
+        return None
+    aspect = rw / float(rh)
+    if aspect < 0.90:
+        return None
+    # Prefer ~4:3 SD picture (classic pillarbox). Also accept true ~16:9
+    # windowboxes (bars on all four sides) — e.g. widescreen Arthur burned
+    # into a 4:3 upload — but not letterbox-only or tiny title-card slices.
+    if aspect <= 1.42:
+        return x, y, rw, rh
+    if (
+        windowboxed
+        and aspect <= 1.90
+        and rw >= w * 0.55
+        and rh >= h * 0.52
+        and y >= max(4, int(h * 0.04))
+        and (h - (y + rh)) >= max(4, int(h * 0.04))
+    ):
+        return x, y, rw, rh
+    return None
+
+
+def _region_mad(
+    rgb: np.ndarray, x: int, y: int, rw: int, rh: int
+) -> float:
+    patch = rgb[y : y + rh, x : x + rw]
+    if patch.size < 16:
+        return 0.0
+    pix = patch.astype(np.float64)
+    return float(np.abs(pix - pix.mean(axis=(0, 1))).mean())
+
+
+def _crop_has_picture(
+    rgb: np.ndarray,
+    crop: tuple[int, int, int, int],
+    matte_rgb: tuple[float, float, float] | None = None,
+) -> bool:
+    """True when the cropped region looks like picture, not another matte."""
+    cx, cy, cw, ch = crop
+    patch = rgb[cy : cy + ch, cx : cx + cw]
+    if patch.size < 16:
+        return False
+    pix = patch.astype(np.float64)
+    mean = pix.mean(axis=(0, 1))
+    mad = float(np.abs(pix - mean).mean())
+    if mad >= 8.0:
+        return True
+    if matte_rgb is not None and _color_dist(mean, matte_rgb) > 28:
+        return True
+    # Flat but clearly not a near-black hold / bar.
+    return float(np.max(mean)) >= 36.0
+
+
+def _crop_solid_matte(
+    rgb: np.ndarray,
+    matte_rgb: tuple[float, float, float],
+    *,
+    min_bar_px: int,
+    min_bar_frac: float,
+    matte_tol: float,
+    flat_mad_max: float,
+) -> tuple[int, int, int, int] | None:
+    """Walk inward from solid-colored side mattes; optional matching top/bottom."""
+    h, w = rgb.shape[0], rgb.shape[1]
+    y0, y1 = int(h * 0.18), int(h * 0.82)
+    if y1 - y0 < 16:
+        y0, y1 = max(0, h // 10), min(h, (9 * h) // 10)
+
+    matte = np.asarray(matte_rgb, dtype=np.float64)
+    band = rgb[y0:y1, :, :].astype(np.float64)
+    col_mean = band.mean(axis=0)
+    col_mad = np.abs(band - col_mean).mean(axis=(0, 2))
+    dist = np.max(np.abs(col_mean - matte), axis=1)
+
+    left = 0
+    while left < w and dist[left] <= matte_tol and col_mad[left] <= flat_mad_max:
+        left += 1
+    right = w - 1
+    while right >= 0 and dist[right] <= matte_tol and col_mad[right] <= flat_mad_max:
+        right -= 1
+    if right <= left:
+        return None
+
+    min_bar = max(min_bar_px, int(min(h, w) * min_bar_frac))
+    if left < min_bar or (w - 1 - right) < min_bar:
+        return None
+
+    x0c, x1c = left, right + 1
+    mid_band = rgb[:, x0c:x1c, :].astype(np.float64)
+    row_mean = mid_band.mean(axis=1)
+    row_mad = np.abs(mid_band - row_mean[:, None, :]).mean(axis=(1, 2))
+    row_dist = np.max(np.abs(row_mean - matte), axis=1)
+    top = 0
+    while top < h and row_dist[top] <= matte_tol and row_mad[top] <= flat_mad_max:
+        top += 1
+    bot = h - 1
+    while bot >= 0 and row_dist[bot] <= matte_tol and row_mad[bot] <= flat_mad_max:
+        bot -= 1
+    letterbox = (
+        top >= min_bar and (h - 1 - bot) >= min_bar and bot > top
+    )
+    y = top if letterbox else 0
+    rh = (bot - top + 1) if letterbox else h
+    return _finalize_crop(
+        w, h, left, y, right - left + 1, rh, windowboxed=letterbox
+    )
+
+
+def _crop_black_bars(
+    rgb: np.ndarray,
+    *,
+    black_max: int,
+    min_bar_px: int,
+    min_bar_frac: float,
+) -> tuple[int, int, int, int] | None:
+    """Legacy near-black luma pillarbox / windowbox detection."""
+    h, w = rgb.shape[0], rgb.shape[1]
     luma = (rgb[:, :, 0] * 3 + rgb[:, :, 1] * 6 + rgb[:, :, 2]) // 10
     mid_x0, mid_x1 = w // 3, (2 * w) // 3
     mid_y0, mid_y1 = h // 3, (2 * h) // 3
@@ -82,36 +330,68 @@ def detect_letterbox_rect(
     left, right = _bar_extent(row_strip, w)
     if bot <= top or right <= left:
         return None
-
-    top_bar = top
-    bottom_bar = h - 1 - bot
-    left_bar = left
-    right_bar = w - 1 - right
     min_bar = max(min_bar_px, int(min(h, w) * min_bar_frac))
-
-    # Matching pair required — ignore one-sided mattes / UI chrome.
-    letterbox = top_bar >= min_bar and bottom_bar >= min_bar
-    pillarbox = left_bar >= min_bar and right_bar >= min_bar
-    # Only act on side bars (4:3-in-widescreen rerenders). Top/bottom-only
-    # letterbox is real widescreen — keep the bars.
+    letterbox = top >= min_bar and (h - 1 - bot) >= min_bar
+    pillarbox = left >= min_bar and (w - 1 - right) >= min_bar
     if not pillarbox:
         return None
-
-    x = left
-    rw = right - left + 1
-    # If the active region is also letterboxed (windowbox), crop that too so
-    # the subsequent uniform zoom fills the CRT from the real picture.
     y = top if letterbox else 0
     rh = (bot - top + 1) if letterbox else h
-    # Keep a little safety inset so we don't clip soft edges.
-    pad = 2
-    x = min(max(0, x + pad), w - 8)
-    y = min(max(0, y + pad), h - 8)
-    rw = max(8, min(rw - 2 * pad, w - x))
-    rh = max(8, min(rh - 2 * pad, h - y))
-    if rw >= w * 0.98 and rh >= h * 0.98:
+    return _finalize_crop(
+        w, h, left, y, right - left + 1, rh, windowboxed=letterbox
+    )
+
+
+def detect_letterbox_rect(
+    surf: pygame.Surface,
+    *,
+    black_max: int = 22,
+    min_bar_px: int = 6,
+    min_bar_frac: float = 0.03,
+    matte_tol: float = 20.0,
+    flat_mad_max: float = 16.0,
+    matte_rgb: tuple[float, float, float] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """Return content ``(x, y, w, h)`` for pillarboxed (side-bar) frames only.
+
+    Prefers solid side mattes of any relatively consistent color (blue/gray/etc.),
+    falling back to classic near-black luma bars. True widescreen letterbox-only
+    (top/bottom, no sides) is left alone.
+    """
+    w, h = surf.get_size()
+    if w < 32 or h < 32:
         return None
-    return x, y, rw, rh
+    rgb = _surface_rgb(surf)
+    if rgb is None:
+        return None
+
+    matte = matte_rgb
+    if matte is None:
+        matte = sample_side_matte(
+            surf, min_probe_px=min_bar_px, flat_mad_max=min(flat_mad_max, 14.0)
+        )
+    if matte is not None:
+        crop = _crop_solid_matte(
+            rgb,
+            matte,
+            min_bar_px=min_bar_px,
+            min_bar_frac=min_bar_frac,
+            matte_tol=matte_tol,
+            flat_mad_max=flat_mad_max,
+        )
+        if crop is not None and _crop_has_picture(rgb, crop, matte):
+            return crop
+    crop = _crop_black_bars(
+        rgb,
+        black_max=black_max,
+        min_bar_px=min_bar_px,
+        min_bar_frac=min_bar_frac,
+    )
+    if crop is None:
+        return None
+    if not _crop_has_picture(rgb, crop, matte):
+        return None
+    return crop
 
 
 def scale_uniform(
@@ -206,19 +486,125 @@ class YouTubePlayer:
         self._youtube_id: str | None = None
         self._frame_count = 0
         self._content_crop: tuple[int, int, int, int] | None = None
-        self._letterbox_samples: list[tuple[int, int, int, int]] = []
+        self._detected_crop: tuple[int, int, int, int] | None = None
+        # (crop_or_sentinel, matte_rgb_or_None) — matte must stay stable across samples.
+        self._letterbox_samples: list[
+            tuple[tuple[int, int, int, int], tuple[float, float, float] | None]
+        ] = []
         self._letterbox_locked = False
         self._last_letterbox_check = 0.0
+        # Fast pre-display probe: sample crop before the first shown frame.
+        self._crop_probe_active = False
+        self._hold_display_for_crop = False
+        self._display_ready = True
+        self._crop_probe_region = "start"
+        self._crop_probe_start_samples: list[
+            tuple[tuple[int, int, int, int], tuple[float, float, float] | None]
+        ] = []
+        self._crop_probe_mid_samples: list[
+            tuple[tuple[int, int, int, int], tuple[float, float, float] | None]
+        ] = []
+        self._crop_probe_end_samples: list[
+            tuple[tuple[int, int, int, int], tuple[float, float, float] | None]
+        ] = []
         self._play_kick_pending = False
         self._suppress_watchdog_until = 0.0
+        self._error_streak = 0
+        self._recover_count = 0
+        self._last_recover_at = 0.0
+        self._last_good_time_pos = 0.0
+        self._on_wait = None
+        self._play_after_hold = False
+        self._clear_hold_mute_pending = False
+        self._prepared = False
+        self._in_ad = False
+        self._content_duration = 0.0  # stable episode length; ignore short ad durations
 
     # ------------------------------------------------------------------
     # Public API (EmbeddedPlayer-shaped)
     # ------------------------------------------------------------------
 
-    def start(self, filepath: str, resume_pos=None) -> bool:
-        """Start playback. ``filepath`` may be ``youtube:ID`` or a bare video id."""
+    @property
+    def is_prepared(self) -> bool:
+        """True after :meth:`prepare` finishes and before :meth:`begin_playback`."""
+        return self.running and self._prepared
+
+    @property
+    def waiting_for_ad(self) -> bool:
+        """True while a YouTube ad is showing (preroll / mid-roll / post-roll)."""
+        return bool(self._in_ad)
+
+    def prepare(self, filepath: str, *, on_wait=None) -> bool:
+        """Boot Chrome and crop-probe while muted/hidden; do not show yet.
+
+        Call :meth:`begin_playback` to unmute and reveal, or :meth:`stop` to
+        abandon the prepared session (e.g. user cancelled up-next).
+        """
+        return self._start_internal(
+            filepath, resume_pos=0.0, on_wait=on_wait, release=False
+        )
+
+    def begin_playback(self, resume_pos=None, *, on_wait=None) -> bool:
+        """Release a prepared hold and start audible playback."""
+        if not self.is_prepared:
+            return False
+        if on_wait is not None:
+            self._on_wait = on_wait
+        # Preroll may still be running (or start) while we were parked muted.
+        self._wait_for_preroll_ads()
+        if not self.running:
+            return False
+        target = max(0.0, float(resume_pos or 0.0))
+        with self._lock:
+            self.time_pos = target
+            self._start_mono = time.monotonic() - target
+            self._prepared = False
+        if target > 0.5:
+            self._queue_hold_seek(target)
+            self._wait_until_near(target, timeout=1.2)
+            self._wait_for_preroll_ads()
+        if not self.running:
+            return False
+        self._release_display_hold()
+        LOG.info(
+            "YouTube begin playback id=%s resume=%.1fs",
+            self._youtube_id,
+            target,
+        )
+        return True
+
+    def start(self, filepath: str, resume_pos=None, *, on_wait=None) -> bool:
+        """Start playback. ``filepath`` may be ``youtube:ID`` or a bare video id.
+
+        ``on_wait`` is an optional callable invoked periodically while Chrome
+        boots / crop-probes so the UI can keep a loading frame on screen.
+        """
+        return self._start_internal(
+            filepath, resume_pos=resume_pos, on_wait=on_wait, release=True
+        )
+
+    def _park_prepared(self) -> None:
+        """Keep frames hidden/muted after crop is ready for later handoff."""
+        with self._lock:
+            self._crop_probe_active = False
+            self._hold_display_for_crop = True
+            self._display_ready = False
+            self._play_after_hold = False
+            self._play_kick_pending = False
+            self._clear_hold_mute_pending = False
+            self._volume_dirty = True
+            self._prepared = True
+
+    def _start_internal(
+        self,
+        filepath: str,
+        resume_pos=None,
+        *,
+        on_wait=None,
+        release: bool,
+    ) -> bool:
         self.stop()
+        self._on_wait = on_wait
         yid = self._parse_id(filepath)
         if not yid:
             LOG.warning("YouTubePlayer: invalid video id %r", filepath)
@@ -238,6 +624,9 @@ class YouTubePlayer:
         self.paused = False
         self.finished = False
         self.running = True
+        self._prepared = False
+        self._in_ad = False
+        self._content_duration = 0.0
         self.time_pos = max(0.0, float(resume_pos or 0.0))
         self.duration = 0.0
         self._pause_offset = 0.0
@@ -250,19 +639,56 @@ class YouTubePlayer:
         self._pause_dirty = False
         self._frame_count = 0
         self._content_crop = None
+        self._detected_crop = None
         self._letterbox_samples = []
         self._letterbox_locked = False
         self._last_letterbox_check = 0.0
-        self._play_kick_pending = True
+        cached = load_pillarbox_crop_entry(
+            yid, width=self.width, height=self.height
+        )
+        if cached is not None:
+            self._detected_crop = cached.crop
+            self._content_crop = cached.applied_crop
+            self._letterbox_locked = True
+            self._crop_probe_active = False
+            # Stay muted/hidden until we're parked on the resume point.
+            self._hold_display_for_crop = True
+            self._display_ready = False
+            self._crop_probe_region = "start"
+            self._crop_probe_start_samples = []
+            self._crop_probe_mid_samples = []
+            self._crop_probe_end_samples = []
+            LOG.info(
+                "YouTube pillarbox cache hit crop=%s apply=%s id=%s",
+                cached.crop,
+                cached.apply,
+                yid,
+            )
+        else:
+            self._crop_probe_active = True
+            self._hold_display_for_crop = True
+            self._display_ready = False
+            self._crop_probe_region = "start"
+            self._crop_probe_start_samples = []
+            self._crop_probe_mid_samples = []
+            self._crop_probe_end_samples = []
+        self._play_kick_pending = False
+        self._play_after_hold = self.time_pos > 0.5
+        self._clear_hold_mute_pending = False
         self._suppress_watchdog_until = 0.0
+        self._error_streak = 0
+        self._recover_count = 0
+        self._last_recover_at = 0.0
+        self._last_good_time_pos = self.time_pos
 
         kill_port_process(self._cdp_port)
         self._user_data_dir = tempfile.mkdtemp(prefix="ttc-yt-play-")
 
-        url = f"https://www.youtube.com/watch?v={yid}"
-        # Seek via JS after load — putting &t= in the URL makes YouTube scroll
-        # the watch page, which shifts our taller screencast viewport.
-        self._seek_to = self.time_pos if self.time_pos > 1.0 else None
+        url = self._play_url(yid)
+        # Seek via JS after load — park on resume before unmuting.
+        self._seek_to = self.time_pos if self.time_pos > 0.5 else None
+        if self._seek_to is not None:
+            self._play_after_hold = True
 
         try:
             self._chrome = subprocess.Popen(
@@ -276,6 +702,7 @@ class YouTubePlayer:
                     "--no-default-browser-check",
                     "--autoplay-policy=no-user-gesture-required",
                     "--disable-extensions",
+                    "--disable-blink-features=AutomationControlled",
                     f"--window-size={self.width},{self.height}",
                     "about:blank",
                 ],
@@ -305,7 +732,8 @@ class YouTubePlayer:
         while time.time() < deadline and self.running and not self._available:
             if self._error:
                 break
-            time.sleep(0.1)
+            self._tick_wait()
+            time.sleep(0.05)
 
         if not self._available:
             LOG.warning(
@@ -317,12 +745,108 @@ class YouTubePlayer:
                 return False
             self._available = True
 
-        LOG.info("YouTube play start id=%s resume=%.1fs", yid, self.time_pos)
+        if not self.running:
+            return False
+
+        # Clear preroll before crop probe / first frame (skip click + hold UI).
+        self._wait_for_preroll_ads()
+        if not self.running:
+            return False
+
+        # Spot-check pillarbox before the first displayed frame (skipped on cache).
+        # Stay muted until parked on the resume point either way.
+        if not self._letterbox_locked:
+            self._await_crop_probe(release=release)
+        else:
+            resume = max(0.0, float(self.time_pos))
+            if resume > 0.5:
+                self._queue_hold_seek(resume)
+                self._wait_until_near(resume, timeout=1.2)
+            self._wait_for_preroll_ads()
+            if not self.running:
+                return False
+            if release:
+                self._release_display_hold()
+            else:
+                self._park_prepared()
+
+        if not self.running:
+            return False
+
+        LOG.info(
+            "YouTube %s id=%s resume=%.1fs",
+            "prepared" if not release else "play start",
+            yid,
+            self.time_pos,
+        )
         return True
+
+    def _tick_wait(self, reason: str = "loading") -> None:
+        cb = self._on_wait
+        if cb is None:
+            return
+        try:
+            cb(reason)
+        except TypeError:
+            try:
+                cb()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _wait_until_near(self, target: float, *, timeout: float) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline and self.running:
+            if target <= 0.5:
+                if self.time_pos < 2.5:
+                    return
+            elif abs(self.time_pos - target) < 2.0:
+                return
+            self._tick_wait("loading")
+            time.sleep(0.04)
+
+    def _wait_out_ad(self, *, timeout: float = 60.0) -> None:
+        """Block while a YouTube ad is playing; keep Skip clicking via watchdog."""
+        if not self._in_ad:
+            return
+        deadline = time.time() + timeout
+        LOG.info("YouTube waiting out ad id=%s", self._youtube_id)
+        while time.time() < deadline and self.running and self._in_ad:
+            self._tick_wait("ads")
+            time.sleep(0.05)
+
+    def _wait_for_preroll_ads(
+        self, *, clear_s: float = 0.8, timeout: float = 60.0
+    ) -> None:
+        """Hold until ads are gone for *clear_s* (skip clicks run in the watchdog)."""
+        deadline = time.time() + timeout
+        clear_started: float | None = None
+        logged = False
+        while time.time() < deadline and self.running:
+            if self._in_ad:
+                if not logged:
+                    LOG.info("YouTube preroll/ad hold id=%s", self._youtube_id)
+                    logged = True
+                clear_started = None
+                self._tick_wait("ads")
+            else:
+                now = time.time()
+                if clear_started is None:
+                    clear_started = now
+                elif now - clear_started >= clear_s:
+                    return
+                self._tick_wait("loading")
+            time.sleep(0.05)
+        if self.running and self._in_ad:
+            LOG.warning(
+                "YouTube preroll wait timed out id=%s", self._youtube_id
+            )
 
     def stop(self) -> None:
         was_running = self.running
         self.running = False
+        self._prepared = False
         self._available = False
 
         ws = self._ws
@@ -361,6 +885,8 @@ class YouTubePlayer:
 
     def get_frame(self) -> pygame.Surface | None:
         with self._lock:
+            if not self._display_ready:
+                return None
             jpeg = self._latest_jpeg
             crop = self._content_crop
         if jpeg is None:
@@ -370,8 +896,9 @@ class YouTubePlayer:
         except Exception:
             return None
 
-        # Pillarbox crop only (side mattes from a 4:3-in-widescreen re-encode).
-        # Then uniform cover-zoom — never different X vs Y stretch ratios.
+        # Crop out pillarbox / windowbox mattes, then scale uniformly.
+        # ~4:3 crops cover-zoom to fill the canvas; ~16:9 windowboxes fit
+        # (letterbox) so the full widescreen picture stays visible.
         if crop is not None:
             x, y, cw, ch = crop
             sw, sh = surf.get_size()
@@ -380,10 +907,49 @@ class YouTubePlayer:
                     surf = surf.subsurface((x, y, cw, ch)).copy()
                 except Exception:
                     pass
-            return scale_uniform(surf, self.width, self.height, mode="cover")
+            mode = "fit" if (cw / float(ch)) > 1.45 else "cover"
+            return scale_uniform(surf, self.width, self.height, mode=mode)
 
         # True widescreen / full-bleed: fit with equal scale (letterbox OK).
         return scale_uniform(surf, self.width, self.height, mode="fit")
+
+    def content_zoom_enabled(self) -> bool:
+        with self._lock:
+            return self._content_crop is not None
+
+    def toggle_content_zoom(self) -> bool | None:
+        """Toggle pillarbox zoom for this episode; persist to crop cache.
+
+        Returns the new enabled state, or ``None`` when there is no detected
+        crop geometry to turn on.
+        """
+        with self._lock:
+            detected = self._detected_crop
+            current = self._content_crop
+            yid = self._youtube_id
+            width = self.width
+            height = self.height
+            if current is not None:
+                if detected is None:
+                    detected = current
+                    self._detected_crop = detected
+                self._content_crop = None
+                apply = False
+            else:
+                if detected is None:
+                    return None
+                self._content_crop = detected
+                apply = True
+        save_pillarbox_crop(
+            yid, detected, width=width, height=height, apply=apply
+        )
+        LOG.info(
+            "YouTube pillarbox zoom %s crop=%s id=%s",
+            "on" if apply else "off",
+            detected,
+            yid,
+        )
+        return apply
 
     def is_playing(self) -> bool:
         return self.running and not self.finished and not self.paused
@@ -506,57 +1072,233 @@ class YouTubePlayer:
         except Exception as exc:
             LOG.debug("YouTube PREF cookie failed: %s", exc)
 
-    def _js_watchdog(self, *, want_paused: bool) -> str:
-        """Hide page chrome, fill the viewport, reinforce pause only.
+    def _apply_embed_identity(self, ws) -> None:
+        """Send a Referer so YouTube's embed player accepts the request.
 
-        Never call playVideo or the media element's play method here. Seek
-        buffering leaves the element briefly paused; hammering play from the
-        layout loop trips YouTube's "something went wrong" UI.
+        Without this, embeds often show Error 153 (Video player configuration
+        error) after YouTube began requiring HTTP Referer for embedded clients.
+        """
+        try:
+            self._send(ws, "Network.enable")
+            self._send(
+                ws,
+                "Network.setExtraHTTPHeaders",
+                {
+                    "headers": {
+                        "Referer": _EMBED_REFERRER,
+                    }
+                },
+            )
+        except Exception as exc:
+            LOG.debug("YouTube embed Referer header failed: %s", exc)
+
+    def _navigate_to_play_url(self, ws) -> None:
+        """Navigate to the watch URL (first-party YouTube, not /embed)."""
+        self._apply_embed_identity(ws)
+        self._arm_hold_mute_guard(ws)
+        self._send(
+            ws,
+            "Page.navigate",
+            {
+                "url": self._navigate_url,
+                "referrer": _EMBED_REFERRER,
+            },
+        )
+
+    def _arm_hold_mute_guard(self, ws) -> None:
+        """Install a page mute guard before autoplay can produce audible audio."""
+        try:
+            self._send(ws, "Page.enable")
+            self._send(
+                ws,
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": _HOLD_MUTE_GUARD_JS},
+            )
+        except Exception as exc:
+            LOG.debug("YouTube hold-mute guard install failed: %s", exc)
+        try:
+            self._send(
+                ws,
+                "Runtime.evaluate",
+                {
+                    "expression": _HOLD_MUTE_GUARD_JS,
+                    "returnByValue": True,
+                },
+            )
+        except Exception:
+            pass
+
+    def _enforce_hold_mute(self, ws) -> None:
+        try:
+            self._send(
+                ws,
+                "Runtime.evaluate",
+                {
+                    "expression": _HOLD_MUTE_GUARD_JS,
+                    "returnByValue": True,
+                },
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _play_url(video_id: str) -> str:
+        """Watch URL — more reliable than /embed (avoids Error 152/153)."""
+        return (
+            f"https://www.youtube.com/watch?v={video_id}"
+            "&autoplay=1&mute=1&rel=0&cc_load_policy=0"
+        )
+
+    def _js_watchdog(self, *, want_paused: bool) -> str:
+        """Hide residual chrome, fill the viewport, reinforce pause only.
+
+        Uses a persistent injected stylesheet (YouTube rewrites inline styles)
+        plus ``ytp-autohide``. Never call playVideo / media play from here.
         """
         paused_js = "true" if want_paused else "false"
         return f"""
 (() => {{
   const wantPaused = {paused_js};
-  const out = {{ready: false, playing: false, ended: false, t: 0, d: 0, clicked: false, paused: wantPaused}};
-  const hide = [
-    '#masthead-container', '#guide', '#related', '#comments',
-    '#secondary', '#chat', '#chat-container', 'ytd-watch-next-secondary-results-renderer',
-    '#below', '#ticket-shelf', 'tp-yt-paper-dialog', '.ytp-pause-overlay',
-    '.ytp-ce-element', '.ytp-cards-teaser', '#donation-shelf',
-    'ytd-merch-shelf-renderer', '#movie_player .ytp-chrome-top',
-    '.ytp-gradient-top', '.ytp-gradient-bottom',
-    '.ytp-chrome-bottom', '.ytp-chrome-controls', '.ytp-progress-bar-container',
-    '.ytp-caption-window-container'
-  ];
-  for (const sel of hide) {{
-    for (const el of document.querySelectorAll(sel)) {{
-      el.style.setProperty('display', 'none', 'important');
-      el.style.setProperty('visibility', 'hidden', 'important');
-      el.style.setProperty('opacity', '0', 'important');
-      el.style.setProperty('pointer-events', 'none', 'important');
+  const out = {{
+    ready: false, playing: false, ended: false, t: 0, d: 0,
+    clicked: false, paused: wantPaused, error: false,
+    ad: false, adSkipped: false, videoId: null
+  }};
+
+  // Detect YouTube's fatal player error overlay ("Something went wrong" / 152 / 153).
+  try {{
+    const mpErr = document.getElementById('movie_player');
+    if (mpErr && mpErr.classList && mpErr.classList.contains('ytp-error')) {{
+      out.error = true;
     }}
-  }}
-  document.documentElement.style.setProperty('background', '#000', 'important');
-  document.body.style.setProperty('background', '#000', 'important');
-  document.body.style.setProperty('overflow', 'hidden', 'important');
-  document.documentElement.style.setProperty('overflow', 'hidden', 'important');
+    const errNodes = document.querySelectorAll(
+      '.ytp-error, .ytp-error-content, .ytp-error-icon-container, ' +
+      '#error-screen, .ytp-error-display'
+    );
+    for (const el of errNodes) {{
+      if (!el) continue;
+      const style = window.getComputedStyle(el);
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {{
+        continue;
+      }}
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) continue;
+      const text = ((el.innerText || el.textContent || '') + '').toLowerCase();
+      if (!text) continue;
+      if (
+        text.includes('wrong') ||
+        text.includes('error 15') ||
+        text.includes('152') ||
+        text.includes('153') ||
+        text.includes('configuration') ||
+        text.includes('try again') ||
+        text.includes('unavailable') ||
+        text.includes('watch on youtube') ||
+        text.includes('watch video on youtube')
+      ) {{
+        out.error = true;
+        break;
+      }}
+    }}
+  }} catch (e) {{}}
+
+  // Persistent stylesheet — inline per-element styles get overwritten by YT.
+  try {{
+    let sheet = document.getElementById('ttc-yt-chrome-hide');
+    if (!sheet) {{
+      sheet = document.createElement('style');
+      sheet.id = 'ttc-yt-chrome-hide';
+      (document.head || document.documentElement).appendChild(sheet);
+    }}
+    sheet.textContent = `
+      html, body, ytd-app, #content, #page-manager, #player, #player-container-outer,
+      #player-container-inner, #player-container, ytd-watch-flexy, #columns, #primary,
+      #primary-inner, #player-theater-container {{
+        margin: 0 !important; padding: 0 !important; background: #000 !important;
+        overflow: hidden !important; max-width: none !important; width: 100% !important;
+        height: 100% !important;
+      }}
+      #masthead-container, #guide, #guide-wrapper, #related, #comments, #secondary,
+      #chat, #chat-container, #below, #ticket-shelf, #donation-shelf, #meta, #info,
+      #actions, #owner, #top-row, ytd-watch-next-secondary-results-renderer,
+      ytd-merch-shelf-renderer, tp-yt-paper-dialog, ytd-popup-container,
+      #clarify-box, #movie_player + *, .html5-endscreen, .ytp-endscreen-content {{
+        display: none !important; visibility: hidden !important;
+        pointer-events: none !important; opacity: 0 !important;
+      }}
+      /* Player chrome — always off, even when YT removes ytp-autohide */
+      .ytp-chrome-top, .ytp-chrome-bottom, .ytp-chrome-controls,
+      .ytp-gradient-top, .ytp-gradient-bottom,
+      .ytp-progress-bar-container, .ytp-progress-bar, .ytp-progress-list,
+      .ytp-heat-map-container, .ytp-heatmap-container, .ytp-chapter-hover-container,
+      .ytp-chapter-container, .ytp-title, .ytp-title-channel, .ytp-title-text,
+      .ytp-title-enabled, .ytp-chrome-top-buttons,
+      .ytp-cards-button, .ytp-cards-teaser, .ytp-ce-element, .ytp-ce-covering-overlay,
+      .ytp-pause-overlay, .ytp-pause-overlay-container, .ytp-scroll-min,
+      .ytp-suggested-action, .ytp-watermark, a.ytp-watermark, .ytp-youtube-button,
+      .ytp-button, .ytp-popup, .ytp-settings-menu, .ytp-tooltip, .ytp-tooltip-text,
+      .ytp-bezel, .ytp-bezel-text-wrapper, .ytp-large-play-button,
+      .ytp-cued-thumbnail-overlay, .ytp-cued-thumbnail-overlay-image,
+      .ytp-spinner, .ytp-ad-overlay-container, .video-ads, .ytp-ad-module,
+      .ytp-player-content:not(.html5-video-container),
+      .annotation, .iv-branding, .ytp-share-button-panel,
+      .ytp-caption-window-container, .caption-window,
+      .ytp-doubletap-ui, .ytp-doubletap-ui-legacy, .ytp-overlay-buttons,
+      .ytp-muted-autoplay-endscreen-overlay, .ytp-videowall-still,
+      .ytp-fullscreen-button, .ytp-size-button, .ytp-miniplayer-button,
+      .ytp-remote-button, .ytp-subtitles-button, .ytp-settings-button,
+      .ytp-watch-later-button, .ytp-share-button, .ytp-playlist-menu-button,
+      .ytp-overflow-button, .ytp-show-cards-title, .ytp-paid-content-overlay,
+      .ytp-impression-link, .iv-drawer, .ytp-storyboard, .ytp-storyboard-framepreview,
+      .ytp-bound-time-left, .ytp-bound-time-right, .ytp-time-display,
+      .ytp-volume-panel, .ytp-left-controls, .ytp-right-controls,
+      .ytp-chapter-title, .ytp-hover-progress, .ytp-play-progress,
+      .ytp-load-progress, .ytp-scrubber-container, .ytp-scrubber-button {{
+        display: none !important; visibility: hidden !important;
+        opacity: 0 !important; pointer-events: none !important;
+        width: 0 !important; height: 0 !important; max-height: 0 !important;
+        overflow: hidden !important; transform: none !important;
+      }}
+      /* Keep Skip Ad clickable for JS even while other chrome is hidden */
+      .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button,
+      .ytp-ad-skip-button-container, .ytp-ad-skip-button-container *,
+      .ytp-ad-skip-button-slot, .ytp-ad-skip-button-slot *,
+      button.ytp-ad-skip-button, button.ytp-ad-skip-button-modern {{
+        display: block !important; visibility: visible !important;
+        opacity: 0 !important; pointer-events: auto !important;
+        width: auto !important; height: auto !important; max-height: none !important;
+        overflow: visible !important;
+      }}
+      /* Keep the video surface; kill decorative layers above it */
+      .html5-video-player .ytp-gradient-bottom,
+      .html5-video-player .ytp-gradient-top {{
+        display: none !important;
+      }}
+      .html5-video-container, video.html5-main-video, video {{
+        inset: 0 !important; left: 0 !important; top: 0 !important;
+        width: 100% !important; height: 100% !important;
+        object-fit: contain !important; background: #000 !important;
+      }}
+    `;
+  }} catch (e) {{}}
+
   try {{
     window.scrollTo(0, 0);
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
     const scroller = document.scrollingElement;
     if (scroller) {{ scroller.scrollTop = 0; scroller.scrollLeft = 0; }}
-    for (const sel of ['ytd-app', '#content', '#page-manager', '#columns', 'ytd-watch-flexy']) {{
-      for (const el of document.querySelectorAll(sel)) {{
-        try {{ el.scrollTop = 0; el.scrollLeft = 0; }} catch (e) {{}}
-      }}
-    }}
   }} catch (e) {{}}
 
-  // Exact viewport fill — no taller "offscreen" band (that caused black bars
-  // whenever YouTube scrolled the page on resume).
-  const player = document.getElementById('movie_player') || document.querySelector('#player');
+  const player = document.getElementById('movie_player')
+    || document.querySelector('.html5-video-player')
+    || document.querySelector('#player');
   if (player) {{
+    try {{
+      player.classList.add('ytp-autohide');
+      player.classList.add('ytp-hide-controls');
+      player.classList.remove('ytp-autohide-active');
+    }} catch (e) {{}}
     player.style.cssText = [
       'position:fixed', 'left:0', 'top:0', 'right:0', 'bottom:0',
       'width:100vw', 'height:100vh', 'margin:0', 'z-index:99999',
@@ -566,37 +1308,104 @@ class YouTubePlayer:
   const html5 = document.querySelector('.html5-video-container');
   if (html5) {{
     html5.style.cssText = [
-      'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%'
+      'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%',
+      'z-index:1'
     ].map(s => s + ' !important').join(';');
   }}
 
   const video = document.querySelector('video');
-  const mp = document.getElementById('movie_player');
+  const mp = document.getElementById('movie_player')
+    || document.querySelector('.html5-video-player');
+
+  // Detect / auto-skip ads (duration + currentTime swap to the ad otherwise).
+  try {{
+    let ad = false;
+    if (mp && mp.classList) {{
+      if (
+        mp.classList.contains('ad-showing') ||
+        mp.classList.contains('ad-interrupting') ||
+        mp.classList.contains('ytp-ad-showing')
+      ) {{
+        ad = true;
+      }}
+    }}
+    if (
+      document.querySelector(
+        '.ytp-ad-player-overlay, .ytp-ad-player-overlay-layout, ' +
+        '.ytp-ad-text, .ytp-ad-preview-container, .ytp-ad-message-container'
+      )
+    ) {{
+      ad = true;
+    }}
+    out.ad = ad;
+    if (ad) {{
+      const skipSelectors = [
+        '.ytp-ad-skip-button',
+        '.ytp-ad-skip-button-modern',
+        '.ytp-skip-ad-button',
+        '.ytp-ad-skip-button-container button',
+        '.ytp-ad-skip-button-slot button',
+        'button.ytp-ad-skip-button',
+        'button.ytp-ad-skip-button-modern',
+        '.ytp-ad-skip-button-container .ytp-button',
+      ];
+      for (const sel of skipSelectors) {{
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        try {{
+          el.click();
+          out.adSkipped = true;
+          break;
+        }} catch (e) {{}}
+      }}
+    }}
+  }} catch (e) {{}}
+
+  // Prefer the player API — more stable than the <video> element during ads.
+  try {{
+    if (mp && typeof mp.getVideoData === 'function') {{
+      const data = mp.getVideoData() || {{}};
+      if (data.video_id) out.videoId = data.video_id;
+    }}
+  }} catch (e) {{}}
+  if (!out.videoId) {{
+    try {{
+      const m = (location.href || '').match(/[?&]v=([\w-]{{11}})/);
+      if (m) out.videoId = m[1];
+    }} catch (e) {{}}
+  }}
+
   if (video) {{
     out.ready = true;
     out.t = video.currentTime || 0;
     out.d = video.duration && isFinite(video.duration) ? video.duration : 0;
     out.ended = !!video.ended;
     try {{
+      if (mp && typeof mp.getCurrentTime === 'function' && !out.ad) {{
+        const gt = mp.getCurrentTime();
+        const gd = typeof mp.getDuration === 'function' ? mp.getDuration() : 0;
+        const gs = typeof mp.getPlayerState === 'function' ? mp.getPlayerState() : null;
+        if (typeof gt === 'number' && isFinite(gt) && gt >= 0) out.t = gt;
+        if (typeof gd === 'number' && isFinite(gd) && gd > 0) out.d = gd;
+        // YT.PlayerState.ENDED === 0
+        if (gs === 0) out.ended = true;
+      }}
+    }} catch (e) {{}}
+    try {{
       video.style.cssText = [
         'position:absolute', 'left:0', 'top:0', 'width:100%', 'height:100%',
-        'object-fit:contain', 'background:#000'
+        'object-fit:contain', 'background:#000', 'z-index:1'
       ].map(s => s + ' !important').join(';');
     }} catch (e) {{}}
-    // Pause only — resume is handled once via _js_set_paused on user input.
     if (wantPaused) {{
       try {{
         if (mp && typeof mp.pauseVideo === 'function') mp.pauseVideo();
       }} catch (e) {{}}
       try {{ if (!video.paused) video.pause(); }} catch (e) {{}}
     }}
-    out.playing = !video.paused && !video.ended;
+    out.playing = !video.paused && !video.ended && !out.ad;
   }}
 
-  const cc = document.querySelector('.ytp-subtitles-button');
-  if (cc && cc.getAttribute('aria-pressed') === 'true') {{
-    cc.click();
-  }}
   return out;
 }})()
 """.strip()
@@ -665,58 +1474,410 @@ class YouTubePlayer:
 }})()
 """.strip()
 
+    def _await_crop_probe(self, *, release: bool = True) -> None:
+        """Spot-check pillarbox at start, middle, and end when duration allows.
+
+        Frames stay hidden and muted. Opening titles are often full-bleed even
+        when the episode body is pillarboxed, so mid/end samples drive the
+        crop decision when they show bars.
+
+        When ``release`` is False, crop is locked but display stays held for
+        :meth:`begin_playback` (up-next preload).
+        """
+        resume = max(0.0, float(self.time_pos))
+        self._crop_probe_region = "start"
+        self._wait_out_ad(timeout=15.0)
+
+        # --- start spot checks (at resume / natural playhead) ---
+        start_deadline = time.time() + 0.85
+        while time.time() < start_deadline and self.running:
+            if self._in_ad:
+                self._wait_out_ad(timeout=12.0)
+                start_deadline = time.time() + 0.6
+                continue
+            if len(self._crop_probe_start_samples) >= 3:
+                break
+            self._tick_wait()
+            time.sleep(0.04)
+
+        # Duration often arrives slightly after the first frames.
+        dur_deadline = time.time() + 0.45
+        while time.time() < dur_deadline and self.running and self.duration <= 0:
+            self._tick_wait()
+            time.sleep(0.05)
+
+        dur = float(self.duration or self._content_duration or 0.0)
+        sought = False
+        mid_t = 0.0
+        if self.running and dur >= 12.0:
+            mid_t = dur * 0.45
+            end_t = max(dur - 5.0, dur * 0.88)
+            # Mid: far enough from resume and from the end sample.
+            if mid_t > resume + 5.0 and abs(mid_t - end_t) > 4.0:
+                self._wait_out_ad(timeout=10.0)
+                self._probe_region_at("mid", mid_t, min_samples=3, timeout=1.35)
+                sought = True
+            if end_t > resume + 6.0 and end_t > mid_t + 3.0:
+                self._wait_out_ad(timeout=10.0)
+                self._probe_region_at("end", end_t, min_samples=3, timeout=1.4)
+                sought = True
+
+            def _valid(samples):
+                return [s for s in samples if s[0][0] >= 0]
+
+            # Titles are often full-bleed; if mid/end found nothing, retry mid.
+            if (
+                self.running
+                and mid_t > resume + 5.0
+                and not _valid(self._crop_probe_mid_samples)
+                and not _valid(self._crop_probe_end_samples)
+            ):
+                LOG.info(
+                    "YouTube pillarbox retry mid (start-only miss) id=%s",
+                    self._youtube_id,
+                )
+                self._wait_out_ad(timeout=8.0)
+                self._probe_region_at("mid", mid_t, min_samples=3, timeout=1.8)
+                sought = True
+
+        if sought and self.running:
+            self._wait_out_ad(timeout=8.0)
+            self._queue_hold_seek(resume)
+            self._wait_until_near(resume, timeout=0.85)
+
+        self._crop_probe_region = "start"
+        if self.running:
+            self._wait_for_preroll_ads()
+        self._finish_crop_probe(release=release)
+
+    def _probe_region_at(
+        self,
+        region: str,
+        target: float,
+        *,
+        min_samples: int,
+        timeout: float,
+    ) -> None:
+        """Seek to *target* and collect crop samples for *region*."""
+        self._crop_probe_region = region
+        self._queue_hold_seek(target)
+        deadline = time.time() + timeout
+        while time.time() < deadline and self.running:
+            near = self.time_pos >= target - 2.5
+            count = len(self._probe_region_list(region))
+            if near and count >= min_samples:
+                break
+            self._tick_wait()
+            time.sleep(0.04)
+
+    def _probe_region_list(
+        self, region: str
+    ) -> list[
+        tuple[tuple[int, int, int, int], tuple[float, float, float] | None]
+    ]:
+        if region == "mid":
+            return self._crop_probe_mid_samples
+        if region == "end":
+            return self._crop_probe_end_samples
+        return self._crop_probe_start_samples
+
+    def _probe_samples_for_commit(self) -> list[
+        tuple[tuple[int, int, int, int], tuple[float, float, float] | None]
+    ]:
+        """Merge region samples; prefer content (mid/end) pillarbox over titles."""
+        start = list(self._crop_probe_start_samples)
+        mid = list(self._crop_probe_mid_samples)
+        end = list(self._crop_probe_end_samples)
+
+        def valid(samples):
+            return [s for s in samples if s[0][0] >= 0]
+
+        start_valid = valid(start)
+        mid_valid = valid(mid)
+        end_valid = valid(end)
+        content_valid = mid_valid + end_valid
+
+        if content_valid:
+            # Full-bleed openers must not veto pillarboxed episode body.
+            merged = content_valid + start_valid
+            LOG.info(
+                "YouTube pillarbox samples start=%d mid=%d end=%d id=%s",
+                len(start_valid),
+                len(mid_valid),
+                len(end_valid),
+                self._youtube_id,
+            )
+            return merged
+        if start_valid:
+            return start_valid
+        return start + mid + end
+
+    def _finish_crop_probe(self, *, release: bool = True) -> None:
+        """End the fast probe; unlock display with the best crop we have."""
+        holding = self._hold_display_for_crop
+        if (
+            holding
+            or self._crop_probe_start_samples
+            or self._crop_probe_mid_samples
+            or self._crop_probe_end_samples
+        ):
+            self._letterbox_samples = self._probe_samples_for_commit()
+        if not self._letterbox_locked:
+            self._commit_letterbox_from_samples(
+                surf=None,
+                min_samples=3,
+                min_agree=2,
+                force=True,
+            )
+        with self._lock:
+            self._letterbox_locked = True
+            crop = self._content_crop
+            if crop is not None:
+                self._detected_crop = crop
+            detected = self._detected_crop
+            yid = self._youtube_id
+            width = self.width
+            height = self.height
+        if holding and yid:
+            save_pillarbox_crop(
+                yid,
+                detected,
+                width=width,
+                height=height,
+                apply=crop is not None,
+            )
+        if release:
+            self._release_display_hold()
+        else:
+            self._park_prepared()
+
+    def _release_display_hold(self) -> None:
+        """Show frames and unmute only after crop + resume position are ready."""
+        with self._lock:
+            kick = bool(self._play_after_hold)
+            self._crop_probe_active = False
+            self._hold_display_for_crop = False
+            self._display_ready = True
+            self._clear_hold_mute_pending = True
+            self._volume_dirty = True
+            # Avoid playVideo when autoplay is already running — that causes a
+            # brief stop/restart. Only kick after a seek during the hold.
+            self._play_kick_pending = kick
+            self._play_after_hold = False
+
+    def _queue_hold_seek(self, target: float) -> None:
+        """Seek while muted; mark that we must resume play after the hold."""
+        with self._lock:
+            self._seek_to = float(target)
+            self._last_letterbox_check = 0.0
+            self._play_after_hold = True
+
+    def _commit_letterbox_from_samples(
+        self,
+        surf: pygame.Surface | None,
+        *,
+        min_samples: int,
+        min_agree: int,
+        force: bool = False,
+    ) -> bool:
+        """Lock crop from collected samples. Returns True if a decision was made."""
+        samples = self._letterbox_samples
+        if not force and len(samples) < min_samples:
+            return False
+
+        valid = [(crop, m) for crop, m in samples if crop[0] >= 0]
+        if not valid:
+            if force or len(samples) >= min_samples:
+                with self._lock:
+                    self._content_crop = None
+                    self._letterbox_locked = True
+                self._persist_crop_decision(None)
+                return True
+            return False
+
+        agree_need = min(min_agree, len(valid)) if force else min_agree
+        if len(valid) < agree_need:
+            return False
+
+        # Prefer samples whose crop looks like real SD/HD picture (not a
+        # thin title-card slice). Fall back to all valid if none qualify.
+        def _plausible_content(crop: tuple[int, int, int, int]) -> bool:
+            _x, _y, cw, ch = crop
+            aspect = cw / float(ch)
+            return 1.15 <= aspect <= 1.85
+
+        preferred = [(c, m) for c, m in valid if _plausible_content(c)]
+        if len(preferred) >= agree_need:
+            valid = preferred
+        elif preferred and force:
+            valid = preferred
+
+        # Colored mattes must stay stable across samples; black-fallback uses matte=None.
+        mattes = [m for _, m in valid if m is not None]
+        if mattes:
+            if len(mattes) < agree_need and not force:
+                return False
+            ref = mattes[0]
+            if any(_color_dist(ref, m) > 24 for m in mattes[1:]):
+                if not force:
+                    return False
+                # Under force, fall back to black-matte (matte=None) samples only.
+                valid = [(c, m) for c, m in valid if m is None]
+                if not valid:
+                    with self._lock:
+                        self._content_crop = None
+                        self._letterbox_locked = True
+                    self._persist_crop_decision(None)
+                    return True
+                mattes = []
+
+        crops = [c for c, _ in valid]
+        # Prefer the most common geometry cluster (by left edge), then median.
+        xs = [c[0] for c in crops]
+        if max(xs) - min(xs) > 12:
+            if not force and len(crops) >= agree_need:
+                # Keep the densest x-cluster (±12px).
+                best: list[tuple[int, int, int, int]] = []
+                for x0 in xs:
+                    cluster = [c for c in crops if abs(c[0] - x0) <= 12]
+                    if len(cluster) > len(best):
+                        best = cluster
+                if len(best) >= agree_need:
+                    crops = best
+                else:
+                    return False
+            else:
+                mid_x = sorted(xs)[len(xs) // 2]
+                crops = [c for c in crops if abs(c[0] - mid_x) <= 12]
+                if not crops:
+                    with self._lock:
+                        self._content_crop = None
+                        self._letterbox_locked = True
+                    self._persist_crop_decision(None)
+                    return True
+
+        ws = [c[2] for c in crops]
+        if max(ws) - min(ws) > 20:
+            if not force:
+                return False
+            mid_w = sorted(ws)[len(ws) // 2]
+            crops = [c for c in crops if abs(c[2] - mid_w) <= 20]
+            if not crops:
+                with self._lock:
+                    self._content_crop = None
+                    self._letterbox_locked = True
+                self._persist_crop_decision(None)
+                return True
+
+        xs_s = sorted(c[0] for c in crops)
+        ys_s = sorted(c[1] for c in crops)
+        ws_s = sorted(c[2] for c in crops)
+        hs_s = sorted(c[3] for c in crops)
+        mid = len(crops) // 2
+        crop = (xs_s[mid], ys_s[mid], ws_s[mid], hs_s[mid])
+
+        # Prefer a re-detect with the averaged matte for a stable soft edge.
+        if surf is not None and mattes:
+            avg = (
+                sum(m[0] for m in mattes) / len(mattes),
+                sum(m[1] for m in mattes) / len(mattes),
+                sum(m[2] for m in mattes) / len(mattes),
+            )
+            refined = detect_letterbox_rect(surf, matte_rgb=avg)
+            if refined is not None and abs(refined[0] - crop[0]) <= 12:
+                crop = refined
+
+        with self._lock:
+            self._content_crop = crop
+            self._detected_crop = crop
+            self._letterbox_locked = True
+        self._persist_crop_decision(crop)
+        matte_log = mattes[0] if mattes else None
+        LOG.info(
+            "YouTube pillarbox crop=%s matte=%s id=%s",
+            crop,
+            tuple(round(c) for c in matte_log) if matte_log else "black",
+            self._youtube_id,
+        )
+        return True
+
+    def _persist_crop_decision(
+        self, crop: tuple[int, int, int, int] | None
+    ) -> None:
+        yid = self._youtube_id
+        if not yid:
+            return
+        with self._lock:
+            self._detected_crop = crop
+            apply = self._content_crop is not None
+            width = self.width
+            height = self.height
+        save_pillarbox_crop(
+            yid, crop, width=width, height=height, apply=apply
+        )
+
     def _maybe_update_letterbox(self, jpeg: bytes) -> None:
-        """Sample frames for baked-in pillarbox; lock a side crop + uniform zoom."""
+        """Sample frames for solid side mattes; lock crop + uniform zoom.
+
+        During the pre-display hold, samples accumulate for start/end spot
+        checks and are committed only when the probe finishes. After recover,
+        the fast probe path still commits as samples arrive.
+        """
         if self._letterbox_locked:
             return
-        now = time.monotonic()
-        if now - self._last_letterbox_check < 0.75:
+        if self._in_ad:
             return
-        # Wait longer after resume/seek so scrolled or black frames do not lock.
-        min_frames = 36 if self.time_pos > 1.0 else 18
+        now = time.monotonic()
+        probe = self._crop_probe_active
+        interval = 0.12 if probe else 1.15
+        if now - self._last_letterbox_check < interval:
+            return
+        min_frames = 4 if probe else (36 if self.time_pos > 1.0 else 18)
         if self._frame_count < min_frames:
             return
-        self._last_letterbox_check = now
         try:
             surf = pygame.image.load(io.BytesIO(jpeg))
         except Exception:
             return
-        # Sample at display size if screencast came back larger.
         if surf.get_width() != self.width or surf.get_height() != self.height:
             try:
                 surf = scale_uniform(surf, self.width, self.height, mode="fit")
             except Exception:
                 return
-        rect = detect_letterbox_rect(surf)
+
+        # Solid black/color holds are inconclusive — never treat as "no pillarbox".
+        if is_near_solid_frame(surf):
+            if not self._hold_display_for_crop:
+                self._last_letterbox_check = now
+            return
+
+        self._last_letterbox_check = now
+        matte = sample_side_matte(surf)
+        rect = detect_letterbox_rect(surf, matte_rgb=matte)
         if rect is None:
-            self._letterbox_samples.append((-1, -1, -1, -1))
+            sample = ((-1, -1, -1, -1), None)
         else:
-            self._letterbox_samples.append(rect)
-        # Keep a short window; require agreement before locking.
+            sample = (rect, matte)
+
+        if self._hold_display_for_crop:
+            if self._crop_probe_region == "end":
+                bucket = self._crop_probe_end_samples
+            elif self._crop_probe_region == "mid":
+                bucket = self._crop_probe_mid_samples
+            else:
+                bucket = self._crop_probe_start_samples
+            bucket.append(sample)
+            if len(bucket) > 4:
+                del bucket[:-4]
+            return
+
+        self._letterbox_samples.append(sample)
+        # Keep a short rolling window.
         self._letterbox_samples = self._letterbox_samples[-5:]
-        if len(self._letterbox_samples) < 4:
-            return
-        valid = [r for r in self._letterbox_samples if r[0] >= 0]
-        if len(valid) < 3:
-            # Mostly full-bleed or letterbox-only — lock with no crop.
-            if len(valid) == 0:
-                self._letterbox_locked = True
-            return
-        # Median crop among agreeing samples.
-        xs = sorted(r[0] for r in valid)
-        ys = sorted(r[1] for r in valid)
-        ws = sorted(r[2] for r in valid)
-        hs = sorted(r[3] for r in valid)
-        mid = len(valid) // 2
-        crop = (xs[mid], ys[mid], ws[mid], hs[mid])
-        with self._lock:
-            # Side-crop the active picture; get_frame cover-zooms uniformly.
-            self._content_crop = crop
-            self._letterbox_locked = True
-        LOG.info(
-            "YouTube pillarbox crop=%s id=%s",
-            crop,
-            self._youtube_id,
+        min_samples = 3 if probe else 4
+        min_agree = 2 if probe else 3
+        self._commit_letterbox_from_samples(
+            surf, min_samples=min_samples, min_agree=min_agree
         )
 
     def _ws_thread(self, ws_url: str) -> None:
@@ -751,11 +1912,28 @@ class YouTubePlayer:
         except Exception as exc:
             LOG.warning("YouTube device metrics failed: %s", exc)
 
+        try:
+            self._send(
+                ws,
+                "Emulation.setUserAgentOverride",
+                {
+                    "userAgent": _CHROME_USER_AGENT,
+                    "platform": "Linux",
+                    "acceptLanguage": "en-US,en",
+                },
+            )
+        except Exception as exc:
+            LOG.debug("YouTube user-agent override failed: %s", exc)
+
         self._apply_caption_cookie(ws)
 
         try:
-            self._send(ws, "Page.navigate", {"url": self._navigate_url})
-            time.sleep(2.5)
+            self._navigate_to_play_url(ws)
+            # Keep enforcing mute during settle — autoplay starts here.
+            settle_deadline = time.time() + 2.5
+            while time.time() < settle_deadline and self.running:
+                self._enforce_hold_mute(ws)
+                time.sleep(0.1)
             # Pin scroll before the first screencast frames are sampled.
             self._send(
                 ws,
@@ -770,6 +1948,7 @@ class YouTubePlayer:
                     "returnByValue": True,
                 },
             )
+            self._enforce_hold_mute(ws)
         except Exception as exc:
             self._error = f"navigate failed: {exc}"
             LOG.warning("YouTube navigate failed: %s", exc)
@@ -782,17 +1961,7 @@ class YouTubePlayer:
             return
 
         try:
-            self._send(
-                ws,
-                "Page.startScreencast",
-                {
-                    "format": "jpeg",
-                    "quality": 80,
-                    "maxWidth": self.width,
-                    "maxHeight": self.height,
-                    "everyNthFrame": 1,
-                },
-            )
+            self._start_screencast(ws)
             LOG.info(
                 "YouTube screencast started (%dx%d) %s",
                 self.width,
@@ -839,7 +2008,11 @@ class YouTubePlayer:
             now = time.time()
             with self._lock:
                 dirty = self._volume_dirty
-                vol = self.volume
+                hold_mute = self._hold_display_for_crop
+                clear_hold_mute = self._clear_hold_mute_pending
+                if clear_hold_mute:
+                    self._clear_hold_mute_pending = False
+                vol = 0 if hold_mute else self.volume
                 if dirty:
                     self._volume_dirty = False
                 pause_dirty = self._pause_dirty
@@ -851,14 +2024,21 @@ class YouTubePlayer:
                 play_kick = self._play_kick_pending
                 suppress_until = self._suppress_watchdog_until
 
+            if clear_hold_mute:
+                fire_eval("hold_mute_clear", _CLEAR_HOLD_MUTE_JS)
+
             if pause_dirty:
                 # Single playVideo / pauseVideo — do not also re-enter via watchdog.
                 fire_eval("pause", self._js_set_paused(paused))
                 if not paused:
                     fire_eval("volume", self._js_set_volume(vol))
-                    self._play_kick_pending = False
-            elif dirty and not paused:
+                    if not hold_mute:
+                        self._play_kick_pending = False
+            elif dirty or hold_mute:
+                # Re-assert mute every tick while probing so autoplay stays silent.
                 fire_eval("volume", self._js_set_volume(vol))
+                if hold_mute:
+                    fire_eval("hold_mute", _HOLD_MUTE_GUARD_JS)
             if seek_to is not None:
                 fire_eval("seek", self._js_seek(seek_to))
                 # Seeking buffers with video.paused=true; skip layout for a beat
@@ -866,19 +2046,23 @@ class YouTubePlayer:
                 self._suppress_watchdog_until = now + 0.85
                 suppress_until = self._suppress_watchdog_until
                 # One deferred playVideo after scrub settles (not during buffer).
-                if not paused:
+                if not paused and not hold_mute:
                     self._play_kick_pending = True
             elif (
                 play_kick
                 and not paused
+                and not hold_mute
                 and self._frame_count >= 8
                 and now >= suppress_until
             ):
                 # One-shot autoplay / post-seek resume — never every watchdog tick.
                 fire_eval("pause", self._js_set_paused(False))
+                fire_eval("volume", self._js_set_volume(vol))
                 self._play_kick_pending = False
 
             interval = PAUSED_WATCHDOG_INTERVAL if paused else WATCHDOG_INTERVAL
+            if self._in_ad:
+                interval = min(interval, 0.35)
             if now < suppress_until:
                 return
             if pause_dirty:
@@ -920,7 +2104,13 @@ class YouTubePlayer:
                         ((msg.get("result") or {}).get("result") or {}).get("value")
                     )
                     if isinstance(value, dict):
-                        self._apply_player_state(value)
+                        if value.get("error"):
+                            self._error_streak += 1
+                            if self._error_streak >= _ERROR_STREAK_BEFORE_RECOVER:
+                                self._reload_and_resume(ws)
+                        else:
+                            self._error_streak = 0
+                            self._apply_player_state(value)
                 continue
 
             method = msg.get("method")
@@ -945,8 +2135,9 @@ class YouTubePlayer:
                             else:
                                 should_sample = False
                         if should_sample:
-                            self._maybe_update_letterbox(jpeg)
-                        self._available = True
+                            if self._error_streak == 0:
+                                self._maybe_update_letterbox(jpeg)
+                            self._available = True
                 if session_id is not None:
                     try:
                         self._send(
@@ -964,17 +2155,198 @@ class YouTubePlayer:
         self._ws = None
         LOG.info("YouTube WS thread exit (frames=%d)", self._frame_count)
 
+    def _start_screencast(self, ws) -> None:
+        self._send(
+            ws,
+            "Page.startScreencast",
+            {
+                "format": "jpeg",
+                "quality": 80,
+                "maxWidth": self.width,
+                "maxHeight": self.height,
+                "everyNthFrame": 1,
+            },
+        )
+
+    def _reload_and_resume(self, ws) -> bool:
+        """Reload the watch page and seek back to the last good position."""
+        now = time.time()
+        if self._recover_count >= _MAX_ERROR_RECOVERIES:
+            LOG.warning(
+                "YouTube error recoveries exhausted (%d) id=%s",
+                self._recover_count,
+                self._youtube_id,
+            )
+            return False
+        if now - self._last_recover_at < _RECOVER_COOLDOWN_S:
+            return False
+
+        pos = max(self.time_pos, self._last_good_time_pos, 0.0)
+        was_paused = self.paused
+        self._recover_count += 1
+        self._last_recover_at = now
+        self._error_streak = 0
+        LOG.warning(
+            "YouTube error UI — reload #%d resume=%.1fs id=%s",
+            self._recover_count,
+            pos,
+            self._youtube_id,
+        )
+
+        try:
+            try:
+                self._send(ws, "Page.stopScreencast")
+            except Exception:
+                pass
+            self._navigate_to_play_url(ws)
+        except Exception as exc:
+            LOG.warning("YouTube recover navigate failed: %s", exc)
+            return False
+
+        # Let the watch page rebuild before seeking / play kick.
+        time.sleep(_RECOVER_SETTLE_S)
+        if not self.running:
+            return False
+
+        try:
+            self._start_screencast(ws)
+        except Exception as exc:
+            LOG.warning("YouTube recover screencast failed: %s", exc)
+            return False
+        try:
+            self._send(
+                ws,
+                "Runtime.evaluate",
+                {
+                    "expression": (
+                        "window.scrollTo(0,0);"
+                        "document.documentElement.scrollTop=0;"
+                        "document.body.scrollTop=0;"
+                        "0"
+                    ),
+                    "returnByValue": True,
+                },
+            )
+        except Exception:
+            pass
+
+        self.time_pos = pos
+        self._start_mono = time.monotonic() - pos - self._pause_offset
+        cached = load_pillarbox_crop_entry(
+            self._youtube_id, width=self.width, height=self.height
+        )
+        with self._lock:
+            self._seek_to = pos if pos > 0.5 else None
+            self._volume_dirty = True
+            self._play_kick_pending = not was_paused
+            self._pause_dirty = was_paused
+            self._suppress_watchdog_until = time.time() + 2.0
+            self._letterbox_samples = []
+            self._last_letterbox_check = 0.0
+            self._crop_probe_region = "start"
+            self._crop_probe_start_samples = []
+            self._crop_probe_mid_samples = []
+            self._crop_probe_end_samples = []
+            if cached is not None:
+                self._detected_crop = cached.crop
+                self._content_crop = cached.applied_crop
+                self._letterbox_locked = True
+                self._crop_probe_active = False
+            else:
+                # Fresh letterbox pass after reload (layout may change).
+                # Keep showing frames; re-probe quickly in the background.
+                self._letterbox_locked = False
+                self._content_crop = None
+                self._detected_crop = None
+                self._crop_probe_active = True
+        return True
+
     def _apply_player_state(self, state: dict) -> None:
+        if state.get("error"):
+            return
+
+        video_id = state.get("videoId")
+        if (
+            isinstance(video_id, str)
+            and len(video_id) == 11
+            and self._youtube_id
+            and video_id != self._youtube_id
+        ):
+            # Related-video / playlist autoplay — treat our episode as done.
+            LOG.info(
+                "YouTube navigated away id=%s -> %s; marking finished",
+                self._youtube_id,
+                video_id,
+            )
+            self._in_ad = False
+            if self._content_duration > 0:
+                self.duration = self._content_duration
+                self.time_pos = self._content_duration
+            self.finished = True
+            return
+
+        in_ad = bool(state.get("ad"))
+        self._in_ad = in_ad
+        if in_ad:
+            if state.get("adSkipped"):
+                LOG.debug("YouTube ad skip clicked id=%s", self._youtube_id)
+            # Post-roll / end-card ads: finish so up-next can run instead of
+            # sitting on an unskippable commercial with a broken scrub bar.
+            if (
+                self._content_duration > 30
+                and self._last_good_time_pos >= self._content_duration - 8.0
+            ):
+                self.duration = self._content_duration
+                self.time_pos = self._content_duration
+                self.finished = True
+            return
+
         try:
             t = float(state.get("t") or 0)
             d = float(state.get("d") or 0)
         except (TypeError, ValueError):
             t, d = 0.0, 0.0
+
         if d > 0:
-            self.duration = d
+            # Never shrink a long content duration down to a short ad clip.
+            if self._content_duration <= 0:
+                if d >= 60.0 or (self.duration <= 0 and d >= 5.0):
+                    self._content_duration = d
+                    self.duration = d
+                elif self.duration <= 0:
+                    self.duration = d
+            elif d >= self._content_duration * 0.85:
+                # Allow mild upward/downward correction of the content length.
+                self._content_duration = max(self._content_duration, d)
+                self.duration = self._content_duration
+            elif d > self._content_duration + 5.0:
+                self._content_duration = d
+                self.duration = d
+            else:
+                # Ignore implausibly short durations (ads / bumpers).
+                self.duration = self._content_duration
+
         if t >= 0 and not self.paused:
             self.time_pos = t
             self._start_mono = time.monotonic() - t - self._pause_offset
+            if t > 0.5:
+                self._last_good_time_pos = t
+        elif t >= 0 and self.paused and t > 0.5:
+            # Keep a good resume point even while paused.
+            self._last_good_time_pos = max(self._last_good_time_pos, t)
+            self.time_pos = t
+
         if state.get("ended"):
-            self.finished = True
-            self.time_pos = self.duration or self.time_pos
+            # Require we were actually near the end — ad endings lie.
+            near_end = (
+                self._content_duration <= 0
+                or self._last_good_time_pos >= self._content_duration - 8.0
+                or (
+                    self.duration > 0
+                    and self._last_good_time_pos >= self.duration * 0.92
+                )
+            )
+            if near_end:
+                self.finished = True
+                self.time_pos = self.duration or self._content_duration or self.time_pos
+

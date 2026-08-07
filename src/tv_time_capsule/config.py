@@ -7,6 +7,12 @@ import os
 from typing import Any
 
 from .safe_zone import parse_safe_zone, parse_safe_zone_offset, safe_zone_to_config
+from .youtube_titles import (
+    DEFAULT_YOUTUBE_TITLE_RULES,
+    _parse_title_rules,
+    show_name_prefix_rule,
+)
+from .youtube_playlists import parse_playlist_selectors
 
 DEFAULT_MEDIA_ROOT = "/media/usb"
 STATE_DIR = os.path.expanduser("~/.local/share/tv-time-capsule")
@@ -127,7 +133,7 @@ PROGRESS_SEEK_S = 10
 
 # Truncated list titles: pause, then scroll back and forth
 MARQUEE_DELAY_MS = 900
-MARQUEE_SPEED_PX_S = 40
+MARQUEE_SPEED_PX_S = 55
 MARQUEE_END_PAUSE_MS = 700
 
 # Ignore leftover KEYDOWNs from the play-start key (held during splash)
@@ -220,6 +226,11 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
             channel_snow_audio = True
     analog_artifacts = bool(ui.get("analog_artifacts", defaults["analog_artifacts"]))
     footer_hints = bool(ui.get("footer_hints", defaults["footer_hints"]))
+    marquee_raw = str(ui.get("marquee_scroll", defaults["marquee_scroll"])).strip().lower()
+    if marquee_raw in ("selected", "selected_only", "selection", "on_select"):
+        marquee_scroll = "selected"
+    else:
+        marquee_scroll = "always"
     try:
         analog_rate = float(ui.get("analog_artifact_rate", 12))
     except (TypeError, ValueError):
@@ -235,6 +246,7 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
         "analog_artifacts": analog_artifacts,
         "analog_artifact_rate": analog_rate,
         "footer_hints": footer_hints,
+        "marquee_scroll": marquee_scroll,
         "safe_zone": safe_zone_to_config(safe_zone, safe_zone_offset),
     }
 
@@ -466,10 +478,16 @@ def _parse_youtube_channels(raw: list | None) -> list[dict[str, Any]]:
     Each entry needs ``handle`` (``@name``) and/or ``url`` (channel URL,
     ``/channel/UC…``, or a playlist / watch?list= URL). Optional ``title``
     overrides the show name. Set ``playlists_as_shows`` to unroll public
-    playlists (except All Videos) into distinct shows. Dial numbers use the
-    same ``channels.order`` / ``channels.numbers`` path as local shows (web
-    admin); optional ``channel`` on an entry is still accepted as a convenience
-    merge into numbers.
+    playlists (except All Videos) into distinct shows. Use ``playlist_shows`` to
+    limit which playlists become shows and to merge related playlists (e.g.
+    Ghostwriter Season 1–3) into one multi-season show. Use ``include_playlists``
+    to keep a single channel show but only selected playlist seasons.
+    Optional ``title_deletions`` / ``title_substitutions`` / ``title_rules`` /
+    ``strip_title_prefix`` normalize scraped playlist and episode titles for
+    this entry only (after global ``youtube_title_rules``).
+    Dial numbers use the same ``channels.order`` / ``channels.numbers`` path as
+    local shows (web admin); optional ``channel`` on an entry is still accepted
+    as a convenience merge into numbers.
     """
     if not isinstance(raw, list):
         return []
@@ -505,7 +523,7 @@ def _parse_youtube_channels(raw: list | None) -> list[dict[str, Any]]:
             entry["title"] = title_s
         if channel_i is not None:
             entry["channel"] = channel_i
-        if bool(item.get("playlists_as_shows")):
+        if bool(item.get("playlists_as_shows")) or item.get("playlist_shows"):
             entry["playlists_as_shows"] = True
             # When unrolling playlists, skip the mega "All Videos" channel show
             # unless the user explicitly keeps it.
@@ -515,33 +533,193 @@ def _parse_youtube_channels(raw: list | None) -> list[dict[str, Any]]:
                 entry["include_all_videos"] = False
         elif "include_all_videos" in item:
             entry["include_all_videos"] = bool(item.get("include_all_videos"))
+        playlist_shows = parse_playlist_selectors(item.get("playlist_shows"))
+        if playlist_shows:
+            entry["playlist_shows"] = playlist_shows
+            entry["playlists_as_shows"] = True
+            if "include_all_videos" not in entry:
+                entry["include_all_videos"] = False
+        include_playlists = parse_playlist_selectors(item.get("include_playlists"))
+        if include_playlists:
+            entry["include_playlists"] = include_playlists
+        title_rules = _entry_title_rules(item, title_s)
+        if title_rules:
+            entry["title_rules"] = title_rules
+        if bool(item.get("strip_title_prefix")):
+            entry["strip_title_prefix"] = True
         out.append(entry)
     return out
+
+
+def _entry_title_rules(item: dict[str, Any], title_s: str) -> list[dict[str, Any]]:
+    """Merge strip_title_prefix + deletions/substitutions/title_rules."""
+    rules: list[dict[str, Any]] = []
+    if bool(item.get("strip_title_prefix")) and title_s:
+        prefix = show_name_prefix_rule(title_s)
+        if prefix:
+            rules.append(prefix)
+
+    deletions = item.get("title_deletions")
+    if deletions is None:
+        deletions = item.get("deletions")
+    substitutions = item.get("title_substitutions")
+    if substitutions is None:
+        substitutions = item.get("substitutions")
+    if deletions is not None or substitutions is not None:
+        rules.extend(
+            _parse_title_rules(
+                {
+                    "deletions": deletions if deletions is not None else [],
+                    "substitutions": substitutions if substitutions is not None else [],
+                }
+            )
+        )
+
+    if "title_rules" in item:
+        rules.extend(_parse_title_rules(item.get("title_rules")))
+    return rules
 
 
 def _default_youtube_channels() -> list[dict[str, Any]]:
     """Kids / classic YouTube shows preloaded in the example and default config."""
     return [
-        {"url": "https://www.youtube.com/@msrachel/", "title": "Ms Rachel"},
-        {"url": "https://www.youtube.com/@BlueyOfficialChannel", "title": "Bluey"},
         {
-            "url": "https://www.youtube.com/@MisterRogersNeighborhood",
-            "title": "Mister Rogers' Neighborhood",
+            "url": "https://www.youtube.com/@msrachel/",
+            "title": "Ms Rachel",
+            "title_deletions": [
+                r"(?i)\s*\|\s*(?:Videos for Toddlers|Toddler Learning Videos?|"
+                r"Educational Kids Videos|Kids Dance Songs|Speech(?: Delay Learning Video)?|"
+                r"Videos for Babies|Baby Videos|Videos for Kids)\s*$",
+                r"(?i)\s*[-–—]\s*Videos for Kids\b.*$",
+                r"(?i)\s*[-–—]\s*Nursery Rhymes\s*&\s*Kids Songs\s*$",
+            ],
         },
-        {"url": "https://www.youtube.com/@Raffi", "title": "Raffi"},
-        {"url": "https://www.youtube.com/@SciShowKids", "title": "SciShow Kids"},
-        {"url": "https://www.youtube.com/@PBSKIDS", "title": "PBS KIDS"},
+        {
+            "url": "https://www.youtube.com/@BlueyOfficialChannel",
+            "title": "Bluey",
+            "title_deletions": [
+                r"(?i)\s*\|\s*Bluey Book Reads\s*$",
+                r"(?i)\s*\|\s*FULL BLUEY MINISODE\s*$",
+                r"(?i)\s*\|\s*Bluey #ytshorts\s*$",
+                r"(?i)\s*\|\s*Bluey (?:Cookalongs|Puppets|Dancealongs|Cake Off)\s*$",
+                r"(?i)\s*\|\s*Bingo\s*-\s*Official Channel\s*$",
+                r"(?i)\s*\|\s*NEW Bluey Tunes\s*$",
+                r"(?i)^LIVE\s*:\s*",
+                {"pattern": r"(?i)^Bluey\s*:\s*", "scope": "episode"},
+            ],
+        },
+        {
+            "url": "https://www.youtube.com/@Raffi",
+            "title": "Raffi",
+            "strip_title_prefix": True,
+            "title_deletions": [
+                r"(?i)^Raffi with(?: the)? Good Lovelies\s*[-–—]\s*",
+                r"(?i)^Raffi and Lindsay Munroe\s*[-–—]\s*",
+                r"(?i)^Raffi,\s*Yo-Yo Ma,\s*Lindsay Munroe\s*[-–—]\s*",
+                r"(?i)^Raffi and Yo-Yo Ma\s*[-–—]\s*",
+                r"(?i)\s*[-–—]\s*In Concert with the Rise and Shine Band\s*$",
+                r"(?i)\s*[-–—]\s*ft\.\s*Good Lovelies\s*$",
+                r"(?i)\s*\(Official Visualizer\)\s*$",
+            ],
+        },
+        {
+            "url": "https://www.youtube.com/@SciShowKids",
+            "title": "SciShow Kids",
+            "title_deletions": [
+                r"(?i)\s*\|\s*Winter Science\s*$",
+                r"(?i)\s*\|\s*Weather Science\s*$",
+                r"(?i)\s*\|\s*Science Project for Kids\s*$",
+                r"(?i)\s*\|\s*Amazing Animals\s*$",
+                r"(?i)\s*\|\s*How We Study Space\s*$",
+                r"(?i)\s*\|\s*The Science of (?:Food|Flight|Cooking)!\s*$",
+                r"(?i)\s*\|\s*Spring is Here!\s*$",
+                r"(?i)\s*\|\s*Winter is Alive!\s*$",
+                r"(?i)\s*\|\s*Squeaks Grows a Garden!\s*$",
+            ],
+        },
+        {
+            "url": "https://www.youtube.com/@PBSKIDS",
+            "title": "PBS KIDS",
+            "playlists_as_shows": True,
+            "playlist_shows": [
+                "Phoebe & Jay",
+                "WordGirl",
+                "Ready Jet Go!",
+                "Let's Go Luna",
+                "Team Hamster with Ruff",
+                "Xavier Riddle & the Secret Museum",
+                "Acoustic Rooster",
+                "Daniel Tiger's Neighborhood",
+                "City Island",
+                "Dinosaur Train",
+                "Jelly, Ben & Pogo",
+                "Rosie's Rules",
+                "Carl the Collector",
+                "Lyla in the Loop",
+                "Weather Hunters",
+                "Odd Squad UK",
+            ],
+            "title_deletions": [
+                r"(?i)^PBS KIDS\s+",
+                r"(?i)\s*\|\s*PBS KIDS Apps\s*&\s*Games\s*$",
+            ],
+        },
         {
             "url": "https://www.youtube.com/channel/UCOXkrXRpNfUu6mypF7NZxnA",
             "title": "Ms Moni",
+            "title_deletions": [
+                r"(?i)\s*\|\s*(?:Toddler Learning Videos?|Kids Learning Videos|"
+                r"Toddler Learning with Ms\.?\s*Moni|Learn To Talk with Ms\.?\s*Moni|"
+                r"Talking Toddler Learning|Learning For Toddlers|"
+                r"Construction Vehicles For Kids|"
+                r"Toddler Learning Videos,\s*Kids Songs\s*&\s*Nursery Rhymes Compilation|"
+                r"2hrs? Compilation)\s*$",
+                r"(?i)^(?:💛\s*)?Ms\.?\s*Moni\s*[-–—]\s*",
+                r"(?i)^Best of Ms\.?\s*Moni\s*[-–—]\s*",
+            ],
         },
         {
             "url": "https://www.youtube.com/@thomasandfriends",
             "title": "Thomas & Friends",
+            "include_all_videos": False,
+            "include_playlists": [
+                {
+                    "match": r"(?i)^Season\s+(\d+)$",
+                },
+                {
+                    "title": "Movies & Specials",
+                    "match": r"(?i)Movies\s*&\s*Specials",
+                },
+            ],
+            "strip_title_prefix": True,
+            "title_deletions": [
+                r"(?i)^Thomas\s*&\s*Friends\s*[|:]\s*",
+                r"(?i)\s*\|\s*Watch Out Thomas!?\s*$",
+                r"(?i)\s*\|\s*Life Lessons\s*$",
+                r"(?i)\s*\|\s*All Engines Go!?\s*$",
+                r"(?i)\s*\|\s*On Cartoonito\b.*$",
+                {"pattern": r"(?i)\s*:\s*Sing Along!\s*$", "scope": "playlist"},
+                {"pattern": r"(?i)\s*\|\s*Compilations?\s*$", "scope": "playlist"},
+                {
+                    "pattern": r"(?i)\s*80th Anniversary Storytime\s*\|\s*Read Along\s*$",
+                    "scope": "playlist",
+                },
+            ],
+            "title_substitutions": [
+                [
+                    r"(?i)^Thomas\s*&\s*Friends\s*Movies\s*&\s*Specials\s*$",
+                    "Movies & Specials",
+                ],
+            ],
         },
         {
             "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/",
             "title": "Bill Nye the Science Guy",
+            "strip_title_prefix": True,
+            "include_all_videos": False,
+            "include_playlists": [
+                {"match": r"(?i)^Season\s+(\d+)$"},
+            ],
         },
         {
             "url": (
@@ -549,46 +727,106 @@ def _default_youtube_channels() -> list[dict[str, Any]]:
                 "&list=PL8SFNbbOmAYNMcH8uywT24j5YXJTC2WTZ"
             ),
             "title": "Beakman's World",
+            "title_deletions": [
+                r"(?i)^Beakman's World\s+",
+                {"pattern": r"(?i)\s*(?:audio dropouts\s*)?\bPDTV\b.*$", "scope": "episode"},
+                {"pattern": r"(?i)\s*\bdrngr\s*$", "scope": "episode"},
+            ],
         },
         {
             "url": "https://www.youtube.com/@ReadingRainbowOfficial",
             "title": "Reading Rainbow",
-        },
-        {"url": "https://www.youtube.com/@SesameStreet", "title": "Sesame Street"},
-        {
-            "url": (
-                "https://www.youtube.com/watch?v=-rJ0nxLQ8wU"
-                "&list=PLCeScks4FrgKF4Vp8-1C4OWbgJrn5BbkW"
-            ),
-            "title": "The Magic School Bus",
-        },
-        {
-            "url": (
-                "https://www.youtube.com/watch?v=dcBNHNs6TdY"
-                "&list=PLCeScks4FrgJTUTbM19xR52SM1ss3I65U"
-            ),
-            "title": "Clifford the Big Red Dog",
-        },
-        {
-            "url": (
-                "https://www.youtube.com/watch?v=2ptL3fim9Uw"
-                "&list=PLCeScks4FrgKPU26Y3gZeLTIdqK6ZggYg"
-            ),
-            "title": "Animorphs",
-        },
-        {
-            "url": (
-                "https://www.youtube.com/watch?v=WHIod8ulH3E"
-                "&list=PLCeScks4FrgIg0_AKYL2UiAJRH6jiGWJ_"
-            ),
-            "title": "Goosebumps",
+            "strip_title_prefix": True,
+            "include_all_videos": False,
+            "include_playlists": [
+                {
+                    "title": "Full Episodes",
+                    "match": r"(?i)^Full Episodes!?\s*$",
+                },
+                {
+                    "title": "New Season",
+                    "match": r"(?i)^(?:All New Season!?|New Season)\s*$",
+                },
+                {
+                    "title": "Stories",
+                    "match": r"(?i)^(?:Reading Rainbow\s+)?Stories\s*$",
+                },
+            ],
+            "title_deletions": [
+                r"(?i)^Reading Rainbow\s*[|\-–—]\s*",
+            ],
+            "title_substitutions": [
+                [r"(?i)^Reading Rainbow\s+Stories\s*$", "Stories"],
+                [r"(?i)^Full Episodes!?\s*$", "Full Episodes"],
+                [r"(?i)^All New Season!?\s*$", "New Season"],
+            ],
         },
         {
-            "url": (
-                "https://www.youtube.com/watch?v=elf250uvecY"
-                "&list=PLCeScks4FrgK-ZOSpDTZmfVz7xtGY5yXv"
-            ),
-            "title": "Clifford's Puppy Days",
+            "url": "https://www.youtube.com/@SesameStreet",
+            "title": "Sesame Street",
+            "strip_title_prefix": True,
+            "title_deletions": [
+                r"(?i)^Sesame Street Baby Band\s*:\s*",
+                r"(?i)^Sesame Street on Roblox\s*:\s*",
+                r"(?i)\s*\|\s*#ShareTheLaughter Challenge\s*$",
+                r"(?i)\s*\|\s*Nursery Rhymes and Kids Songs\s*$",
+                r"(?i)\s*\|\s*Music\s*&\s*Dance for Kids\s*$",
+                r"(?i)\s*\|\s*Elmo's World\s*$",
+                r"(?i)\s*\|\s*Sponsored by Dove\s*$",
+                r"(?i)\s*[-–—]\s*ChuChu TV(?: Nursery Rhymes| Classics)?\s*$",
+                r"(?i)\s*[-–—]\s*Toddler Learning Videos\s*$",
+                r"(?i)\s*[-–—]\s*Alphabet Animals\s*$",
+            ],
+        },
+        {
+            "url": "https://www.youtube.com/@ScholasticClassic",
+            "title": "Scholastic Classic",
+            "playlists_as_shows": True,
+            "playlist_shows": [
+                {
+                    "title": "Animorphs",
+                    "match": r"(?i)^Animorphs(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "Astroblast",
+                    "match": r"(?i)^Astroblast(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "Maya & Miguel",
+                    "match": r"(?i)^Maya\s*&\s*Miguel(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "Clifford's Puppy Days",
+                    "match": r"(?i)^Clifford's Puppy Days(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "Goosebumps",
+                    "match": r"(?i)^Goosebumps(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "Clifford the Big Red Dog",
+                    "match": r"(?i)^Clifford the Big Red Dog(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "The Magic School Bus",
+                    "match": r"(?i)^The Magic School Bus(?:\s+Scholastic Classic)?\s*$",
+                },
+                {
+                    "title": "Horrible Histories",
+                    "match": r"(?i)^Horrible Histories\b",
+                },
+            ],
+            "title_deletions": [
+                r"(?i)^Animorphs\s+\d+(?:-\d+)?\s*\|\s*",
+                r"(?i)^Battling Aliens with Animal Powers\s*\|\s*",
+                r"(?i)^Teens Transform into Animals(?:\s+to Fight Aliens)?\s*\|\s*",
+                r"(?i)\s*\|\s*Happy Halloween!\s*$",
+                r"(?i)\s*\|\s*Spooky Holidays\s*$",
+                r"(?i)\s+Spooky Halloween Full Episodes\b.*$",
+            ],
+            "title_substitutions": [
+                [r"(?i)^Animorphs\s+(\d+(?:-\d+)?)\s*$", r"\1"],
+            ],
         },
         {
             "url": (
@@ -596,11 +834,60 @@ def _default_youtube_channels() -> list[dict[str, Any]]:
                 "&list=PLBSUN2PpOgePQlEtu-ZSMcHJf1zDA8a_M"
             ),
             "title": "Arthur",
+            # Season / FULL EPISODE / ItunesRip / SxxExx handled by global title rules;
+            # strip_title_prefix covers "Arthur -" / "Arthur |" / "Arthur :".
+            "strip_title_prefix": True,
         },
         {
             "url": "https://www.youtube.com/@90sProject",
             "title": "90s Project",
             "playlists_as_shows": True,
+            "playlist_shows": [
+                "Bobby's World",
+                "Care Bears",
+                "Timon and Pumbaa",
+                "Rupert",
+                "Sagwa the Chinese Siamese Cat",
+                "Wishbone",
+                {
+                    "title": "Ghostwriter",
+                    "match": r"(?i)^Ghostwriter\s+Season\s+(\d+)$",
+                },
+            ],
+            "title_deletions": [
+                r"(?i)^Wishbone\s*[:\-–—]\s*",
+                r"(?i)^Bobby's [Ww]orld\s*[-–—]\s*",
+                r"(?i)^Sagwa The Chinese Siamese Cat\s*[-–—:]\s*",
+                r"(?i)^Ghostwriter\s*[-–—:]\s*",
+                r"(?i)^Care Bears\s*[-–—:]\s*",
+                r"(?i)^GW\s*[-–—:]\s*",
+                r"(?i)\s*\[\(watch the rest.*$",
+                r"(?i)\s*\(add\s*&fmt=18.*$",
+                r"(?i)\s*\(clip\)\s*",
+                r"(?i)\s+HD\s+(\d+)\s*$",
+            ],
+        },
+        {
+            "url": "https://www.youtube.com/@MisterRogersNeighborhood",
+            "title": "Mister Rogers' Neighborhood",
+            "include_all_videos": False,
+            "include_playlists": [
+                {
+                    "title": "Full Episodes",
+                    "match": r"(?i)Full Episodes\s*$",
+                },
+                {
+                    "title": "New in the Neighborhood",
+                    "match": r"(?i)^New in the Neighborhood\s*$",
+                },
+                {
+                    "title": "Classic Moments",
+                    "match": r"(?i)Classic Moments\s*$",
+                },
+            ],
+            "title_deletions": [
+                r"(?i)\s*\|\s*Official Channel Trailer\b.*$",
+            ],
         },
     ]
 
@@ -646,6 +933,7 @@ def _default_config() -> dict[str, Any]:
             "analog_artifacts": True,
             "analog_artifact_rate": 12,
             "footer_hints": True,
+            "marquee_scroll": "always",
             "safe_zone": {"top": 10, "bottom": 10, "left": 10, "right": 10},
         },
         "gamepad": {
@@ -695,7 +983,8 @@ def _default_config() -> dict[str, Any]:
             "filters": None,
             "volume": None,
         },
-        "youtube_channels": _default_youtube_channels(),
+        "youtube_channels": _parse_youtube_channels(_default_youtube_channels()),
+        "youtube_title_rules": list(DEFAULT_YOUTUBE_TITLE_RULES),
     }
 
 
@@ -745,12 +1034,27 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
             if "youtube_channels" in raw
             else _default_youtube_channels()
         ),
+        "youtube_title_rules": (
+            _parse_title_rules(raw["youtube_title_rules"])
+            if "youtube_title_rules" in raw
+            else list(DEFAULT_YOUTUBE_TITLE_RULES)
+        ),
     }
 
 
 def parse_config(raw: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize a raw config dict (same rules as load_config)."""
-    return _parse_config(raw)
+    cfg = _parse_config(raw)
+    _apply_youtube_title_rules(cfg)
+    return cfg
+
+
+def _apply_youtube_title_rules(cfg: dict[str, Any]) -> None:
+    try:
+        from .youtube_catalog import set_youtube_title_rules
+    except ImportError:
+        return
+    set_youtube_title_rules(cfg.get("youtube_title_rules"))
 
 
 def _config_create_path() -> str:
@@ -771,13 +1075,17 @@ def load_config() -> dict[str, Any]:
         _active_config_path = path
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return _parse_config(json.load(f))
+                cfg = _parse_config(json.load(f))
+                _apply_youtube_title_rules(cfg)
+                return cfg
         except (json.JSONDecodeError, OSError):
+            _apply_youtube_title_rules(default)
             return default
 
     dest = _config_create_path()
     _active_config_path = dest
     save_config(default, path=dest)
+    _apply_youtube_title_rules(default)
     return default
 
 

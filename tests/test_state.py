@@ -92,6 +92,101 @@ class StateTests(unittest.TestCase):
         self.assertNotIn("note", summary)
         self.assertEqual(summary["Bluey"]["s01"]["watched"], [2])
 
+    @patch.object(state, "save_state")
+    def test_youtube_watched_by_id(self, _save):
+        s = {}
+        ep = {"number": 1, "youtube_id": "dQw4w9WgXcQ", "path": "youtube:dQw4w9WgXcQ"}
+        state.mark_episode_watched(s, "Ghostwriter", 1, 1, episode=ep)
+        entry = s["Ghostwriter"]["s01"]
+        self.assertEqual(entry["watched_ids"], ["dQw4w9WgXcQ"])
+        self.assertNotIn("watched", entry)
+        self.assertTrue(
+            state.is_episode_watched(s, "Ghostwriter", 1, 1, episode=ep)
+        )
+        # Same video, different episode number after reorder.
+        reordered = {"number": 5, "youtube_id": "dQw4w9WgXcQ"}
+        self.assertTrue(
+            state.is_episode_watched(s, "Ghostwriter", 1, 5, episode=reordered)
+        )
+        episodes = [
+            {"number": 1, "youtube_id": "aaaaaaaaaaa"},
+            {"number": 2, "youtube_id": "dQw4w9WgXcQ"},
+        ]
+        self.assertEqual(
+            state.get_watched_episodes(s, "Ghostwriter", 1, episodes=episodes),
+            {2},
+        )
+
+    @patch.object(state, "save_state")
+    def test_youtube_resume_follows_id_after_reorder(self, _save):
+        s = {}
+        ep = {"number": 1, "youtube_id": "dQw4w9WgXcQ"}
+        result = state.set_episode_position(
+            s, "Ghostwriter", 1, 1, 45.0, duration=120.0, episode=ep
+        )
+        self.assertEqual(result, "saved")
+        entry = s["Ghostwriter"]["s01"]
+        self.assertEqual(entry["pos_id"], "dQw4w9WgXcQ")
+        self.assertEqual(entry["pos_ep"], 1)
+        reordered = [
+            {"number": 1, "youtube_id": "bbbbbbbbbbb"},
+            {"number": 3, "youtube_id": "dQw4w9WgXcQ"},
+        ]
+        pos_ep, secs = state.get_episode_position(
+            s, "Ghostwriter", 1, episodes=reordered
+        )
+        self.assertEqual(pos_ep, 3)
+        self.assertAlmostEqual(secs, 45.0)
+        self.assertTrue(state.season_has_in_progress(s, "Ghostwriter", 1))
+
+    @patch.object(state, "save_state")
+    def test_youtube_near_end_marks_watched_id(self, _save):
+        s = {}
+        ep = {"number": 2, "youtube_id": "dQw4w9WgXcQ"}
+        result = state.set_episode_position(
+            s, "Ghostwriter", 1, 2, 118.0, duration=120.0, episode=ep
+        )
+        self.assertEqual(result, "completed")
+        self.assertEqual(s["Ghostwriter"]["s01"]["watched_ids"], ["dQw4w9WgXcQ"])
+        self.assertEqual(
+            state.get_episode_position(s, "Ghostwriter", 1, episodes=[ep]),
+            (None, 0.0),
+        )
+
+    @patch.object(state, "save_state")
+    def test_youtube_reset_clears_id(self, _save):
+        s = {
+            "Ghostwriter": {
+                "s01": {
+                    "watched_ids": ["dQw4w9WgXcQ", "aaaaaaaaaaa"],
+                    "pos_id": "dQw4w9WgXcQ",
+                    "pos_ep": 1,
+                    "pos": 30.0,
+                }
+            }
+        }
+        ep = {"number": 1, "youtube_id": "dQw4w9WgXcQ"}
+        changed = state.reset_episode_progress(
+            s, "Ghostwriter", 1, 1, episode=ep
+        )
+        self.assertTrue(changed)
+        entry = s["Ghostwriter"]["s01"]
+        self.assertEqual(entry["watched_ids"], ["aaaaaaaaaaa"])
+        self.assertNotIn("pos_id", entry)
+        self.assertNotIn("pos", entry)
+
+    @patch.object(state, "save_state")
+    def test_youtube_legacy_number_still_counts(self, _save):
+        """Pre-id YouTube watches stored as numbers still show as watched."""
+        s = {"Ghostwriter": {"s01": {"watched": [2]}}}
+        ep = {"number": 2, "youtube_id": "dQw4w9WgXcQ"}
+        self.assertTrue(state.is_episode_watched(s, "Ghostwriter", 1, 2, episode=ep))
+        episodes = [ep]
+        self.assertEqual(
+            state.get_watched_episodes(s, "Ghostwriter", 1, episodes=episodes),
+            {2},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

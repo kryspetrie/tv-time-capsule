@@ -11,7 +11,7 @@ import pygame
 from tv_time_capsule.app import TVTimeCapsule
 from tv_time_capsule.config import _parse_kids_mode
 from tv_time_capsule.kids_mode import kids_resume_season
-from tv_time_capsule.state import get_episode_position, set_episode_position
+from tv_time_capsule.state import season_has_in_progress, set_episode_position
 
 
 class KidsModeTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class KidsModeTests(unittest.TestCase):
             state,
             "Bluey",
             [1, 2, 3],
-            get_episode_position=get_episode_position,
+            season_has_in_progress=season_has_in_progress,
         )
         self.assertEqual(season, 2)
 
@@ -32,7 +32,7 @@ class KidsModeTests(unittest.TestCase):
             state,
             "Bluey",
             [1, 2],
-            get_episode_position=get_episode_position,
+            season_has_in_progress=season_has_in_progress,
         )
         self.assertEqual(season, 1)
 

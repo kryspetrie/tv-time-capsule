@@ -71,6 +71,7 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertTrue(cfg["ui"]["shutdown_collapse"])
         self.assertTrue(cfg["ui"]["analog_artifacts"])
         self.assertTrue(cfg["ui"]["footer_hints"])
+        self.assertEqual(cfg["ui"]["marquee_scroll"], "always")
         self.assertEqual(cfg["ui"]["safe_zone"]["top"], 10)
         self.assertTrue(cfg["screensaver"]["enabled"])
         self.assertEqual(cfg["screensaver"]["timeout_seconds"], 30)
@@ -84,6 +85,21 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertTrue(
             any(c.get("title") == "Ms Rachel" for c in cfg["youtube_channels"])
         )
+
+
+class UiMarqueeConfigTests(unittest.TestCase):
+    def test_default_always(self):
+        ui = config_mod._parse_ui({})
+        self.assertEqual(ui["marquee_scroll"], "always")
+
+    def test_selected_aliases(self):
+        for raw in ("selected", "selected_only", "selection", "on_select", "SELECTED"):
+            ui = config_mod._parse_ui({"marquee_scroll": raw})
+            self.assertEqual(ui["marquee_scroll"], "selected", raw)
+
+    def test_unknown_falls_back_to_always(self):
+        ui = config_mod._parse_ui({"marquee_scroll": "whenever"})
+        self.assertEqual(ui["marquee_scroll"], "always")
 
 
 class WeatherConfigTests(unittest.TestCase):

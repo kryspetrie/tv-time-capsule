@@ -96,6 +96,49 @@ class YoutubeConfigTests(unittest.TestCase):
         self.assertFalse(parsed[2]["include_all_videos"])
         self.assertTrue(parsed[3]["include_all_videos"])
 
+    def test_parse_youtube_channel_title_rules(self):
+        parsed = config_mod._parse_youtube_channels(
+            [
+                {
+                    "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/",
+                    "title": "Bill Nye the Science Guy",
+                    "strip_title_prefix": True,
+                    "title_deletions": [
+                        {
+                            "pattern": r"(?i)\s*[-–—]\s*4K UPSCALED\s*$",
+                            "scope": "episode",
+                        }
+                    ],
+                    "title_substitutions": [
+                        [r"(?i)\bS(\d+)E(\d+)\b", r"\1x\2"],
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(len(parsed), 1)
+        rules = parsed[0]["title_rules"]
+        self.assertEqual(len(rules), 3)
+        self.assertIn(r"Bill\ Nye\ the\ Science\ Guy", rules[0]["pattern"])
+        self.assertIn("4K UPSCALED", rules[1]["pattern"])
+        self.assertEqual(rules[1]["replace"], "")
+        self.assertEqual(rules[2]["replace"], r"\1x\2")
+        self.assertTrue(parsed[0]["strip_title_prefix"])
+
+    def test_parse_title_rules_object_on_entry(self):
+        parsed = config_mod._parse_youtube_channels(
+            [
+                {
+                    "url": "https://www.youtube.com/@example",
+                    "title": "Example",
+                    "title_rules": {
+                        "deletions": [r"(?i)^Example\s*-\s*"],
+                        "substitutions": [[r"\s+", " "]],
+                    },
+                }
+            ]
+        )
+        self.assertEqual(len(parsed[0]["title_rules"]), 2)
+
     def test_default_90s_project_unrolls_playlists(self):
         defaults = config_mod._default_youtube_channels()
         nineties = next(e for e in defaults if e.get("title") == "90s Project")
@@ -177,6 +220,128 @@ class YoutubeCacheRoundTripTests(unittest.TestCase):
         self.assertEqual(ep0["path"], "youtube:dQw4w9WgXcQ")
         self.assertEqual(ep0["youtube_id"], "dQw4w9WgXcQ")
         self.assertEqual(ep0["duration"], 42)
+
+    def test_episode_codes_set_numbers_and_strip_titles(self):
+        from tv_time_capsule.config import _parse_youtube_channels
+
+        entry = _parse_youtube_channels(
+            [
+                {
+                    "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/",
+                    "title": "Bill Nye the Science Guy",
+                    "strip_title_prefix": True,
+                }
+            ]
+        )[0]
+        show = show_from_cache_payload(
+            {
+                "title": "Bill Nye",
+                "seasons": {
+                    "1": {
+                        "label": "Season 1",
+                        "episodes": [
+                            {
+                                "number": 1,
+                                "name": "Bill Nye the Science Guy - S01E03 - Dinosaurs",
+                                "youtube_id": "aaaAAAAAAAA",
+                            },
+                            {
+                                "number": 2,
+                                "name": "Bill Nye the Science Guy - S01E01 - Flight",
+                                "youtube_id": "bbbBBBBBBBB",
+                            },
+                            {
+                                "number": 3,
+                                "name": "Bonus Clip",
+                                "youtube_id": "cccCCCCCCCC",
+                            },
+                            {
+                                "number": 4,
+                                "name": "Engine | Season 1 Episode 22",
+                                "youtube_id": "dddDDDDDDDD",
+                            },
+                        ],
+                    }
+                },
+            },
+            entry=entry,
+        )
+        assert show is not None
+        eps = show["seasons"][1]["episodes"]
+        by_id = {e["youtube_id"]: e for e in eps}
+        self.assertEqual(by_id["bbbBBBBBBBB"]["number"], 1)
+        self.assertEqual(by_id["bbbBBBBBBBB"]["name"], "Flight")
+        self.assertEqual(by_id["aaaAAAAAAAA"]["number"], 3)
+        self.assertEqual(by_id["aaaAAAAAAAA"]["name"], "Dinosaurs")
+        self.assertEqual(by_id["dddDDDDDDDD"]["number"], 22)
+        self.assertEqual(by_id["dddDDDDDDDD"]["name"], "Engine")
+        # Untitled bonus fills the next free slot (2).
+        self.assertEqual(by_id["cccCCCCCCCC"]["number"], 2)
+        self.assertEqual([e["number"] for e in eps], [1, 2, 3, 22])
+
+    def test_dedupe_prefers_separated_parts_over_composite(self):
+        show = show_from_cache_payload(
+            {
+                "title": "Animorphs",
+                "seasons": {
+                    "1": {
+                        "label": "Animorphs",
+                        "episodes": [
+                            {
+                                "number": 1,
+                                "name": "My Name is Jake Part 1 | Full Episode",
+                                "youtube_id": "aaaAAAAAAAA",
+                            },
+                            {
+                                "number": 2,
+                                "name": "My Name is Jake Part 2 | Full Episode",
+                                "youtube_id": "bbbBBBBBBBB",
+                            },
+                            {
+                                "number": 3,
+                                "name": "Underground | Full Episode",
+                                "youtube_id": "cccCCCCCCCC",
+                            },
+                            {
+                                "number": 4,
+                                "name": (
+                                    "Episode 1-3 | My Name Is Jake Pt. 1&2 | "
+                                    "Underground | Full Episode"
+                                ),
+                                "youtube_id": "dddDDDDDDDD",
+                            },
+                            {
+                                "number": 5,
+                                "name": "On the Run | Full Episode",
+                                "youtube_id": "eeeEEEEEEEE",
+                            },
+                            {
+                                "number": 6,
+                                "name": (
+                                    "Teens Transform into Animals | "
+                                    "Full Episodes 4-6"
+                                ),
+                                "youtube_id": "fffFFFFFFFF",
+                            },
+                        ],
+                    }
+                },
+            },
+            entry={"title": "Animorphs"},
+        )
+        assert show is not None
+        eps = show["seasons"][1]["episodes"]
+        names = [e["name"] for e in eps]
+        ids = {e["youtube_id"] for e in eps}
+        self.assertIn("My Name is Jake P1", names)
+        self.assertIn("My Name is Jake P2", names)
+        self.assertIn("Underground", names)
+        self.assertIn("On the Run", names)
+        self.assertNotIn("dddDDDDDDDD", ids)
+        self.assertNotIn("fffFFFFFFFF", ids)
+        self.assertTrue(
+            all("P1/P2" not in n and "1&2" not in n for n in names)
+        )
 
     def test_expand_playlists_as_shows(self):
         show = show_from_cache_payload(

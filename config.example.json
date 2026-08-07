@@ -1,6 +1,5 @@
 {
   "_about": "Example TV Time Capsule configuration. Copy to ~/.config/tv-time-capsule/config.json and edit paths, mounts, and keys. Keys starting with _ are documentation only and are ignored by the app.",
-
   "media_paths": [
     "/media/usb",
     "~/Videos/kids",
@@ -10,39 +9,53 @@
     "/mnt/tv/ssh-media",
     "/mnt/tv/ftp-media"
   ],
-
   "mounts": [
     {
-      "_example": "Samba / CIFS — password in OS keychain (see docs/usage/secrets.md)",
+      "_example": "Samba / CIFS \u2014 password in OS keychain (see docs/usage/secrets.md)",
       "type": "cifs",
       "source": "//nas.local/KidsShows",
       "mountpoint": "/mnt/tv/nas-kids",
       "username": "media",
       "keyring": "nas-kids",
-      "options": ["uid=1000", "gid=1000", "vers=3.0"]
+      "options": [
+        "uid=1000",
+        "gid=1000",
+        "vers=3.0"
+      ]
     },
     {
-      "_example": "Samba / CIFS — credentials file instead of keychain",
+      "_example": "Samba / CIFS \u2014 credentials file instead of keychain",
       "type": "cifs",
       "source": "//192.168.1.10/FamilyVideos",
       "mountpoint": "/mnt/tv/nas-family",
       "credentials": "~/.config/tv-time-capsule/nas.cred",
-      "options": ["uid=1000", "gid=1000", "vers=3.0", "iocharset=utf8"]
+      "options": [
+        "uid=1000",
+        "gid=1000",
+        "vers=3.0",
+        "iocharset=utf8"
+      ]
     },
     {
       "_example": "NFS export",
       "type": "nfs",
       "source": "nas.local:/export/media",
       "mountpoint": "/mnt/tv/nfs-media",
-      "options": ["rw", "sync"]
+      "options": [
+        "rw",
+        "sync"
+      ]
     },
     {
-      "_example": "SSHFS — prefer key-based auth",
+      "_example": "SSHFS \u2014 prefer key-based auth",
       "type": "sshfs",
       "source": "pi@fileserver:/home/shared/media",
       "mountpoint": "/mnt/tv/ssh-media",
       "identity_file": "~/.ssh/id_rsa",
-      "options": ["allow_other", "default_permissions"]
+      "options": [
+        "allow_other",
+        "default_permissions"
+      ]
     },
     {
       "_example": "FTP via curlftpfs",
@@ -52,18 +65,23 @@
       "credentials": "~/.config/tv-time-capsule/ftp.cred"
     }
   ],
-
   "keymap": {
-    "select": ["enter", "kp-enter", "space"],
-    "back": ["escape"],
-    "quit": ["q"]
+    "select": [
+      "enter",
+      "kp-enter",
+      "space"
+    ],
+    "back": [
+      "escape"
+    ],
+    "quit": [
+      "q"
+    ]
   },
-
   "screensaver": {
     "enabled": true,
     "timeout_seconds": 30
   },
-
   "playback": {
     "autoplay": "next_in_season_only",
     "autoplay_countdown_seconds": 5,
@@ -71,7 +89,6 @@
     "now_playing_splash_seconds": 1.5,
     "hw_decode": "auto"
   },
-
   "cache": {
     "enabled": true,
     "directory": null,
@@ -79,7 +96,6 @@
     "prefetch_next": true,
     "cache_before_playing": false
   },
-
   "ui": {
     "channel_snow": true,
     "shutdown_collapse": true,
@@ -87,6 +103,7 @@
     "analog_artifacts": true,
     "analog_artifact_rate": 12,
     "footer_hints": true,
+    "marquee_scroll": "always",
     "safe_zone": {
       "top": 10,
       "bottom": 10,
@@ -96,137 +113,437 @@
       "offset_y": 0
     }
   },
-
   "gamepad": {
     "enabled": true,
     "bindings": {
-      "select": ["button-0", "button-7"],
-      "back": ["button-1", "button-6"],
-      "up": ["hat-up", "stick-up"],
-      "down": ["hat-down", "stick-down"],
-      "left": ["hat-left", "stick-left"],
-      "right": ["hat-right", "stick-right"]
+      "select": [
+        "button-0",
+        "button-7"
+      ],
+      "back": [
+        "button-1",
+        "button-6"
+      ],
+      "up": [
+        "hat-up",
+        "stick-up"
+      ],
+      "down": [
+        "hat-down",
+        "stick-down"
+      ],
+      "left": [
+        "hat-left",
+        "stick-left"
+      ],
+      "right": [
+        "hat-right",
+        "stick-right"
+      ]
     }
   },
-
   "channels": {
-    "order": ["Bluey", "Mister Rogers", "Movies"],
-    "numbers": { "Bluey": 1, "Movies": 9 }
+    "order": [
+      "Bluey",
+      "Mister Rogers",
+      "Movies"
+    ],
+    "numbers": {
+      "Bluey": 1,
+      "Movies": 9
+    }
   },
-
   "library": {
     "rescan_interval_seconds": 0,
     "rescan_long_press_ms": 800
   },
-
   "kids_mode": {
     "default_enabled": false,
     "enabled": false
   },
-
   "network": {
     "mdns_hostname": "vintage-tv",
     "admin_port": 8765
   },
-
   "admin": {
     "enabled": true,
     "port": 8765,
     "bind": "0.0.0.0"
   },
-
   "weather": {
-    "_about": "Optional forecast location for dial 004 (weather.com/retro). Headless Pi has no GPS and often wrong GeoIP — set a zip or city. latitude+longitude override zip/query when both are set. Default: Boston, MA.",
+    "_about": "Optional forecast location for dial 004 (weather.com/retro). Headless Pi has no GPS and often wrong GeoIP \u2014 set a zip or city. latitude+longitude override zip/query when both are set. Default: Boston, MA.",
     "zip": "02108",
     "query": null,
     "name": "Boston",
     "latitude": null,
     "longitude": null
   },
-
   "retro_tv": {
     "_about": "MyRetroTVs decade streams (dial 1950-2009). filters maps box_* checkbox ids to on/off; null = site default until changed in the Enter menu. volume is 0-100 Chrome gain.",
     "filters": null,
     "volume": null
   },
-
   "youtube_channels": [
     {
-      "_about": "Virtual shows from YouTube (channels or a specific playlist URL). Optional title override. Set playlists_as_shows to unroll each public playlist into its own show (e.g. 90s Project). Dial numbers use channels.order / channels.numbers like local shows (web admin Channel lineup). Catalog cached under ~/.local/share/tv-time-capsule/youtube/; playback uses headless Chrome."
+      "_about": "Virtual YouTube shows. playlist_shows unrolls selected playlists into shows (group seasons with match capture, e.g. Ghostwriter Season N). include_playlists keeps one channel show with only selected seasons. strip_title_prefix / title_deletions / title_substitutions normalize titles."
     },
-    { "url": "https://www.youtube.com/@msrachel/", "title": "Ms Rachel" },
-    { "url": "https://www.youtube.com/@BlueyOfficialChannel", "title": "Bluey" },
-    { "url": "https://www.youtube.com/@MisterRogersNeighborhood", "title": "Mister Rogers' Neighborhood" },
-    { "url": "https://www.youtube.com/@Raffi", "title": "Raffi" },
-    { "url": "https://www.youtube.com/@SciShowKids", "title": "SciShow Kids" },
-    { "url": "https://www.youtube.com/@PBSKIDS", "title": "PBS KIDS" },
-    { "url": "https://www.youtube.com/channel/UCOXkrXRpNfUu6mypF7NZxnA", "title": "Ms Moni" },
-    { "url": "https://www.youtube.com/@thomasandfriends", "title": "Thomas & Friends" },
-    { "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/", "title": "Bill Nye the Science Guy" },
+    {
+      "url": "https://www.youtube.com/@msrachel/",
+      "title": "Ms Rachel",
+      "title_deletions": [
+        "(?i)\\s*\\|\\s*(?:Videos for Toddlers|Toddler Learning Videos?|Educational Kids Videos|Kids Dance Songs|Speech(?: Delay Learning Video)?|Videos for Babies|Baby Videos|Videos for Kids)\\s*$",
+        "(?i)\\s*[-\u2013\u2014]\\s*Videos for Kids\\b.*$",
+        "(?i)\\s*[-\u2013\u2014]\\s*Nursery Rhymes\\s*&\\s*Kids Songs\\s*$"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@BlueyOfficialChannel",
+      "title": "Bluey",
+      "title_deletions": [
+        "(?i)\\s*\\|\\s*Bluey Book Reads\\s*$",
+        "(?i)\\s*\\|\\s*FULL BLUEY MINISODE\\s*$",
+        "(?i)\\s*\\|\\s*Bluey #ytshorts\\s*$",
+        "(?i)\\s*\\|\\s*Bluey (?:Cookalongs|Puppets|Dancealongs|Cake Off)\\s*$",
+        "(?i)\\s*\\|\\s*Bingo\\s*-\\s*Official Channel\\s*$",
+        "(?i)\\s*\\|\\s*NEW Bluey Tunes\\s*$",
+        "(?i)^LIVE\\s*:\\s*",
+        {
+          "pattern": "(?i)^Bluey\\s*:\\s*",
+          "scope": "episode"
+        }
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@Raffi",
+      "title": "Raffi",
+      "strip_title_prefix": true,
+      "title_deletions": [
+        "(?i)^Raffi with(?: the)? Good Lovelies\\s*[-\u2013\u2014]\\s*",
+        "(?i)^Raffi and Lindsay Munroe\\s*[-\u2013\u2014]\\s*",
+        "(?i)^Raffi,\\s*Yo-Yo Ma,\\s*Lindsay Munroe\\s*[-\u2013\u2014]\\s*",
+        "(?i)^Raffi and Yo-Yo Ma\\s*[-\u2013\u2014]\\s*",
+        "(?i)\\s*[-\u2013\u2014]\\s*In Concert with the Rise and Shine Band\\s*$",
+        "(?i)\\s*[-\u2013\u2014]\\s*ft\\.\\s*Good Lovelies\\s*$",
+        "(?i)\\s*\\(Official Visualizer\\)\\s*$"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@SciShowKids",
+      "title": "SciShow Kids",
+      "title_deletions": [
+        "(?i)\\s*\\|\\s*Winter Science\\s*$",
+        "(?i)\\s*\\|\\s*Weather Science\\s*$",
+        "(?i)\\s*\\|\\s*Science Project for Kids\\s*$",
+        "(?i)\\s*\\|\\s*Amazing Animals\\s*$",
+        "(?i)\\s*\\|\\s*How We Study Space\\s*$",
+        "(?i)\\s*\\|\\s*The Science of (?:Food|Flight|Cooking)!\\s*$",
+        "(?i)\\s*\\|\\s*Spring is Here!\\s*$",
+        "(?i)\\s*\\|\\s*Winter is Alive!\\s*$",
+        "(?i)\\s*\\|\\s*Squeaks Grows a Garden!\\s*$"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@PBSKIDS",
+      "title": "PBS KIDS",
+      "playlists_as_shows": true,
+      "playlist_shows": [
+        "Phoebe & Jay",
+        "WordGirl",
+        "Ready Jet Go!",
+        "Let's Go Luna",
+        "Team Hamster with Ruff",
+        "Xavier Riddle & the Secret Museum",
+        "Acoustic Rooster",
+        "Daniel Tiger's Neighborhood",
+        "City Island",
+        "Dinosaur Train",
+        "Jelly, Ben & Pogo",
+        "Rosie's Rules",
+        "Carl the Collector",
+        "Lyla in the Loop",
+        "Weather Hunters",
+        "Odd Squad UK"
+      ],
+      "title_deletions": [
+        "(?i)^PBS KIDS\\s+",
+        "(?i)\\s*\\|\\s*PBS KIDS Apps\\s*&\\s*Games\\s*$"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/channel/UCOXkrXRpNfUu6mypF7NZxnA",
+      "title": "Ms Moni",
+      "title_deletions": [
+        "(?i)\\s*\\|\\s*(?:Toddler Learning Videos?|Kids Learning Videos|Toddler Learning with Ms\\.?\\s*Moni|Learn To Talk with Ms\\.?\\s*Moni|Talking Toddler Learning|Learning For Toddlers|Construction Vehicles For Kids|Toddler Learning Videos,\\s*Kids Songs\\s*&\\s*Nursery Rhymes Compilation|2hrs? Compilation)\\s*$",
+        "(?i)^(?:\ud83d\udc9b\\s*)?Ms\\.?\\s*Moni\\s*[-\u2013\u2014]\\s*",
+        "(?i)^Best of Ms\\.?\\s*Moni\\s*[-\u2013\u2014]\\s*"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@thomasandfriends",
+      "title": "Thomas & Friends",
+      "include_all_videos": false,
+      "include_playlists": [
+        {
+          "match": "(?i)^Season\\s+(\\d+)$"
+        },
+        {
+          "title": "Movies & Specials",
+          "match": "(?i)Movies\\s*&\\s*Specials"
+        }
+      ],
+      "strip_title_prefix": true,
+      "title_deletions": [
+        "(?i)^Thomas\\s*&\\s*Friends\\s*[|:]\\s*",
+        "(?i)\\s*\\|\\s*Watch Out Thomas!?\\s*$",
+        "(?i)\\s*\\|\\s*Life Lessons\\s*$",
+        "(?i)\\s*\\|\\s*All Engines Go!?\\s*$",
+        "(?i)\\s*\\|\\s*On Cartoonito\\b.*$",
+        {
+          "pattern": "(?i)\\s*:\\s*Sing Along!\\s*$",
+          "scope": "playlist"
+        },
+        {
+          "pattern": "(?i)\\s*\\|\\s*Compilations?\\s*$",
+          "scope": "playlist"
+        },
+        {
+          "pattern": "(?i)\\s*80th Anniversary Storytime\\s*\\|\\s*Read Along\\s*$",
+          "scope": "playlist"
+        }
+      ],
+      "title_substitutions": [
+        [
+          "(?i)^Thomas\\s*&\\s*Friends\\s*Movies\\s*&\\s*Specials\\s*$",
+          "Movies & Specials"
+        ]
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/",
+      "title": "Bill Nye the Science Guy",
+      "strip_title_prefix": true,
+      "include_all_videos": false,
+      "include_playlists": [
+        {
+          "match": "(?i)^Season\\s+(\\d+)$"
+        }
+      ]
+    },
     {
       "url": "https://www.youtube.com/watch?v=yzPeIKhMUOU&list=PL8SFNbbOmAYNMcH8uywT24j5YXJTC2WTZ",
-      "title": "Beakman's World"
-    },
-    { "url": "https://www.youtube.com/@ReadingRainbowOfficial", "title": "Reading Rainbow" },
-    { "url": "https://www.youtube.com/@SesameStreet", "title": "Sesame Street" },
-    {
-      "url": "https://www.youtube.com/watch?v=-rJ0nxLQ8wU&list=PLCeScks4FrgKF4Vp8-1C4OWbgJrn5BbkW",
-      "title": "The Magic School Bus"
-    },
-    {
-      "url": "https://www.youtube.com/watch?v=dcBNHNs6TdY&list=PLCeScks4FrgJTUTbM19xR52SM1ss3I65U",
-      "title": "Clifford the Big Red Dog"
-    },
-    {
-      "url": "https://www.youtube.com/watch?v=2ptL3fim9Uw&list=PLCeScks4FrgKPU26Y3gZeLTIdqK6ZggYg",
-      "title": "Animorphs"
+      "title": "Beakman's World",
+      "title_deletions": [
+        "(?i)^Beakman's World\\s+",
+        {
+          "pattern": "(?i)\\s*(?:audio dropouts\\s*)?\\bPDTV\\b.*$",
+          "scope": "episode"
+        },
+        {
+          "pattern": "(?i)\\s*\\bdrngr\\s*$",
+          "scope": "episode"
+        }
+      ]
     },
     {
-      "url": "https://www.youtube.com/watch?v=WHIod8ulH3E&list=PLCeScks4FrgIg0_AKYL2UiAJRH6jiGWJ_",
-      "title": "Goosebumps"
+      "url": "https://www.youtube.com/@ReadingRainbowOfficial",
+      "title": "Reading Rainbow",
+      "strip_title_prefix": true,
+      "include_all_videos": false,
+      "include_playlists": [
+        {
+          "title": "Full Episodes",
+          "match": "(?i)^Full Episodes!?\\s*$"
+        },
+        {
+          "title": "New Season",
+          "match": "(?i)^(?:All New Season!?|New Season)\\s*$"
+        },
+        {
+          "title": "Stories",
+          "match": "(?i)^(?:Reading Rainbow\\s+)?Stories\\s*$"
+        }
+      ],
+      "title_deletions": [
+        "(?i)^Reading Rainbow\\s*[|\\-\u2013\u2014]\\s*"
+      ],
+      "title_substitutions": [
+        [
+          "(?i)^Reading Rainbow\\s+Stories\\s*$",
+          "Stories"
+        ],
+        [
+          "(?i)^Full Episodes!?\\s*$",
+          "Full Episodes"
+        ],
+        [
+          "(?i)^All New Season!?\\s*$",
+          "New Season"
+        ]
+      ]
     },
     {
-      "url": "https://www.youtube.com/watch?v=elf250uvecY&list=PLCeScks4FrgK-ZOSpDTZmfVz7xtGY5yXv",
-      "title": "Clifford's Puppy Days"
+      "url": "https://www.youtube.com/@SesameStreet",
+      "title": "Sesame Street",
+      "strip_title_prefix": true,
+      "title_deletions": [
+        "(?i)^Sesame Street Baby Band\\s*:\\s*",
+        "(?i)^Sesame Street on Roblox\\s*:\\s*",
+        "(?i)\\s*\\|\\s*#ShareTheLaughter Challenge\\s*$",
+        "(?i)\\s*\\|\\s*Nursery Rhymes and Kids Songs\\s*$",
+        "(?i)\\s*\\|\\s*Music\\s*&\\s*Dance for Kids\\s*$",
+        "(?i)\\s*\\|\\s*Elmo's World\\s*$",
+        "(?i)\\s*\\|\\s*Sponsored by Dove\\s*$",
+        "(?i)\\s*[-\u2013\u2014]\\s*ChuChu TV(?: Nursery Rhymes| Classics)?\\s*$",
+        "(?i)\\s*[-\u2013\u2014]\\s*Toddler Learning Videos\\s*$",
+        "(?i)\\s*[-\u2013\u2014]\\s*Alphabet Animals\\s*$"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@ScholasticClassic",
+      "title": "Scholastic Classic",
+      "playlists_as_shows": true,
+      "playlist_shows": [
+        {
+          "title": "Animorphs",
+          "match": "(?i)^Animorphs(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "Astroblast",
+          "match": "(?i)^Astroblast(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "Maya & Miguel",
+          "match": "(?i)^Maya\\s*&\\s*Miguel(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "Clifford's Puppy Days",
+          "match": "(?i)^Clifford's Puppy Days(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "Goosebumps",
+          "match": "(?i)^Goosebumps(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "Clifford the Big Red Dog",
+          "match": "(?i)^Clifford the Big Red Dog(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "The Magic School Bus",
+          "match": "(?i)^The Magic School Bus(?:\\s+Scholastic Classic)?\\s*$"
+        },
+        {
+          "title": "Horrible Histories",
+          "match": "(?i)^Horrible Histories\\b"
+        }
+      ],
+      "title_deletions": [
+        "(?i)^Animorphs\\s+\\d+(?:-\\d+)?\\s*\\|\\s*",
+        "(?i)^Battling Aliens with Animal Powers\\s*\\|\\s*",
+        "(?i)^Teens Transform into Animals(?:\\s+to Fight Aliens)?\\s*\\|\\s*",
+        "(?i)\\s*\\|\\s*Happy Halloween!\\s*$",
+        "(?i)\\s*\\|\\s*Spooky Holidays\\s*$",
+        "(?i)\\s+Spooky Halloween Full Episodes\\b.*$"
+      ],
+      "title_substitutions": [
+        [
+          "(?i)^Animorphs\\s+(\\d+(?:-\\d+)?)\\s*$",
+          "\\1"
+        ]
+      ]
     },
     {
       "url": "https://www.youtube.com/watch?v=cRe1cta5nZk&list=PLBSUN2PpOgePQlEtu-ZSMcHJf1zDA8a_M",
-      "title": "Arthur"
+      "title": "Arthur",
+      "strip_title_prefix": true
     },
     {
       "url": "https://www.youtube.com/@90sProject",
       "title": "90s Project",
-      "playlists_as_shows": true
+      "playlists_as_shows": true,
+      "playlist_shows": [
+        "Bobby's World",
+        "Care Bears",
+        "Timon and Pumbaa",
+        "Rupert",
+        "Sagwa the Chinese Siamese Cat",
+        "Wishbone",
+        {
+          "title": "Ghostwriter",
+          "match": "(?i)^Ghostwriter\\s+Season\\s+(\\d+)$"
+        }
+      ],
+      "title_deletions": [
+        "(?i)^Wishbone\\s*[:\\-\u2013\u2014]\\s*",
+        "(?i)^Bobby's [Ww]orld\\s*[-\u2013\u2014]\\s*",
+        "(?i)^Sagwa The Chinese Siamese Cat\\s*[-\u2013\u2014:]\\s*",
+        "(?i)^Ghostwriter\\s*[-\u2013\u2014:]\\s*",
+        "(?i)^Care Bears\\s*[-\u2013\u2014:]\\s*",
+        "(?i)^GW\\s*[-\u2013\u2014:]\\s*",
+        "(?i)\\s*\\[\\(watch the rest.*$",
+        "(?i)\\s*\\(add\\s*&fmt=18.*$",
+        "(?i)\\s*\\(clip\\)\\s*",
+        "(?i)\\s+HD\\s+(\\d+)\\s*$"
+      ]
+    },
+    {
+      "url": "https://www.youtube.com/@MisterRogersNeighborhood",
+      "title": "Mister Rogers' Neighborhood",
+      "include_all_videos": false,
+      "include_playlists": [
+        {
+          "title": "Full Episodes",
+          "match": "(?i)Full Episodes\\s*$"
+        },
+        {
+          "title": "New in the Neighborhood",
+          "match": "(?i)^New in the Neighborhood\\s*$"
+        },
+        {
+          "title": "Classic Moments",
+          "match": "(?i)Classic Moments\\s*$"
+        }
+      ],
+      "title_deletions": [
+        "(?i)\\s*\\|\\s*Official Channel Trailer\\b.*$"
+      ]
     }
   ],
-
+  "_youtube_title_rules": {
+    "about": "Optional global youtube_title_rules as {deletions, substitutions} or a legacy [{pattern, replace, scope}] list. Omit for built-in defaults tuned to the kids/classic channel set; [] / empty object disables. Per-channel title_deletions / title_substitutions / strip_title_prefix run after these. Patterns are full Python regexes.",
+    "example": {
+      "deletions": [
+        "(?i)\\s*\\|\\s*PBS KIDS\\s*$"
+      ],
+      "substitutions": [
+        [
+          "(?i)\\b(\\d+)\\s*x\\s*(\\d+)\\b",
+          "\\1x\\2"
+        ]
+      ]
+    }
+  },
   "_channels": {
     "order": "Show folder names in desired browse / priority order (unknown names skipped)",
     "numbers": "Optional fixed channel numbers; unlisted shows use 1-based position in the ordered lineup"
   },
-
   "_library": {
     "rescan_interval_seconds": "Periodic rescan while idle on the show list (0 = off)",
     "rescan_long_press_ms": "Hold R (reset key) this long to rescan without restarting"
   },
-
   "_kids_mode": {
-    "default_enabled": "Fallback when enabled is omitted — first launch only",
+    "default_enabled": "Fallback when enabled is omitted \u2014 first launch only",
     "enabled": "Persisted parent/kids mode (written when you toggle Tab); restored on next start",
     "allowlist": "Omit for full kids library (legacy). Once present, kids mode only shows tagged shows/movies; parent K toggles tags"
   },
-
   "_network": {
-    "mdns_hostname": "LAN browse name without .local — set by install.sh / install-pi.sh (--hostname)",
+    "mdns_hostname": "LAN browse name without .local \u2014 set by install.sh / install-pi.sh (--hostname)",
     "admin_port": "Web admin TCP port; Avahi HTTP service uses this during install"
   },
-
   "_admin": {
-    "enabled": "Local web UI — see docs/usage/web-admin.md",
+    "enabled": "Local web UI \u2014 see docs/usage/web-admin.md",
     "port": "Default 8765",
     "bind": "0.0.0.0 for LAN phones; 127.0.0.1 for SSH tunnel only"
   },
-
   "_weather": {
     "zip": "US ZIP / postal code (e.g. 10001). Resolved via weather.com location search.",
     "query": "Free-text city search when zip is unset (e.g. \"Austin, TX\").",
@@ -234,15 +551,13 @@
     "latitude": "Optional; if set with longitude, used directly (overrides zip/query).",
     "longitude": "Optional; pair with latitude."
   },
-
   "_playback": {
-    "autoplay": "off | next_episode | next_in_season_only — advance after an episode ends naturally",
+    "autoplay": "off | next_episode | next_in_season_only \u2014 advance after an episode ends naturally",
     "autoplay_countdown_seconds": "Seconds before the next episode starts (0 = instant). Esc cancels during countdown.",
     "now_playing_splash": "Show episode summary before playback starts (default true)",
     "now_playing_splash_seconds": "How long the summary stays on screen (default 1.5; 0 = skip even if enabled)",
-    "hw_decode": "auto | on | off — Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"
+    "hw_decode": "auto | on | off \u2014 Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"
   },
-
   "_cache": {
     "enabled": "Background-copy remote episodes to local disk for smoother playback (default true)",
     "directory": "Cache folder (default ~/.local/share/tv-time-capsule/playback-cache)",
@@ -250,35 +565,31 @@
     "prefetch_next": "Start caching the next autoplay episode during the countdown (default true)",
     "cache_before_playing": "Wait on the now-playing title screen with a progress bar until the episode is fully cached (default false; avoids mid-playback cache switch)"
   },
-
   "_ui": {
-    "channel_snow": "FUN TWEAK — B&W static burst when committing channel numbers on show/season/episode lists (not arrow keys). Pre-cached 320ms animation. CLI: --channel-snow",
-    "shutdown_collapse": "FUN TWEAK — CRT vertical collapse on quit. CLI: --shutdown-collapse",
-    "channel_snow_audio": "FUN TWEAK — Quiet white-noise with channel snow (defaults on when channel_snow is true; set false to mute)",
-    "analog_artifacts": "FUN TWEAK — Random brief static, line tear, and vertical roll on the show browser only. CLI: --analog-artifacts",
+    "channel_snow": "FUN TWEAK \u2014 B&W static burst when committing channel numbers on show/season/episode lists (not arrow keys). Pre-cached 320ms animation. CLI: --channel-snow",
+    "shutdown_collapse": "FUN TWEAK \u2014 CRT vertical collapse on quit. CLI: --shutdown-collapse",
+    "channel_snow_audio": "FUN TWEAK \u2014 Quiet white-noise with channel snow (defaults on when channel_snow is true; set false to mute)",
+    "analog_artifacts": "FUN TWEAK \u2014 Random brief static, line tear, and vertical roll on the show browser only. CLI: --analog-artifacts",
     "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches)",
-    "footer_hints": "Bottom status bar (clock + help key) on browse screens in parent mode (toggle with F5 by default; always off in kids mode)"
+    "footer_hints": "Bottom status bar (clock + help key) on browse screens in parent mode (toggle with F5 by default; always off in kids mode)",
+    "marquee_scroll": "always = scroll overflowing panel titles continuously; selected = only the highlighted row (legacy)"
   },
-
   "_safe_zone": {
-    "top": "Overscan padding above the 640×480 UI (% of UI height). Extends the framebuffer outward — UI is never scaled.",
-    "bottom": "Padding below the UI (% of UI height — often higher on CRTs, e.g. 8)",
+    "top": "Overscan padding above the 640\u00d7480 UI (% of UI height). Extends the framebuffer outward \u2014 UI is never scaled.",
+    "bottom": "Padding below the UI (% of UI height \u2014 often higher on CRTs, e.g. 8)",
     "left": "Padding left of the UI (% of UI width)",
     "right": "Padding right of the UI (% of UI width)",
     "offset_x": "Optional pixel shift right within the safe area (asymmetric overscan tuning)",
     "offset_y": "Optional pixel shift down within the safe area",
     "offset": "Optional shorthand { \"x\": N, \"y\": N } or [x, y] for offset_x/y",
-    "margin": "Optional shorthand — uniform %% on all sides (e.g. 5 or {\"margin\": 5})",
+    "margin": "Optional shorthand \u2014 uniform %% on all sides (e.g. 5 or {\"margin\": 5})",
     "vertical": "Optional shorthand for top and bottom together",
     "horizontal": "Optional shorthand for left and right together"
   },
-
   "_easter_eggs": {
-    "test_patterns": "Any parent browse screen — press 001, 002, or 003 for full-screen colorbars.png, grid.png, indianhead.png from src/tv_time_capsule/assets/ (you supply the PNGs; app never generates them). Esc exits. Bare 0 = Back; 00 = alphabet menu. See docs/usage/fun-tweaks-and-easter-eggs.md"
+    "test_patterns": "Any parent browse screen \u2014 press 001, 002, or 003 for full-screen colorbars.png, grid.png, indianhead.png from src/tv_time_capsule/assets/ (you supply the PNGs; app never generates them). Esc exits. Bare 0 = Back; 00 = alphabet menu. See docs/usage/fun-tweaks-and-easter-eggs.md"
   },
-
   "_gamepad": "USB controllers via SDL. Remap live in-app with F4 (gamepad configuration). Bindings use readable tokens: button-N, hat-up/down/left/right, stick-up/down/left/right.",
-
   "_keymap_reference": {
     "up": "Browse up / volume up during playback (default: Up arrow)",
     "down": "Browse down / volume down during playback (default: Down arrow)",
@@ -286,19 +597,20 @@
     "right": "Select / seek forward 10s during playback (default: Right arrow)",
     "select": "Select / play / pause-resume (default: Enter, keypad Enter, Space)",
     "back": "Back / stop playback (default: Escape)",
-    "quit": "Quit app — parent mode only (default: Q)",
+    "quit": "Quit app \u2014 parent mode only (default: Q)",
     "help": "Context help for the current screen (default: H)",
-    "reset": "Reset watch status — tap; hold to rescan library (default: R)",
+    "reset": "Reset watch status \u2014 tap; hold to rescan library (default: R)",
     "keymap_reset": "Reset all key bindings to defaults on key-setup screen (default: F3)",
     "keymap_remove": "Remove last binding for highlighted action on key-setup screen (default: Delete)",
     "kids_mode_toggle": "Toggle kid-friendly / parent mode (default: Tab)",
-    "letter_menu": "Open alphabet jump menu on show/movie list — parent mode (default: L)",
-    "kids_tag_toggle": "Tag/untag title for kids allowlist — parent mode (default: K)",
+    "letter_menu": "Open alphabet jump menu on show/movie list \u2014 parent mode (default: L)",
+    "kids_tag_toggle": "Tag/untag title for kids allowlist \u2014 parent mode (default: K)",
     "key_config": "Open keyboard key configuration (default: F2)",
     "gamepad_config": "Open gamepad configuration (default: F4)",
     "safe_zone": "Safe zone calibration (default: Z)",
     "cache_cancel": "Cancel background playback cache (default: C)",
-    "footer_hints_toggle": "Toggle browse status bar — parent mode (default: F5)",
+    "zoom_toggle": "Toggle YouTube pillarbox zoom for the current episode (default: T)",
+    "footer_hints_toggle": "Toggle browse status bar \u2014 parent mode (default: F5)",
     "digit_0": "Channel digit 0 (default: 0, keypad 0)",
     "digit_1": "Channel digit 1 (default: 1, keypad 1)",
     "digit_2": "Channel digit 2",
@@ -310,7 +622,6 @@
     "digit_8": "Channel digit 8",
     "digit_9": "Channel digit 9"
   },
-
   "_keymap_notes": [
     "Each action accepts a key name string or an array of names (aliases). Examples: escape, enter, space, q, f2, up, num-0.",
     "Legacy integer pygame key codes still load correctly.",
@@ -318,9 +629,7 @@
     "Rebind in-app with F2. F3 on that screen resets to defaults; Delete removes the last alias.",
     "Left/right on the key-setup screen change pages. Assigning a key already used elsewhere moves it to the new action."
   ],
-
-  "_screensaver": "FUN TWEAK — Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",
-
+  "_screensaver": "FUN TWEAK \u2014 Bouncing VHS logo (vhs.bmp, 2x pixelated) on a black screen after menu idle time. Random multiply tint on each bounce. Any key dismisses.",
   "_mount_fields": {
     "type": "Required. cifs | smb | nfs | sshfs | sftp | ftp | ftps",
     "source": "Required. Share URL or remote path",
@@ -328,14 +637,13 @@
     "options": "Optional. Array of mount options or comma-separated string",
     "credentials": "Optional. Path to username/password file",
     "username": "Optional. Share username",
-    "password": "Optional. Literal password (discouraged — use keyring or credentials file)",
+    "password": "Optional. Literal password (discouraged \u2014 use keyring or credentials file)",
     "keyring": "Optional. OS keychain item name for the password",
     "password_keyring": "Optional. Alias for keyring",
     "username_keyring": "Optional. OS keychain item name for the username",
     "domain": "Optional. CIFS domain / workgroup",
     "identity_file": "Optional. SSH private key for sshfs"
   },
-
   "_setup": [
     "Development: cp config.example.json config.json  (repo root; auto-discovered)",
     "Installed (pipx): cp config.example.json ~/.config/tv-time-capsule/config.json",

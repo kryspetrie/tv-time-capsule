@@ -38,6 +38,7 @@ Credentials and temporary mount password files always live under `~/.config/tv-t
 |------|---------|
 | Active `config.json` (see table above) | Media paths, remote mounts, key bindings |
 | `~/.local/share/tv-time-capsule/state.json` | Per-episode watch flags, in-progress bookmarks |
+| `~/.local/share/tv-time-capsule/youtube/` | YouTube catalog cache (~24h) and per-video pillarbox crop cache (~30d) |
 | `~/.local/share/tv-time-capsule/admin.pid` | Previous admin server PID (used to free the port on restart) |
 | `~/.config/tv-time-capsule/` | Credentials files, temp CIFS creds, secrets helpers |
 
@@ -199,7 +200,8 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
     "shutdown_collapse": false,
     "channel_snow_audio": false,
     "analog_artifacts": false,
-    "analog_artifact_rate": 12
+    "analog_artifact_rate": 12,
+    "marquee_scroll": "always"
   }
 }
 ```
@@ -212,6 +214,7 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
 | `analog_artifacts` | `true` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
 | `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches) |
 | `footer_hints` | `true` | Bottom status bar (clock + help key) on browse screens in **parent mode** (toggle in-app with **F5**; always hidden in kids mode) |
+| `marquee_scroll` | `"always"` | How overflowing list/header titles scroll: `"always"` (every visible row) or `"selected"` (only the highlighted row) |
 | `safe_zone` | `10` on all sides | CRT overscan inset — see [Safe zone](#safe-zone) |
 
 CLI overrides: `--channel-snow` / `--no-channel-snow`, `--shutdown-collapse` / `--no-shutdown-collapse`, `--analog-artifacts` / `--no-analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`. Omit a flag to use config. In **`--windowed`** mode the safe zone defaults to **0%** unless you pass `--safe-zone` explicitly (handy for dev on a monitor).
@@ -445,14 +448,26 @@ Progress is stored per show under `~/.local/share/tv-time-capsule/state.json`:
       "pos_ep": 2,
       "pos": 45.0
     }
+  },
+  "Ghostwriter": {
+    "s01": {
+      "watched_ids": ["dQw4w9WgXcQ"],
+      "pos_id": "xxxxxxxxxxx",
+      "pos_ep": 3,
+      "pos": 120.0
+    }
   }
 }
 ```
 
 | Field | Meaning |
 |-------|---------|
-| `watched` | Episode numbers finished (any order — out-of-order viewing is supported) |
-| `pos_ep` / `pos` | In-progress bookmark (seconds into `pos_ep`) |
+| `watched` | Local episode numbers finished (any order — out-of-order viewing is supported) |
+| `watched_ids` | YouTube video ids finished (stable across playlist reorders) |
+| `pos_ep` / `pos` | In-progress bookmark for local media (seconds into `pos_ep`) |
+| `pos_id` / `pos` | In-progress bookmark for YouTube (`pos_ep` is also kept as a convenience) |
+
+YouTube completion and resume are keyed by video id so reshuffling a playlist does not mark the wrong episode or lose a bookmark. Legacy seasons that only stored YouTube progress as episode numbers still count as watched when those numbers match the current catalog; the next finish/reset migrates to `watched_ids`.
 
 Legacy seasons with a single `ep` field (highest completed in order) migrate to `watched` automatically on the next save.
 
@@ -494,9 +509,46 @@ Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated 
 
 See [Fun tweaks & easter eggs → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
 
+## `youtube_title_rules`
+
+Global regex rewrites for scraped YouTube **playlist** and **episode** titles (after OSD-safe character cleanup). Config `title` overrides are not rewritten. Omit the key to use the built-in kids/classic defaults; set `"youtube_title_rules": []` (or `{ "deletions": [], "substitutions": [] }`) to disable.
+
+Patterns are full Python regexes (`re.sub`). Use inline flags such as `(?i)` for case-insensitive.
+
+**Preferred shape** — deletions (remove matches) + substitutions (find/replace pairs):
+
+```json
+{
+  "youtube_title_rules": {
+    "deletions": [
+      "(?i)\\s*\\|\\s*Scholastic Classic\\s*$",
+      { "pattern": "(?i)\\s*\\|\\s*Full Episodes?\\b", "scope": "episode" }
+    ],
+    "substitutions": [
+      ["(?i)\\b(\\d+)\\s*x\\s*(\\d+)\\b", "\\1x\\2"]
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `deletions` | List of patterns to remove (string, or `{pattern, scope?}`) |
+| `substitutions` | List of `[pattern, replace]` pairs, or `{pattern, replace, scope?}` |
+| `rules` | Optional extra full rule list (same as the legacy array form) |
+| `scope` | `all` (default), `episode`, or `playlist` |
+
+**Legacy array form** is still supported: objects `{pattern, replace, scope?}`, bare deletion strings, or `[pattern, replace]` pairs.
+
+Built-in defaults strip brand pipes (`\| Scholastic Classic`, `\| PBS KIDS`, …), `Full Episode(s)`, leading season/episode wrappers (`Season 3, Episode 2b, …`, `Show FULL EPISODE | …`, `S01E02 …`), trailing `| Season N`, rip tags (`ItunesRip`), runtime suffixes (`\| 90 Minutes!`), quality tags on playlists (`- 480p`, `4K UPSCALE`), and similar noise.
+
+Episode titles that embed codes such as `S01E02`, `1x02`, `Season 7 Episode 22` (including Arthur-style `2b` / `5A` suffixes), or a leading `1 - ` / `2 - ` have those markers removed from the display name, and the episode list number is taken from the code (playlist order fills any gaps). `Part 1` / `Pt. 1` style markers are shortened to `P1`; composites like `Pt 1&2` / `Part 1 & 2` become `P1/P2`. Compilation uploads that duplicate already-present separated episodes (e.g. `My Name Is Jake P1/P2 | Underground` when P1, P2, and Underground exist) are dropped.
+
+Per-channel rules (below) run **after** these globals. Prefer globals for patterns that repeat across shows; keep `title_deletions` / `title_substitutions` for brand-specific marketing lines only. `strip_title_prefix` strips a leading `Title -` / `Title |` / `Title :` when `title` is set.
+
 ## `youtube_channels`
 
-List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Long-press **R** / admin rescan refreshes the cache. Playback opens `youtube.com/watch?v=…` in Chrome CDP screencast (requires Chrome/Chromium, same as Weather and Retro TV).
+List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Per-video pillarbox crop decisions from playback are cached under `youtube/crops/` for 30 days so replaying an episode skips the load-time crop probe. Press **T** during playback to toggle zoom on/off for that episode (persisted in the crop cache). Long-press **R** / admin rescan refreshes the catalog cache. Playback opens `youtube.com/watch?v=…` in Chrome CDP screencast (requires Chrome/Chromium, same as Weather and Retro TV).
 
 **Channel numbers** work like local shows: auto 1-based position in the ordered lineup, with optional overrides via `channels.order` / `channels.numbers` or the web admin **Channel lineup** page.
 
@@ -505,8 +557,23 @@ List YouTube channels (or a specific playlist URL) as virtual shows on the norma
   "youtube_channels": [
     { "url": "https://www.youtube.com/@msrachel/", "title": "Ms Rachel" },
     {
+      "url": "https://www.youtube.com/@BillNyeTheScienceGuyHD/",
+      "title": "Bill Nye the Science Guy",
+      "strip_title_prefix": true,
+      "title_deletions": [
+        "(?i)\\s*[-–—]\\s*(?:Best Quality\\s*[-–—]\\s*)?4K UPSCALED\\s*$"
+      ]
+    },
+    {
       "url": "https://www.youtube.com/playlist?list=PL8SFNbbOmAYNMcH8uywT24j5YXJTC2WTZ",
-      "title": "Beakman's World"
+      "title": "Beakman's World",
+      "title_deletions": [
+        "(?i)^Beakman's World\\s+",
+        { "pattern": "(?i)\\bPDTV\\b.*$", "scope": "episode" }
+      ],
+      "title_substitutions": [
+        ["(?i)\\b(\\d+)\\s*x\\s*(\\d+)\\b", "\\1x\\2"]
+      ]
     }
   ]
 }
@@ -518,12 +585,34 @@ List YouTube channels (or a specific playlist URL) as virtual shows on the norma
 | `url` | one of `handle` / `url` | Channel URL, `/channel/UC…`, or a playlist / `watch?…&list=` URL |
 | `title` | no | Show name override (defaults to the YouTube channel or playlist title) |
 | `channel` | no | Optional fixed dial number (merged into `channels.numbers`; prefer web admin) |
-| `playlists_as_shows` | no | When true, each public playlist (except **All Videos**) becomes its own show on the browse list — useful when a channel is a library of series playlists (e.g. 90s Project) |
-| `include_all_videos` | no | With `playlists_as_shows`, also keep the parent channel as an **All Videos** show (default **false** when unrolling) |
+| `playlists_as_shows` | no | When true, each public playlist (except **All Videos**) becomes its own show — or use `playlist_shows` to pick/group which ones |
+| `playlist_shows` | no | Whitelist / group playlists when unrolling. Strings are exact title matches; objects may set `title`, `match` (regex; digit capture → season #), or `playlists: [...]`. Implies `playlists_as_shows`. Example: Ghostwriter Season 1–3 → one **Ghostwriter** show with three seasons |
+| `include_playlists` | no | Keep a **single** channel show, but only selected playlist seasons (same selector shape as `playlist_shows`). Pair with `include_all_videos: false` to drop uploads |
+| `include_all_videos` | no | With `playlists_as_shows`, also keep the parent channel as an **All Videos** show (default **false** when unrolling). With `include_playlists`, default keeps All Videos unless set false |
+| `strip_title_prefix` | no | When true (and `title` is set), strip a leading `Title -` / `Title —` / `Title |` / `Title:` from playlist and episode names |
+| `title_deletions` | no | Patterns to remove for this entry (same as global `deletions`) |
+| `title_substitutions` | no | `[pattern, replace]` pairs for this entry (same as global `substitutions`) |
+| `title_rules` | no | Alternate form: rule list, or `{deletions, substitutions}` object. Applied after `strip_title_prefix` / `title_deletions` / `title_substitutions` |
 
-For full channels, season **0** is **All Videos** (uploads); other seasons are public playlists — unless `playlists_as_shows` is set, in which case those playlists appear as separate shows (flat episode lists). A playlist-only URL becomes a single-season show. Private/unlisted playlists are not included. If Chrome is missing, shows still appear from cache when available; play shows **YOUTUBE UNAVAILABLE**.
+```json
+{
+  "url": "https://www.youtube.com/@90sProject",
+  "title": "90s Project",
+  "playlist_shows": [
+    "Wishbone",
+    "Bobby's World",
+    {
+      "title": "Ghostwriter",
+      "match": "(?i)^Ghostwriter\\s+Season\\s+(\\d+)$"
+    }
+  ]
+}
+```
 
-The default / example config preloads a kids and classic set (Ms Rachel, Bluey, Sesame Street, Beakman’s World playlist, **90s Project with `playlists_as_shows`**, etc.). Set `"youtube_channels": []` to disable.
+For full channels, season **0** is **All Videos** (uploads); other seasons are public playlists — unless `playlists_as_shows` / `playlist_shows` is set, in which case those playlists appear as separate shows (or multi-season groups). A playlist-only URL becomes a single-season show. Private/unlisted playlists are not included. If Chrome is missing, shows still appear from cache when available; play shows **YOUTUBE UNAVAILABLE**.
+
+The default config unrolls **true series** only from 90s Project, PBS KIDS, and Scholastic Classic; Bill Nye / Thomas / Reading Rainbow / Mister Rogers keep one show with filtered season playlists. Compilations and promo playlists are omitted. Set `"youtube_channels": []` to disable.
+
 ## Precedence
 
 ### Config file search

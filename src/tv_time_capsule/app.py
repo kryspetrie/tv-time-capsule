@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 import warnings
 from contextlib import contextmanager
 from datetime import datetime
@@ -135,8 +136,10 @@ from .state import (
     load_state,
     mark_episode_watched,
     save_state,
+    season_has_in_progress,
     set_episode_position,
     watch_summary,
+    youtube_id_from_episode,
 )
 from .web_admin import AdminServer, DeferredAdminBridge, start_admin_if_enabled
 
@@ -346,6 +349,11 @@ class TVTimeCapsule:
         self._youtube_pending: dict[str, dict] | None = None
         self._youtube_worker: threading.Thread | None = None
         self._youtube_refresh_force = False
+        self._yt_preload_lock = threading.Lock()
+        self._yt_preload_player: YouTubePlayer | None = None
+        self._yt_preload_path: str | None = None
+        self._yt_preload_thread: threading.Thread | None = None
+        self._yt_preload_cancel = False
         gp_cfg = self.config.get("gamepad") or {}
         gp_bindings = load_gamepad_bindings(self.config)
         self._gamepad_bindings = gp_bindings
@@ -467,11 +475,15 @@ class TVTimeCapsule:
         self._img_cache_max = 16    # Room for multi-thumb library carousel (Pi-safe)
         self._duration_cache = {}   # Lazy ffprobe duration cache (path → "MM:SS")
 
-        # Marquee: scroll overflowing episode titles on the selected row
+        # Marquee: synced scroll for overflowing titles on the browse lists
         self._marquee_key = None
         self._marquee_start = 0
         self._header_marquee_key = None
         self._header_marquee_start = 0
+        self._marquee_sync_start = pygame.time.get_ticks()
+        self._marquee_sync_max = 1
+        self._marquee_seen_max = 0
+        self._marquee_page = None
 
         # Kids library picker: cycle show/movie thumbnails on the big tiles
         self._library_shows_thumb_idx = 0
@@ -624,7 +636,7 @@ class TVTimeCapsule:
         self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
         self.channel_digits = ""
         self.channel_timer = 0
-        self._marquee_key = None
+        self._reset_marquee_timeline()
         if self.view == self.PLAYING:
             return
         if self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
@@ -745,8 +757,11 @@ class TVTimeCapsule:
         episodes: list[dict] = []
         for s_num in sorted(show.get("seasons", {}).keys()):
             season = show["seasons"][s_num]
-            watched = get_watched_episodes(self.state, show_name, s_num)
-            for ep in season.get("episodes", []):
+            season_eps = season.get("episodes", [])
+            watched = get_watched_episodes(
+                self.state, show_name, s_num, episodes=season_eps
+            )
+            for ep in season_eps:
                 if ep["number"] not in watched:
                     episodes.append(ep)
         if not episodes:
@@ -774,7 +789,10 @@ class TVTimeCapsule:
         self.cur_movie = None
         seasons = self.seasons_for_show(show_name)
         season = kids_resume_season(
-            self.state, show_name, seasons, get_episode_position=get_episode_position
+            self.state,
+            show_name,
+            seasons,
+            season_has_in_progress=season_has_in_progress,
         )
         self.cur_season = season
         episodes = show.get("seasons", {}).get(season, {}).get("episodes", [])
@@ -785,8 +803,12 @@ class TVTimeCapsule:
             self.channel_error_time = pygame.time.get_ticks()
             return
 
-        watched_eps = get_watched_episodes(self.state, show_name, season)
-        pos_ep, pos_secs = get_episode_position(self.state, show_name, season)
+        watched_eps = get_watched_episodes(
+            self.state, show_name, season, episodes=episodes
+        )
+        pos_ep, pos_secs = get_episode_position(
+            self.state, show_name, season, episodes=episodes
+        )
         if pos_ep is not None:
             start = next(
                 (i for i, ep in enumerate(episodes) if ep["number"] == pos_ep),
@@ -893,6 +915,7 @@ class TVTimeCapsule:
                 from .youtube_catalog import (
                     _build_catalog_from_ws,
                     _close_catalog_chrome,
+                    _entry_extra_title_rules,
                     _open_catalog_chrome,
                     _write_cache,
                     cache_key_for_entry,
@@ -972,11 +995,20 @@ class TVTimeCapsule:
                         show = show_from_cache_payload(fresh, entry=entry)
                         if not show:
                             continue
-                        title = sanitize_display_title(
-                            (entry.get("title") or "").strip()
-                            or str(fresh.get("title") or "").strip()
-                            or key
-                        ) or key
+                        if (entry.get("title") or "").strip():
+                            title = (
+                                sanitize_display_title(entry.get("title"), kind=None)
+                                or key
+                            )
+                        else:
+                            title = (
+                                sanitize_display_title(
+                                    str(fresh.get("title") or "").strip() or key,
+                                    kind="playlist",
+                                    extra_rules=_entry_extra_title_rules(entry),
+                                )
+                                or key
+                            )
                         # Drop prior shows from this entry before merging expansion.
                         parent = title
                         accumulated = {
@@ -1856,6 +1888,66 @@ class TVTimeCapsule:
         self._omx_overlay = True
         self._create_framebuffer()
 
+    def _marquee_scroll_mode(self) -> str:
+        """``always`` (default) or ``selected`` — when overflowing titles scroll."""
+        ui = self.config.get("ui") or {}
+        mode = str(ui.get("marquee_scroll", "always")).strip().lower()
+        if mode in ("selected", "selected_only", "selection", "on_select"):
+            return "selected"
+        return "always"
+
+    def _reset_marquee_timeline(self) -> None:
+        """Restart marquees at the start of the title (offset 0)."""
+        now = pygame.time.get_ticks()
+        self._marquee_sync_start = now
+        self._marquee_sync_max = 1
+        self._marquee_seen_max = 0
+        self._marquee_key = None
+        self._marquee_start = now
+        self._header_marquee_key = None
+        self._header_marquee_start = now
+
+    def _marquee_page_key(self):
+        """Identity for the current marquee page (view + visible list window)."""
+        view = getattr(self, "view", None)
+        if view in (self.KEY_CONFIG, self.KEY_CAPTURE):
+            return (view, getattr(self, "config_cursor", 0) // KEY_CONFIG_ROWS)
+        if view in (self.GAMEPAD_CONFIG, self.GAMEPAD_CAPTURE):
+            return (
+                view,
+                getattr(self, "_gamepad_config_cursor", 0) // GAMEPAD_CONFIG_ROWS,
+            )
+        if view in (
+            self.SHOW_LIST,
+            self.MOVIE_LIST,
+            self.SEASON_SELECT,
+            self.EPISODE_SELECT,
+        ):
+            try:
+                total = self.total_items()
+            except Exception:
+                total = 0
+            first = (
+                self._stack_first_visible(self.cursor, total) if total else 0
+            )
+            return (
+                view,
+                first,
+                bool(getattr(self, "_kids_mode_active", False)),
+                getattr(self, "_kids_browse_style", None),
+            )
+        return (view,)
+
+    def _marquee_begin_frame(self) -> None:
+        """Promote last frame's max overflow; restart timeline on page change."""
+        page_key = self._marquee_page_key()
+        if page_key != getattr(self, "_marquee_page", None):
+            self._marquee_page = page_key
+            self._reset_marquee_timeline()
+        elif self._marquee_seen_max > 0:
+            self._marquee_sync_max = self._marquee_seen_max
+        self._marquee_seen_max = 0
+
     def _marquee_offset_for(
         self,
         key,
@@ -1865,7 +1957,7 @@ class TVTimeCapsule:
         key_attr: str,
         start_attr: str,
     ):
-        """Pixel offset for an independently timed back-and-forth scroll."""
+        """Pixel offset timed from when ``key`` became the active marquee focus."""
         overflow = text_w - avail_w
         if overflow <= 0:
             return 0
@@ -1892,8 +1984,38 @@ class TVTimeCapsule:
         progress = (t - cycle - MARQUEE_END_PAUSE_MS) / scroll_ms
         return int(overflow * (1.0 - progress))
 
+    def _marquee_offset_synced(self, overflow: int) -> int:
+        """Shared direction/timing for every overflowing row on screen.
+
+        All rows move at the same pixel speed. Shorter titles reach their end
+        (or start, when reversing) first and hold until the longest finishes.
+        """
+        if overflow <= 0:
+            return 0
+        self._marquee_seen_max = max(self._marquee_seen_max, overflow)
+        max_ov = max(int(self._marquee_sync_max), overflow, 1)
+        scroll_ms = max(1, int(max_ov / MARQUEE_SPEED_PX_S * 1000))
+        cycle = scroll_ms + MARQUEE_END_PAUSE_MS
+        full = 2 * cycle
+        t = (pygame.time.get_ticks() - self._marquee_sync_start) % full
+        speed = float(MARQUEE_SPEED_PX_S)
+        if t < MARQUEE_END_PAUSE_MS:
+            return 0
+        if t < cycle:
+            dist = speed * (t - MARQUEE_END_PAUSE_MS) / 1000.0
+            return int(min(overflow, dist))
+        if t < cycle + MARQUEE_END_PAUSE_MS:
+            return overflow
+        dist_back = speed * (t - cycle - MARQUEE_END_PAUSE_MS) / 1000.0
+        return int(max(0.0, overflow - dist_back))
+
     def _marquee_offset(self, key, text_w, avail_w):
-        """Pixel offset for scrolling the selected card's title."""
+        """Pixel offset for list-row title scrolling."""
+        overflow = text_w - avail_w
+        if overflow <= 0:
+            return 0
+        if self._marquee_scroll_mode() == "always":
+            return self._marquee_offset_synced(overflow)
         return self._marquee_offset_for(
             key,
             text_w,
@@ -1904,6 +2026,11 @@ class TVTimeCapsule:
 
     def _header_marquee_offset(self, key, text_w, avail_w):
         """Pixel offset for scrolling a title-bar title."""
+        overflow = text_w - avail_w
+        if overflow <= 0:
+            return 0
+        if self._marquee_scroll_mode() == "always":
+            return self._marquee_offset_synced(overflow)
         return self._marquee_offset_for(
             key,
             text_w,
@@ -1913,18 +2040,23 @@ class TVTimeCapsule:
         )
 
     def _blit_marquee_text(self, text, font, color, x, y, avail_w, *, key, active):
-        """Blit text; if active and too wide, scroll it inside avail_w."""
+        """Blit text; if too wide, scroll inside avail_w (or hard-clip if inactive)."""
         surf = font.render(text, True, color)
         if surf.get_width() <= avail_w:
             self.screen.blit(surf, (x, y))
             return
 
-        if not active:
+        should_scroll = True
+        if self._marquee_scroll_mode() == "selected":
+            should_scroll = bool(active)
+
+        if not should_scroll:
+            # Show as many characters as fit — no "..." ellipsis.
             clipped = text
-            while font.size(clipped + "...")[0] > avail_w and len(clipped) > 1:
+            while clipped and font.size(clipped)[0] > avail_w:
                 clipped = clipped[:-1]
-            surf = font.render(clipped + "...", True, color)
-            self.screen.blit(surf, (x, y))
+            if clipped:
+                self.screen.blit(font.render(clipped, True, color), (x, y))
             return
 
         offset = self._marquee_offset(key, surf.get_width(), avail_w)
@@ -2222,12 +2354,12 @@ class TVTimeCapsule:
             return surf
         trimmed = text
         while trimmed and self._scale_overlay_surface(
-            font.render(trimmed + "...", True, color), scale
+            font.render(trimmed, True, color), scale
         ).get_width() > max_w:
             trimmed = trimmed[:-1]
-        return self._scale_overlay_surface(
-            font.render((trimmed + "...") if trimmed else "...", True, color), scale
-        )
+        if not trimmed:
+            return font.render("", True, color)
+        return self._scale_overlay_surface(font.render(trimmed, True, color), scale)
 
     def _blit_wrapped_overlay_text(
         self,
@@ -2893,6 +3025,7 @@ class TVTimeCapsule:
 
     def _draw_browse_content(self) -> None:
         """Menu layers only — no snow, channel overlay, or rescan banner."""
+        self._marquee_begin_frame()
         if self._hidden_channels_guide:
             self._draw_hidden_channels_guide()
             return
@@ -3144,9 +3277,9 @@ class TVTimeCapsule:
             text = f"{arrow}  {label}"
             surf = self.font_sm.render(text, True, C.CYAN)
             if surf.get_width() > max_w:
-                while self.font_sm.size(text + "...")[0] > max_w and len(text) > 4:
+                while text and self.font_sm.size(text)[0] > max_w:
                     text = text[:-1]
-                surf = self.font_sm.render(text + "...", True, C.CYAN)
+                surf = self.font_sm.render(text, True, C.CYAN)
             self.screen.blit(surf, surf.get_rect(left=16, centery=y + nav_h // 2))
         else:
             pygame.draw.rect(self.screen, C.BG, (0, y, self.sw, nav_h))
@@ -3343,6 +3476,15 @@ class TVTimeCapsule:
 
     def seasons_for_show(self, show):
         return sorted(self.shows.get(show, {}).get('seasons', {}).keys())
+
+    def _show_uses_season_browser(self, show: dict | None) -> bool:
+        """True when the show has more than one season to pick from."""
+        if not isinstance(show, dict):
+            return False
+        seasons = show.get("seasons") or {}
+        if not isinstance(seasons, dict):
+            return False
+        return len(seasons) > 1
 
     def season_display_name(self, show, season_num):
         """Season menu title — folder name or ``Season N``."""
@@ -4050,20 +4192,17 @@ class TVTimeCapsule:
                 )
                 text_right = thumb_x - 10
 
-            title_surf = self.font_md.render(
-                name.upper(), True, C.BRIGHT if selected else C.WHITE
-            )
-            max_w = text_right - label_x
-            if title_surf.get_width() > max_w and max_w > 40:
-                text = name.upper()
-                while self.font_md.size(text + "...")[0] > max_w and len(text) > 3:
-                    text = text[:-1]
-                title_surf = self.font_md.render(
-                    text + "...", True, C.BRIGHT if selected else C.WHITE
-                )
-            self.screen.blit(
-                title_surf,
-                (label_x, rect.y + (rect.height - title_surf.get_height()) // 2),
+            title = name.upper()
+            max_w = max(1, text_right - label_x)
+            self._blit_marquee_text(
+                title,
+                self.font_md,
+                C.BRIGHT if selected else C.WHITE,
+                label_x,
+                rect.y + (rect.height - self.font_md.get_height()) // 2,
+                max_w,
+                key=("movie", key),
+                active=selected,
             )
 
         if not kids:
@@ -4226,7 +4365,9 @@ class TVTimeCapsule:
             # Episode count / status (right side) — measure first for label truncation
             season_eps = season_data.get('episodes', [])
             n_eps = len(season_eps)
-            watched_eps = get_watched_episodes(self.state, self.cur_show, season_num)
+            watched_eps = get_watched_episodes(
+                self.state, self.cur_show, season_num, episodes=season_eps
+            )
             watched_count = sum(1 for e in season_eps if e['number'] in watched_eps)
             nxt = next((e for e in season_eps if e['number'] not in watched_eps), None)
             count_part = f"{n_eps} ep{'s' if n_eps != 1 else ''}"
@@ -4240,15 +4381,18 @@ class TVTimeCapsule:
             else:
                 info_w = self.font_sm.size(count_part)[0]
 
-            sl = self.font_md.render(s_label, True, C.BRIGHT if selected else C.WHITE)
             sl_x = rect.x + 14 + ch_surf.get_width() + 16
-            max_label_w = rect.right - sl_x - info_w - 20
-            if sl.get_width() > max_label_w and max_label_w > 30:
-                label_text = s_label
-                while self.font_md.size(label_text + "...")[0] > max_label_w and len(label_text) > 3:
-                    label_text = label_text[:-1]
-                sl = self.font_md.render(label_text + "...", True, C.BRIGHT if selected else C.WHITE)
-            self.screen.blit(sl, (sl_x, rect.y + (rect.height - sl.get_height()) // 2))
+            max_label_w = max(1, rect.right - sl_x - info_w - 20)
+            self._blit_marquee_text(
+                s_label,
+                self.font_md,
+                C.BRIGHT if selected else C.WHITE,
+                sl_x,
+                rect.y + (rect.height - self.font_md.get_height()) // 2,
+                max_label_w,
+                key=("season", self.cur_show, season_num, s_label),
+                active=selected,
+            )
 
             info_x = rect.right - 14
             info_y = rect.y + (rect.height - self.font_sm.get_height()) // 2
@@ -4303,9 +4447,11 @@ class TVTimeCapsule:
         )
         self._draw_nav_bar(layout["up_y"], up_label, "up", up_active)
 
-        watched_eps = get_watched_episodes(self.state, self.cur_show, self.cur_season)
+        watched_eps = get_watched_episodes(
+            self.state, self.cur_show, self.cur_season, episodes=episodes
+        )
         pos_ep, pos_secs = get_episode_position(
-            self.state, self.cur_show, self.cur_season
+            self.state, self.cur_show, self.cur_season, episodes=episodes
         )
         next_up = next(
             (e['number'] for e in episodes if e['number'] not in watched_eps), None
@@ -4415,7 +4561,7 @@ class TVTimeCapsule:
             total_text_h = line1_h + (line2_h + 2 if has_line2 else 0)
             text_top = rect.y + (rect.height - total_text_h) // 2
 
-            # Draw line 1: "E-01  Name" (selected row marquees when truncated)
+            # Draw line 1: "E-01  Name" (marquees when truncated)
             self.screen.blit(el, (label_x, text_top))
             if ep_name and avail_w > el.get_width() + gap_w + 8:
                 name_x = label_x + el.get_width() + gap_w
@@ -4479,16 +4625,12 @@ class TVTimeCapsule:
                     scaled = pygame.transform.scale(frame, (cw, ch))
                     self.screen.blit(scaled, (0, 0))
             elif not self.player.use_omx:
-                rect, scale = self._playback_overlay_layout()
-                t = self._scale_overlay_surface(
-                    self.font_md.render("Loading...", True, C.WHITE), scale
+                banner = (
+                    "Waiting for Ads..."
+                    if getattr(self.player, "waiting_for_ad", False)
+                    else "Loading..."
                 )
-                self.screen.blit(
-                    t,
-                    t.get_rect(
-                        center=(rect.x + rect.w // 2, rect.y + rect.h // 2),
-                    ),
-                )
+                self._draw_popup_banner(banner)
 
         self.draw_progress_overlay()
         self.draw_volume_overlay()
@@ -4496,6 +4638,7 @@ class TVTimeCapsule:
         self.draw_cache_status_overlay()
         if self._playback_stalled:
             self.draw_stall_overlay()
+        self._draw_mode_toast()
 
         self._apply_channel_fx()
 
@@ -4817,6 +4960,7 @@ class TVTimeCapsule:
                         f"{back} or press 0" if device == "keyboard" else back,
                     ),
                     ("cancel cache", bind("cache_cancel")),
+                    ("toggle zoom", bind("zoom_toggle")),
                 ],
             ),
             (
@@ -5288,7 +5432,15 @@ class TVTimeCapsule:
     def _key_to_playback_action(self, key):
         """Map a pygame key code to a playback action, or None."""
         action = self._action_for_key(key)
-        if action in ("up", "down", "left", "right", "select", "back"):
+        if action in (
+            "up",
+            "down",
+            "left",
+            "right",
+            "select",
+            "back",
+            "zoom_toggle",
+        ):
             return action
         return None
 
@@ -5559,11 +5711,10 @@ class TVTimeCapsule:
         hint = self.font_sm.render(hint_text, True, self._dim_color())
         max_hint_w = cw - 32
         if hint.get_width() > max_hint_w:
-            # Truncate to fit
             text = hint_text
-            while self.font_sm.size(text + "...")[0] > max_hint_w and len(text) > 3:
+            while text and self.font_sm.size(text)[0] > max_hint_w:
                 text = text[:-1]
-            hint = self.font_sm.render(text + "...", True, self._dim_color())
+            hint = self.font_sm.render(text, True, self._dim_color())
         surface.blit(hint, hint.get_rect(centerx=cw // 2, bottom=ch - 16))
 
         if self._safe_zone_save_prompt:
@@ -5635,6 +5786,7 @@ class TVTimeCapsule:
     # ─── Key configuration ────────────────────────────────────────────────
 
     def draw_key_config(self, capturing=False):
+        self._marquee_begin_frame()
         """Key configuration screen with white/blue theme."""
         with self._ui_layout(letterbox=True):
             self.screen.fill(C.BG)
@@ -5687,21 +5839,17 @@ class TVTimeCapsule:
                 label_color = C.BRIGHT if selected else C.WHITE
                 key_color = C.BRIGHT if selected else self._dim_color()
 
-                # Action label (left side) — truncate if needed
-                label_text = action_label
-                label_surf = row_font.render(label_text, True, label_color)
-                if label_surf.get_width() > label_max_w:
-                    while (
-                        row_font.size(label_text + "...")[0] > label_max_w
-                        and len(label_text) > 3
-                    ):
-                        label_text = label_text[:-1]
-                    label_surf = row_font.render(label_text + "...", True, label_color)
-
-                row_text_y = y + (row_h - label_surf.get_height()) // 2 - 3
-                self.screen.blit(label_surf, (label_x, row_text_y))
-
-                # Key bindings (right side) — marquee-scroll when selected, truncate otherwise
+                # Action label (left side) — marquee when truncated
+                self._blit_marquee_text(
+                    action_label,
+                    row_font,
+                    label_color,
+                    label_x,
+                    y + (row_h - row_font.get_height()) // 2 - 3,
+                    label_max_w,
+                    key=("keycfg-label", action_id),
+                    active=selected,
+                )
                 if capturing and selected:
                     if (pygame.time.get_ticks() // 500) % 2 == 0:
                         key_surf = row_font.render("_", True, C.GREEN)
@@ -5793,6 +5941,7 @@ class TVTimeCapsule:
         self._gamepad.set_bindings(self._gamepad_bindings)
 
     def draw_gamepad_config(self, capturing: bool = False) -> None:
+        self._marquee_begin_frame()
         """Gamepad binding screen — capture live controller input."""
         with self._ui_layout(letterbox=True):
             self.screen.fill(C.BG)
@@ -5847,21 +5996,19 @@ class TVTimeCapsule:
                 label_color = C.BRIGHT if selected else C.WHITE
                 key_color = C.BRIGHT if selected else self._dim_color()
 
-                # Action label (left side) — truncate if needed
-                label_text = action_label
-                label_surf = row_font.render(label_text, True, label_color)
-                if label_surf.get_width() > label_max_w:
-                    while (
-                        row_font.size(label_text + "...")[0] > label_max_w
-                        and len(label_text) > 3
-                    ):
-                        label_text = label_text[:-1]
-                    label_surf = row_font.render(label_text + "...", True, label_color)
+                # Action label (left side) — marquee when truncated
+                self._blit_marquee_text(
+                    action_label,
+                    row_font,
+                    label_color,
+                    label_x,
+                    y + (row_h - row_font.get_height()) // 2 - 3,
+                    label_max_w,
+                    key=("gpadcfg-label", action_id),
+                    active=selected,
+                )
 
-                row_text_y = y + (row_h - label_surf.get_height()) // 2 - 3
-                self.screen.blit(label_surf, (label_x, row_text_y))
-
-                # Bindings (right side) — marquee-scroll when selected, truncate otherwise
+                # Bindings (right side) — marquee when truncated
                 if capturing and selected:
                     if (pygame.time.get_ticks() // 500) % 2 == 0:
                         key_surf = row_font.render("_", True, C.GREEN)
@@ -5986,9 +6133,15 @@ class TVTimeCapsule:
             episodes = self.current_items()
             if not episodes or self.cursor >= len(episodes):
                 return
-            ep_num = episodes[self.cursor]["number"]
+            ep = episodes[self.cursor]
+            ep_num = ep["number"]
             changed = reset_episode_progress(
-                self.state, self.cur_show, self.cur_season, ep_num
+                self.state,
+                self.cur_show,
+                self.cur_season,
+                ep_num,
+                youtube_id=youtube_id_from_episode(ep),
+                episode=ep,
             )
             label = f"E-{ep_num:02d} reset"
         elif self.view == self.SEASON_SELECT:
@@ -6020,10 +6173,16 @@ class TVTimeCapsule:
             if self.view == self.EPISODE_SELECT:
                 episodes = self.current_items()
                 watched_eps = get_watched_episodes(
-                    self.state, self.cur_show, self.cur_season
+                    self.state,
+                    self.cur_show,
+                    self.cur_season,
+                    episodes=episodes,
                 )
                 pos_ep, _ = get_episode_position(
-                    self.state, self.cur_show, self.cur_season
+                    self.state,
+                    self.cur_show,
+                    self.cur_season,
+                    episodes=episodes,
                 )
                 self.cursor = self._next_up_index(episodes, watched_eps, pos_ep=pos_ep)
         else:
@@ -6084,25 +6243,22 @@ class TVTimeCapsule:
                 return
             self.cur_show = show_name
             show = self.shows[self.cur_show]
-            if not show['has_seasons']:
-                seasons = sorted(show['seasons'].keys())
-                if seasons:
-                    self.cur_season = seasons[0]
-                    self.view = self.EPISODE_SELECT
-                else:
-                    return
-            else:
+            seasons = self.seasons_for_show(self.cur_show)
+            if not seasons:
+                return
+            if self._show_uses_season_browser(show):
                 self.view = self.SEASON_SELECT
-            self.cursor = 0
-
-            if self.view == self.EPISODE_SELECT:
+                self.cursor = 0
+            else:
+                self.cur_season = seasons[0]
+                self.view = self.EPISODE_SELECT
+                eps = show["seasons"][self.cur_season]["episodes"]
                 watched_eps = get_watched_episodes(
-                    self.state, self.cur_show, self.cur_season
+                    self.state, self.cur_show, self.cur_season, episodes=eps
                 )
                 pos_ep, _ = get_episode_position(
-                    self.state, self.cur_show, self.cur_season
+                    self.state, self.cur_show, self.cur_season, episodes=eps
                 )
-                eps = show['seasons'][self.cur_season]['episodes']
                 self.cursor = self._next_up_index(eps, watched_eps, pos_ep=pos_ep)
 
         elif self.view == self.SEASON_SELECT:
@@ -6111,13 +6267,13 @@ class TVTimeCapsule:
                 self.cur_season = seasons[self.cursor]
                 self.view = self.EPISODE_SELECT
                 self.cursor = 0
+                eps = self.shows[self.cur_show]['seasons'][self.cur_season]['episodes']
                 watched_eps = get_watched_episodes(
-                    self.state, self.cur_show, self.cur_season
+                    self.state, self.cur_show, self.cur_season, episodes=eps
                 )
                 pos_ep, _ = get_episode_position(
-                    self.state, self.cur_show, self.cur_season
+                    self.state, self.cur_show, self.cur_season, episodes=eps
                 )
-                eps = self.shows[self.cur_show]['seasons'][self.cur_season]['episodes']
                 self.cursor = self._next_up_index(eps, watched_eps, pos_ep=pos_ep)
 
         elif self.view == self.EPISODE_SELECT:
@@ -6136,7 +6292,7 @@ class TVTimeCapsule:
     def go_back(self):
         if self.view == self.EPISODE_SELECT:
             show = self.shows.get(self.cur_show, {})
-            if show.get('has_seasons', False):
+            if self._show_uses_season_browser(show):
                 self.view = self.SEASON_SELECT
                 seasons = self.seasons_for_show(self.cur_show)
                 if self.cur_season in seasons:
@@ -6281,6 +6437,132 @@ class TVTimeCapsule:
     def _create_youtube_player(self) -> YouTubePlayer:
         return YouTubePlayer(self.canvas_w, self.canvas_h)
 
+    def _youtube_episode_play_path(self, episode: dict) -> str | None:
+        path = episode.get("path")
+        if path:
+            return path
+        yid = youtube_id_from_episode(episode)
+        if not yid:
+            return None
+        return f"youtube:{yid}"
+
+    def _cancel_youtube_preload(self) -> None:
+        """Abort background up-next YouTube prepare (crop probe / Chrome)."""
+        self._yt_preload_cancel = True
+        with self._yt_preload_lock:
+            player = self._yt_preload_player
+            self._yt_preload_player = None
+            self._yt_preload_path = None
+            self._yt_preload_thread = None
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                LOG.exception("youtube preload stop failed")
+
+    def _begin_youtube_preload(self, episode: dict) -> None:
+        """Start muted crop-probe of the next YouTube episode during up-next."""
+        path = self._youtube_episode_play_path(episode)
+        if not path:
+            return
+        self._cancel_youtube_preload()
+        self._yt_preload_cancel = False
+
+        def worker() -> None:
+            player = self._create_youtube_player()
+            with self._yt_preload_lock:
+                if self._yt_preload_cancel:
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+                    return
+                self._yt_preload_player = player
+                self._yt_preload_path = path
+            ok = False
+            try:
+                ok = bool(player.prepare(path))
+            except Exception:
+                LOG.exception("youtube preload prepare failed path=%s", path)
+                ok = False
+            with self._yt_preload_lock:
+                cancel = self._yt_preload_cancel
+                if cancel or not ok:
+                    if self._yt_preload_player is player:
+                        self._yt_preload_player = None
+                        self._yt_preload_path = None
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+                # else leave prepared player for _claim_youtube_preload
+
+        thread = threading.Thread(
+            target=worker, daemon=True, name="yt-preload"
+        )
+        with self._yt_preload_lock:
+            self._yt_preload_thread = thread
+        thread.start()
+        LOG.info("youtube preload started path=%s", path)
+
+    def _claim_youtube_preload(
+        self, path: str, *, wait_s: float = 25.0
+    ) -> YouTubePlayer | None:
+        """Wait for a prepared preload of *path*, or return None."""
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            if self._yt_preload_cancel:
+                self._cancel_youtube_preload()
+                return None
+
+            with self._yt_preload_lock:
+                player = self._yt_preload_player
+                ppath = self._yt_preload_path
+                thread = self._yt_preload_thread
+
+            if (
+                player is not None
+                and ppath == path
+                and player.is_prepared
+            ):
+                with self._yt_preload_lock:
+                    if (
+                        self._yt_preload_player is player
+                        and self._yt_preload_path == path
+                    ):
+                        self._yt_preload_player = None
+                        self._yt_preload_path = None
+                        self._yt_preload_thread = None
+                        LOG.info("youtube preload claimed path=%s", path)
+                        return player
+
+            if thread is not None and not thread.is_alive():
+                with self._yt_preload_lock:
+                    player = self._yt_preload_player
+                    ppath = self._yt_preload_path
+                if (
+                    player is not None
+                    and ppath == path
+                    and player.is_prepared
+                ):
+                    continue
+                self._cancel_youtube_preload()
+                return None
+
+            if thread is None and player is None:
+                return None
+
+            reason = (
+                "ads"
+                if player is not None and getattr(player, "waiting_for_ad", False)
+                else "loading"
+            )
+            self._youtube_load_wait_tick(reason)
+
+        LOG.warning("youtube preload timed out path=%s", path)
+        self._cancel_youtube_preload()
+        return None
+
     def _can_start_episode(self, episode: dict | None) -> bool:
         """True when local ffmpeg/omx or YouTube Chrome playback can run."""
         if is_youtube_episode(episode):
@@ -6353,6 +6635,24 @@ class TVTimeCapsule:
         self.screen.blit(title, title.get_rect(center=(cx, cy - 24)))
         self.screen.blit(hint, hint.get_rect(center=(cx, cy + 20)))
 
+    def _draw_youtube_loading_frame(self, banner: str = "Loading...") -> None:
+        """Channel-change static with a snackbar while YouTube boots / waits out ads."""
+        self.screen.fill(C.BLACK)
+        if self._channel_fx.snow_enabled:
+            self._channel_fx.extend()
+            self._channel_fx.draw(self.screen)
+        self._draw_popup_banner(banner)
+
+    def _youtube_load_wait_tick(self, reason: str = "loading") -> None:
+        """Keep channel static + snackbar alive during YouTubePlayer start/prepare."""
+        pygame.event.pump()
+        banner = (
+            "Waiting for Ads..." if reason == "ads" else "Loading..."
+        )
+        self._draw_youtube_loading_frame(banner)
+        self.present()
+        self.clock.tick(60)
+
     def _start_current_episode(self, *, resume_secs=None, show_splash=True):
         """Start ``playing_episodes[playing_index]``. Returns True on success."""
         self._remember_playback_browse_state()
@@ -6420,8 +6720,13 @@ class TVTimeCapsule:
                 self.draw_now_playing(*splash_args)
 
         self._enter_playback_display()
+        prepared: YouTubePlayer | None = None
         if youtube:
-            self.player = self._create_youtube_player()
+            prepared = self._claim_youtube_preload(play_path)
+            if prepared is not None:
+                self.player = prepared
+            else:
+                self.player = self._create_youtube_player()
         else:
             self.player = self._create_player()
         if self.player is None:
@@ -6434,7 +6739,29 @@ class TVTimeCapsule:
                 self.cur_movie = None
             return False
 
-        if not self.player.start(play_path, resume_pos=resume_secs):
+        if youtube:
+            if self._channel_fx.snow_enabled:
+                self._channel_fx.trigger()
+            self._draw_youtube_loading_frame()
+            self.present()
+            if prepared is not None:
+                started = self.player.begin_playback(
+                    resume_pos=resume_secs,
+                    on_wait=self._youtube_load_wait_tick,
+                )
+            else:
+                started = self.player.start(
+                    play_path,
+                    resume_pos=resume_secs,
+                    on_wait=self._youtube_load_wait_tick,
+                )
+        else:
+            started = self.player.start(play_path, resume_pos=resume_secs)
+        if not started:
+            try:
+                self.player.stop()
+            except Exception:
+                pass
             self.player = None
             self._exit_playback_display()
             self.channel_error = (
@@ -6538,7 +6865,14 @@ class TVTimeCapsule:
 
     def _run_up_next_countdown(self, episode, season, channel):
         """Countdown before autoplay. Returns True to continue, False if cancelled."""
-        if self._playback_cache.prefetch_next and not is_youtube_episode(episode):
+        # Free the CDP port so YouTube crop-probe can preload during the splash.
+        if self.player:
+            self.player.stop()
+            self.player = None
+
+        if is_youtube_episode(episode):
+            self._begin_youtube_preload(episode)
+        elif self._playback_cache.prefetch_next:
             self._playback_cache.schedule_cache(episode["path"])
 
         total = self._autoplay_countdown
@@ -6555,12 +6889,15 @@ class TVTimeCapsule:
                 if event.type == pygame.QUIT:
                     self._handle_quit_event("up-next-countdown")
                     if not self.running:
+                        self._cancel_youtube_preload()
                         return False
                 if event.type == pygame.KEYDOWN:
                     if self._action_for_key(event.key) == "back":
+                        self._cancel_youtube_preload()
                         return False
                 action = self._gamepad.event_to_action(event)
                 if action == "back":
+                    self._cancel_youtube_preload()
                     return False
 
             elapsed = pygame.time.get_ticks() - start
@@ -6572,6 +6909,7 @@ class TVTimeCapsule:
             self.present()
             self.clock.tick(30)
 
+        self._cancel_youtube_preload()
         return False
 
     def _handle_episode_finished(self):
@@ -6594,9 +6932,7 @@ class TVTimeCapsule:
                 self.stop_playback(completed=True)
                 return
 
-            if self.player:
-                self.player.stop()
-                self.player = None
+            # Current player already stopped at countdown start (for YouTube preload).
 
             self.playing_episodes = episodes
             self.playing_index = index
@@ -6604,7 +6940,7 @@ class TVTimeCapsule:
             self.cur_season = season
 
             pos_ep, pos_secs = get_episode_position(
-                self.state, self.playing_show, season
+                self.state, self.playing_show, season, episodes=episodes
             )
             resume_secs = None
             if pos_ep is not None and episode["number"] == pos_ep:
@@ -6657,7 +6993,23 @@ class TVTimeCapsule:
                 self.player.pause()
                 if self.player.paused:
                     self.progress_overlay_timer = pygame.time.get_ticks()
+        elif action == "zoom_toggle":
+            self._toggle_youtube_zoom()
         return True
+
+    def _toggle_youtube_zoom(self) -> None:
+        """Toggle pillarbox zoom for the current YouTube episode."""
+        player = self.player
+        if player is None or not hasattr(player, "toggle_content_zoom"):
+            return
+        if not is_youtube_episode(self.playing_episode):
+            return
+        enabled = player.toggle_content_zoom()
+        if enabled is None:
+            self._mode_toast_message = "Zoom: n/a"
+        else:
+            self._mode_toast_message = "Zoom: on" if enabled else "Zoom: off"
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
 
     def _process_browse_action(self, action):
         """Handle menu navigation from keyboard or gamepad."""
@@ -6744,7 +7096,7 @@ class TVTimeCapsule:
         self.playing_index = start
 
         pos_ep, pos_secs = get_episode_position(
-            self.state, self.cur_show, self.cur_season
+            self.state, self.cur_show, self.cur_season, episodes=episodes
         )
         resume_secs = None
         if pos_ep is not None and episodes[start]["number"] == pos_ep:
@@ -6771,7 +7123,12 @@ class TVTimeCapsule:
         if ep is None:
             return
         mark_episode_watched(
-            self.state, self.playing_show, self.playing_season, ep['number']
+            self.state,
+            self.playing_show,
+            self.playing_season,
+            ep["number"],
+            youtube_id=youtube_id_from_episode(ep),
+            episode=ep,
         )
 
     def _sync_playback_navigation_state(self) -> None:
@@ -6802,9 +7159,13 @@ class TVTimeCapsule:
                     ep["number"],
                     self.player.time_pos,
                     duration=self.player.duration,
+                    youtube_id=youtube_id_from_episode(ep),
+                    episode=ep,
                 )
             self.player.stop()
             self.player = None
+
+        self._cancel_youtube_preload()
 
         self._playing_source_path = None
         self._playback_cache_suppressed = False
@@ -6835,13 +7196,15 @@ class TVTimeCapsule:
             return
 
         # Land on the in-progress episode if any, otherwise next-up.
-        watched_eps = get_watched_episodes(self.state, self.cur_show, self.cur_season)
-        pos_ep, _pos = get_episode_position(
-            self.state, self.cur_show, self.cur_season
-        )
         episodes = (self.shows.get(self.cur_show, {})
                     .get('seasons', {}).get(self.cur_season, {})
                     .get('episodes', []))
+        watched_eps = get_watched_episodes(
+            self.state, self.cur_show, self.cur_season, episodes=episodes
+        )
+        pos_ep, _pos = get_episode_position(
+            self.state, self.cur_show, self.cur_season, episodes=episodes
+        )
         if episodes:
             self.cursor = self._next_up_index(episodes, watched_eps, pos_ep=pos_ep)
 
