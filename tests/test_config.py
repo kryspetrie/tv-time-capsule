@@ -79,8 +79,12 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertEqual(cfg["weather"]["zip"], "02108")
         self.assertEqual(cfg["weather"]["name"], "Boston")
         self.assertIsNone(cfg["weather"]["latitude"])
+        self.assertEqual(cfg["home_menu"]["parent"], ["shows", "movies", "weather"])
+        self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies", "weather"])
         self.assertIsNone(cfg["retro_tv"]["filters"])
         self.assertIsNone(cfg["retro_tv"]["volume"])
+        self.assertEqual(cfg["retro_tv"]["playback_mode"], "live")
+        self.assertIsNone(cfg["retro_tv"]["cache_directory"])
         self.assertGreaterEqual(len(cfg["youtube_channels"]), 10)
         self.assertTrue(
             any(c.get("title") == "Ms Rachel" for c in cfg["youtube_channels"])

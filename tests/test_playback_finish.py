@@ -101,15 +101,9 @@ class PlaybackFinishTests(unittest.TestCase):
         self.assertEqual(digit_for_key(app.keymap, pygame.K_0), 0)
         self.assertEqual(digit_for_key(app.keymap, pygame.K_KP0), 0)
 
-        # Same mapping the PLAYING event loop uses for dial 0.
-        action = (
-            "back"
-            if digit_for_key(app.keymap, pygame.K_0) == 0
-            else app._key_to_playback_action(pygame.K_0)
-        )
-        self.assertEqual(action, "back")
+        # Esc / back still stops immediately; dial 0 commits via the dial buffer.
         with patch.object(app, "_exit_playback_display"):
-            kept_playing = app._process_playback_action(action)
+            kept_playing = app._process_playback_action("back")
         self.assertFalse(kept_playing)
         self.assertIsNone(app.player)
         self.assertNotEqual(app.view, app.PLAYING)
@@ -117,12 +111,9 @@ class PlaybackFinishTests(unittest.TestCase):
     def test_other_digits_do_not_stop_playback(self):
         app = self._playing_app()
         self.assertEqual(digit_for_key(app.keymap, pygame.K_1), 1)
-        action = (
-            "back"
-            if digit_for_key(app.keymap, pygame.K_1) == 0
-            else app._key_to_playback_action(pygame.K_1)
-        )
-        self.assertIsNone(action)
+        self.assertIsNone(app._key_to_playback_action(pygame.K_1))
+        app._append_dial_digit(1)
+        self.assertEqual(app.channel_digits, "1")
         self.assertEqual(app.view, app.PLAYING)
         self.assertIsNotNone(app.player)
 
@@ -130,13 +121,8 @@ class PlaybackFinishTests(unittest.TestCase):
         app = self._playing_app()
         app._playback_stalled = True
         app._stall_auto_retry_done = True
-        action = (
-            "back"
-            if digit_for_key(app.keymap, pygame.K_0) == 0
-            else app._key_to_playback_action(pygame.K_0)
-        )
-        self.assertEqual(action, "back")
-        # Stall overlay uses the same back action to exit.
+        action = "back"
+        # Stall overlay uses back / Esc to exit.
         app._playback_stalled = False
         app._stall_auto_retry_done = False
         with patch.object(app, "_exit_playback_display"):

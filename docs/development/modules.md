@@ -15,6 +15,12 @@ Package root: `src/tv_time_capsule/`.
 | `media.py` | Show/season/episode discovery, filename parsing, folder season labels |
 | `mounts.py` | Mount/unmount helpers for remote stores |
 | `playback_cache.py` | Background local cache for remote episode files |
+| `youtube_offline_cache.py` | Forever yt-dlp YouTube offline tree + idle worker |
+| `retro_tv_channel.py` | MyRetroTVs Chrome CDP (live screencast or director playlist-oracle) |
+| `retro_tv_cache.py` | 2-slot temporary yt-dlp cache for Decades `cached` mode |
+| `retro_tv_menu.py` | Decades overlay menu (Change Channel / Channel Setup stage machine + draw) |
+| `youtube_crop.py` | Shared pillarbox detection + ffmpeg crop helpers |
+| `screencast_adapt.py` | Adaptive Weather screencast FPS/quality controller |
 | `secrets.py` | Keyring get/set + resolve helpers |
 | `secrets_cli.py` | `tv-time-capsule-secrets` console script |
 | `config.py` | Paths, colors (`C`), timing constants, config search/load/save |

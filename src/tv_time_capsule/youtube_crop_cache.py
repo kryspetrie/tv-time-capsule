@@ -3,17 +3,18 @@
 Stored under ``~/.local/share/tv-time-capsule/youtube/crops/`` with a 30-day
 TTL.
 
-Payload::
+Payload (v9)::
 
     {
       "youtube_id": "...",
-      "version": 4,
-      "width": 640,
-      "height": 480,
-      "crop": [x, y, w, h] | null,   # detected geometry (null = no pillarbox)
-      "apply": true | false,         # user/auto preference to use crop
+      "version": 9,
+      "crop_norm": [x, y, w, h] | null,   # fractions of width/height (0..1)
+      "apply": true | false,              # user/auto preference to use crop
       "fetched_at": ...
     }
+
+``crop_norm`` is viewport-independent; load denormalizes to the requested
+width/height. Older cache versions are treated as misses and re-probed.
 """
 
 from __future__ import annotations
@@ -28,12 +29,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import STATE_DIR
+from .youtube_crop import denormalize_crop_rect, normalize_crop_rect
 
 LOG = logging.getLogger(__name__)
 
 CROP_CACHE_TTL_S = 30 * 24 * 60 * 60
 # Bump when detection semantics change so stale decisions are re-probed.
-CROP_CACHE_VERSION = 5
+CROP_CACHE_VERSION = 9
 _YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
@@ -86,17 +88,17 @@ def _write_payload(path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def _parse_crop(raw: Any) -> tuple[tuple[int, int, int, int] | None, bool]:
-    """Return ``(crop, True)`` or ``(None, False)`` if the payload is invalid.
+def _parse_crop_norm(raw: Any) -> tuple[tuple[float, float, float, float] | None, bool]:
+    """Return ``(crop_norm, True)`` or ``(None, False)`` if the payload is invalid.
 
-    ``crop`` itself may be ``None`` when the video was decided full-bleed.
+    ``crop_norm`` itself may be ``None`` when the video was decided full-bleed.
     """
     if raw is None:
         return None, True
     if not isinstance(raw, (list, tuple)) or len(raw) != 4:
         return None, False
     try:
-        x, y, w, h = (int(v) for v in raw)
+        x, y, w, h = (float(v) for v in raw)
     except (TypeError, ValueError):
         return None, False
     if w <= 0 or h <= 0 or x < 0 or y < 0:
@@ -169,19 +171,12 @@ def load_pillarbox_crop_entry(
     if version != CROP_CACHE_VERSION:
         return None
 
-    try:
-        cw = int(payload.get("width") or 0)
-        ch = int(payload.get("height") or 0)
-    except (TypeError, ValueError):
+    if "crop_norm" not in payload:
         return None
-    if cw != int(width) or ch != int(height):
-        return None
-
-    if "crop" not in payload:
-        return None
-    crop, ok = _parse_crop(payload.get("crop"))
+    crop_norm, ok = _parse_crop_norm(payload.get("crop_norm"))
     if not ok:
         return None
+    crop = denormalize_crop_rect(crop_norm, int(width), int(height))
     apply = bool(payload.get("apply", crop is not None))
     return PillarboxCropEntry(crop=crop, apply=apply)
 
@@ -199,8 +194,9 @@ def save_pillarbox_crop(
 ) -> None:
     """Persist a crop decision.
 
-    ``apply`` defaults to True when ``crop`` is set, False when ``crop`` is
-    ``None``. Pass ``apply`` explicitly when the user toggles zoom off while
+    ``width``/``height`` convert pixel ``crop`` to normalized fractions for
+    storage. ``apply`` defaults to True when ``crop`` is set, False when ``crop``
+    is ``None``. Pass ``apply`` explicitly when the user toggles zoom off while
     keeping detected geometry for later re-enable.
     """
     yid = _normalize_id(youtube_id)
@@ -210,12 +206,11 @@ def save_pillarbox_crop(
     stamp = time.time() if now is None else float(now)
     if apply is None:
         apply = crop is not None
+    crop_norm = normalize_crop_rect(crop, int(width), int(height))
     payload = {
         "youtube_id": yid,
         "version": CROP_CACHE_VERSION,
-        "width": int(width),
-        "height": int(height),
-        "crop": list(crop) if crop is not None else None,
+        "crop_norm": list(crop_norm) if crop_norm is not None else None,
         "apply": bool(apply),
         "fetched_at": stamp,
     }

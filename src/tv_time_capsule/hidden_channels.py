@@ -53,5 +53,6 @@ def format_hidden_help_rows() -> list[tuple[str, str | None]]:
             rows.append((ch.dial, f"{ch.title} - {ch.description}"))
         else:
             rows.append((ch.dial, ch.title))
-    rows.append(("hint", "parent browse only | Esc / 0 back"))
+    rows.append(("hint", "parent screens + playback | Esc / 0 back"))
+    rows.append(("home menu", "pin weather/decades in home_menu config"))
     return rows

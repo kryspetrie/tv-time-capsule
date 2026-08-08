@@ -8,6 +8,7 @@ import pygame
 
 from tv_time_capsule.keymap import (
     DEFAULT_KEYMAP,
+    KEY_ACTIONS,
     action_for_key,
     add_binding,
     config_name_to_key_code,
@@ -38,7 +39,7 @@ class KeymapDisplayTests(unittest.TestCase):
 
     def test_keymap_for_display(self):
         rows = keymap_for_display(DEFAULT_KEYMAP)
-        self.assertEqual(len(rows), 34)
+        self.assertEqual(len(rows), len(KEY_ACTIONS))
         up_row = next(r for r in rows if r["action"] == "up")
         self.assertEqual(up_row["key"], "up")
 

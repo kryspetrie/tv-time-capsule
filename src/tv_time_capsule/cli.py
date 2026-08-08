@@ -131,6 +131,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scan media paths, print summary, and exit (for hooks / validation)",
     )
     parser.add_argument(
+        "--youtube-cache-sync",
+        action="store_true",
+        help=(
+            "Download missing YouTube episodes into the forever offline cache "
+            "(requires youtube.cache.enabled) and exit"
+        ),
+    )
+    parser.add_argument(
         "--admin",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -226,6 +234,47 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.rescan_only:
         sys.exit(0)
+
+    if args.youtube_cache_sync:
+        from .youtube_catalog import load_youtube_shows
+        from .youtube_offline_cache import YoutubeDlMissingError, YoutubeOfflineCache
+
+        yt_cfg = cfg.get("youtube") or {}
+        cache_cfg = yt_cfg.get("cache") or {}
+        if not cache_cfg.get("enabled"):
+            print(
+                "youtube.cache.enabled is false — set it in config.json "
+                "(and optionally youtube.cache.directory) then retry."
+            )
+            sys.exit(2)
+        # Prefer catalog from disk; allow scrape so a cold machine can still fill.
+        yt_shows = load_youtube_shows(
+            cfg.get("youtube_channels") or [],
+            force_refresh=False,
+            allow_scrape=True,
+        )
+        # Merge into discovered shows so playlist-unrolled names match the app.
+        merged = dict(shows)
+        merged.update(yt_shows)
+        cache = YoutubeOfflineCache(cfg)
+        missing = cache.iter_missing_episodes(merged)
+        print(
+            f"YouTube offline cache: {cache.cache_dir} "
+            f"({len(missing)} missing episode(s))"
+        )
+        if not missing:
+            print("Nothing to download.")
+            sys.exit(0)
+        try:
+            ok, failed = cache.sync_all(
+                merged,
+                progress=lambda msg: print(msg, flush=True),
+            )
+        except YoutubeDlMissingError as exc:
+            print(str(exc))
+            sys.exit(1)
+        print(f"Done: {ok} cached, {failed} failed")
+        sys.exit(0 if failed == 0 else 1)
 
     windowed = bool(args.windowed or args.scale)
 

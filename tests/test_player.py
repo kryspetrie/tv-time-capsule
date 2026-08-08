@@ -25,10 +25,13 @@ class PlayerHelperTests(unittest.TestCase):
         self.assertEqual(cmd[0], "/usr/bin/ffmpeg")
         self.assertIn("-ss", cmd)
         self.assertIn("10.0", cmd)
+        # Fast input seek: -ss comes before -i (first frame arrives quickly).
+        self.assertLess(cmd.index("-ss"), cmd.index("-i"))
         self.assertIn("-hwaccel", cmd)
         self.assertIn("v4l2m2m", cmd)
         self.assertIn("-pix_fmt", cmd)
         self.assertIn("rgb24", cmd)
+        self.assertIn("+genpts", cmd)
 
     @patch("tv_time_capsule.player.is_pi", return_value=False)
     def test_resolve_hwaccel_off_on_desktop(self, _pi):

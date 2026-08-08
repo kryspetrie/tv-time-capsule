@@ -96,6 +96,24 @@
     "prefetch_next": true,
     "cache_before_playing": false
   },
+  "youtube": {
+    "_about": "Backends: live Chrome vs forever file cache. Crop/zoom parity is planned. Requires youtube_channels.",
+    "playback_mode": "live",
+    "cache": {
+      "_about": "Forever yt-dlp cache (local or NAS). directory null = first writable media_paths entry (else ~/.local/share/.../youtube-offline). Prefer fill on desktop then mount on weak Pis. max_bytes null = never delete. layout season_folders matches Show/s01/S01E01 - Title [id].mp4; flat omits the season folder. Press Y in browse to priority-cache the selected show/season/episode now.",
+      "enabled": false,
+      "directory": null,
+      "max_bytes": null,
+      "download_when_idle": true,
+      "idle_seconds": 30,
+      "idle_gap_seconds": 60,
+      "rate_limit_cooldown_seconds": 1800,
+      "exclude_unavailable": false,
+      "format": "bv*[height<=720]+ba/b[height<=720]/b",
+      "layout": "season_folders",
+      "batch_size": 1
+    }
+  },
   "ui": {
     "channel_snow": true,
     "shutdown_collapse": true,
@@ -161,6 +179,11 @@
     "default_enabled": false,
     "enabled": false
   },
+  "home_menu": {
+    "_about": "Top-level LIBRARY rows for parent vs kids. Defaults include weather. Tokens: shows, movies, weather, 1950s-2000s, directory, 001-003.",
+    "parent": ["shows", "movies", "weather"],
+    "kids": ["shows", "movies", "weather"]
+  },
   "network": {
     "mdns_hostname": "vintage-tv",
     "admin_port": 8765
@@ -170,16 +193,34 @@
     "port": 8765,
     "bind": "0.0.0.0"
   },
+  "features": {
+    "_about": "Master switches. false removes dial/UI entry and never starts Chrome for that feature.",
+    "weather": true,
+    "retro_tv": true,
+    "youtube": true
+  },
   "weather": {
     "_about": "Optional forecast location for dial 004 (weather.com/retro). Headless Pi has no GPS and often wrong GeoIP \u2014 set a zip or city. latitude+longitude override zip/query when both are set. Default: Boston, MA.",
     "zip": "02108",
     "query": null,
     "name": "Boston",
     "latitude": null,
-    "longitude": null
+    "longitude": null,
+    "screencast": {
+      "_about": "auto = adapt FPS/quality/resolution from measured latency. Oldest Pis may land at 1\u20132 FPS. mode=fixed + target_fps for testing.",
+      "mode": "auto",
+      "min_fps": 1,
+      "max_fps": 15,
+      "target_fps": null,
+      "max_width": null,
+      "max_height": null,
+      "jpeg_quality": 80
+    }
   },
   "retro_tv": {
-    "_about": "MyRetroTVs decade streams (dial 1950-2009). filters maps box_* checkbox ids to on/off; null = site default until changed in the Enter menu. volume is 0-100 Chrome gain.",
+    "_about": "MyRetroTVs decade streams (dial 1950-2009). playback_mode live = Chrome screencast; cached = site as playlist oracle + 2-slot temp yt-dlp + ffmpeg (recommended on Pi). filters maps box_* checkbox ids; volume is 0-100.",
+    "playback_mode": "live",
+    "cache_directory": null,
     "filters": null,
     "volume": null
   },
@@ -535,6 +576,10 @@
     "enabled": "Persisted parent/kids mode (written when you toggle Tab); restored on next start",
     "allowlist": "Omit for full kids library (legacy). Once present, kids mode only shows tagged shows/movies; parent K toggles tags"
   },
+  "_home_menu": {
+    "parent": "Adult LIBRARY rows (default shows, movies, weather). Tokens: shows, movies, weather, 1950s-2000s, directory, 001-003",
+    "kids": "Kids LIBRARY rows (same token set; defaults include weather). Digit easter-egg dials stay parent-only"
+  },
   "_network": {
     "mdns_hostname": "LAN browse name without .local \u2014 set by install.sh / install-pi.sh (--hostname)",
     "admin_port": "Web admin TCP port; Avahi HTTP service uses this during install"
@@ -549,7 +594,23 @@
     "query": "Free-text city search when zip is unset (e.g. \"Austin, TX\").",
     "name": "Optional display name override for the location.",
     "latitude": "Optional; if set with longitude, used directly (overrides zip/query).",
-    "longitude": "Optional; pair with latitude."
+    "longitude": "Optional; pair with latitude.",
+    "screencast.mode": "auto | fixed — auto adapts FPS/quality from latency (Pi-friendly)",
+    "screencast.min_fps": "Floor for auto adapt (default 1)",
+    "screencast.max_fps": "Ceiling for auto adapt (default 15)",
+    "screencast.target_fps": "When set (or mode=fixed), lock approximate FPS for testing",
+    "screencast.jpeg_quality": "CDP JPEG quality 20–95 (default 80; auto may lower)"
+  },
+  "_features": {
+    "weather": "false removes dial 004 and never starts Weather Chrome (default true)",
+    "retro_tv": "false removes decade dials / MyRetroTVs (default true)",
+    "youtube": "false removes YouTube shows and catalog scrape (default true)"
+  },
+  "_retro_tv": {
+    "playback_mode": "live = Chrome screencast; cached = site as playlist oracle + 2-slot temp yt-dlp + ffmpeg (Pi-friendly)",
+    "cache_directory": "Temp root for cached mode (null = ~/.local/share/tv-time-capsule/retro-tv-cache/). Wiped when leaving Decades.",
+    "filters": "box_* checkbox map; null = site default until changed in Enter menu",
+    "volume": "0–100 media gain (null starts at 100)"
   },
   "_playback": {
     "autoplay": "off | next_episode | next_in_season_only \u2014 advance after an episode ends naturally",
@@ -564,6 +625,20 @@
     "max_bytes": "LRU cache size cap in bytes (default 2 GiB)",
     "prefetch_next": "Start caching the next autoplay episode during the countdown (default true)",
     "cache_before_playing": "Wait on the now-playing title screen with a progress bar until the episode is fully cached (default false; avoids mid-playback cache switch)"
+  },
+  "_youtube": {
+    "playback_mode": "live | prefer_cache | cached_only — live always uses Chrome; prefer_cache plays a yt-dlp file when present; cached_only blocks uncached episodes (Pi 1 / Zero)",
+    "cache.enabled": "Download configured channels into a forever tree via yt-dlp (default false). Distinct from playback cache above.",
+    "cache.directory": "Offline tree root (null = first writable media_paths entry; else state dir fallback). Point at NAS for shared Pi fills.",
+    "cache.max_bytes": "Optional soft cap; null = forever (never delete completed files). When set, new downloads are skipped once over budget.",
+    "cache.download_when_idle": "Background fills while browsing/menus/screensaver after idle_seconds without input (paused during PLAYING / Weather / Retro). Priority Y/Enter still runs immediately (unless rate-limited).",
+    "cache.idle_seconds": "Seconds without UI input before background fills start (default 30). Does not affect the screensaver timer; cache progress is not activity.",
+    "cache.idle_gap_seconds": "Pause between background idle batches (default 60). Priority Y/Enter skips this gap.",
+    "cache.rate_limit_cooldown_seconds": "After a bot/429 block, pause ALL cache downloads for this many seconds (default 1800). Escalates on repeat hits up to 6h.",
+    "cache.exclude_unavailable": "When true, hide YouTube episodes marked UNAVAILABLE from browse/play counts (alias: excludeUnavailable). Press Y to clear a skip and retry while they remain visible.",
+    "cache.format": "yt-dlp format string (default 720p max)",
+    "cache.layout": "season_folders = Show/s01/S01E01 - Title [id].mp4 (library parity); flat = Show/S01E01 - Title [id].mp4",
+    "cache.batch_size": "Concurrent yt-dlp downloads (1–8, default 1). Raise to 2–4 if YouTube throttles single connections."
   },
   "_ui": {
     "channel_snow": "FUN TWEAK \u2014 B&W static burst when committing channel numbers on show/season/episode lists (not arrow keys). Pre-cached 320ms animation. CLI: --channel-snow",

@@ -64,6 +64,11 @@ class CliParserTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.parser.parse_args(["--scale", "7"])
 
+    def test_youtube_cache_sync_flag(self):
+        args = self.parser.parse_args(["--youtube-cache-sync"])
+        self.assertTrue(args.youtube_cache_sync)
+        self.assertFalse(self.parser.parse_args([]).youtube_cache_sync)
+
 
 if __name__ == "__main__":
     unittest.main()

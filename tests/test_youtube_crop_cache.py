@@ -24,6 +24,26 @@ class PillarboxCropCacheTests(unittest.TestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
+    def test_normalized_roundtrip_different_viewport(self):
+        crop = (48, 0, 544, 480)
+        save_pillarbox_crop(
+            "dQw4w9WgXcQ",
+            crop,
+            width=640,
+            height=480,
+            cache_dir=self.cache_dir,
+            now=1_000_000.0,
+        )
+        got, hit = load_pillarbox_crop(
+            "dQw4w9WgXcQ",
+            width=1280,
+            height=960,
+            cache_dir=self.cache_dir,
+            now=1_000_000.0 + 86400,
+        )
+        self.assertTrue(hit)
+        self.assertEqual(got, (96, 0, 1088, 960))
+
     def test_roundtrip_crop(self):
         crop = (48, 0, 544, 480)
         save_pillarbox_crop(
@@ -83,10 +103,11 @@ class PillarboxCropCacheTests(unittest.TestCase):
         self.assertIsNone(got)
         self.assertFalse((self.cache_dir / "dQw4w9WgXcQ.json").exists())
 
-    def test_size_mismatch_is_miss(self):
+    def test_different_viewport_still_hits(self):
+        crop = (40, 0, 240, 240)
         save_pillarbox_crop(
             "dQw4w9WgXcQ",
-            (40, 0, 240, 240),
+            crop,
             width=320,
             height=240,
             cache_dir=self.cache_dir,
@@ -99,10 +120,30 @@ class PillarboxCropCacheTests(unittest.TestCase):
             cache_dir=self.cache_dir,
             now=1_000_000.0,
         )
-        self.assertFalse(hit)
-        self.assertIsNone(got)
+        self.assertTrue(hit)
+        self.assertEqual(got, (80, 0, 480, 480))
 
     def test_old_cache_version_is_miss(self):
+        path = self.cache_dir / "dQw4w9WgXcQ.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"youtube_id":"dQw4w9WgXcQ","version":5,'
+            '"width":640,"height":480,"crop":[48,0,544,480],'
+            '"apply":true,"fetched_at":1000000.0}\n',
+            encoding="utf-8",
+        )
+        got, hit = load_pillarbox_crop(
+            "dQw4w9WgXcQ",
+            width=640,
+            height=480,
+            cache_dir=self.cache_dir,
+            now=1_000_000.0,
+        )
+        self.assertFalse(hit)
+        self.assertIsNone(got)
+        self.assertEqual(CROP_CACHE_VERSION, 9)
+
+    def test_legacy_v1_cache_is_miss(self):
         path = self.cache_dir / "dQw4w9WgXcQ.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -119,7 +160,6 @@ class PillarboxCropCacheTests(unittest.TestCase):
         )
         self.assertFalse(hit)
         self.assertIsNone(got)
-        self.assertEqual(CROP_CACHE_VERSION, 5)
 
     def test_apply_false_keeps_geometry(self):
         crop = (48, 0, 544, 480)

@@ -1,7 +1,7 @@
 # Pi feature gates, adaptive Weather, and offline YouTube
 
-**Status:** Planned (not yet implemented)  
-**Date:** 2026-08-06  
+**Status:** Implemented (Phases 1–7)  
+**Date:** 2026-08-07  
 **Related:** [Improvement plan](improvement-plan.md), [Configuration](../usage/configuration.md), [Raspberry Pi setup](../usage/raspberry-pi.md)
 
 Living project plan for making Weather usable on every Raspberry Pi, gating heavy Chrome features behind config, and adding a forever yt-dlp YouTube cache so weak devices can play the same collections with identical crop/zoom behavior.
@@ -618,14 +618,14 @@ Do not require live YouTube network in CI for crop detector tests — use RGB fi
 
 ## Progress checklist
 
-- [ ] Phase 0 — plan published  
-- [ ] Phase 1 — feature flags  
-- [ ] Phase 2 — adaptive Weather  
-- [ ] Phase 3 — shared crop foundation  
-- [ ] Phase 4 — offline cache  
-- [ ] Phase 5 — routing + not-cached UI  
-- [ ] Phase 6 — crop/zoom parity  
-- [ ] Phase 7 — docs + E2E + program retro  
+- [x] Phase 0 — plan published  
+- [x] Phase 1 — feature flags  
+- [x] Phase 2 — adaptive Weather  
+- [x] Phase 3 — shared crop foundation  
+- [x] Phase 4 — offline cache  
+- [x] Phase 5 — routing + not-cached UI  
+- [x] Phase 6 — crop/zoom parity  
+- [x] Phase 7 — docs + E2E + program retro  
 
 ---
 
@@ -636,8 +636,10 @@ Do not require live YouTube network in CI for crop detector tests — use RGB fi
 | Config | `src/tv_time_capsule/config.py`, `config.example.json` |
 | Flags / dials | `dial_nav.py`, `app.py` |
 | Weather | `weather_channel.py`, `app.py` (draw/tick) |
-| Crop | `youtube_crop.py` (new), `youtube_crop_cache.py`, `youtube_player.py` |
-| Offline cache | `youtube_offline_cache.py` (new), `cli.py`, `app.py` |
+| Crop | `youtube_crop.py`, `youtube_crop_cache.py`, `youtube_player.py`, `player.py` |
+| Offline cache | `youtube_offline_cache.py`, `cli.py`, `app.py` |
+| Adaptive Weather | `screencast_adapt.py`, `weather_channel.py`, `app.py` |
+| Feature flags | `config.py`, `app.py` |
 | File play + crop | `player.py`, `app.py` |
 | Docs | `docs/usage/configuration.md`, `raspberry-pi.md`, `media-library.md`, fun-tweaks, this file |
 | Tests | `tests/test_*.py` as listed per phase |

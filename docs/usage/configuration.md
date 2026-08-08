@@ -39,6 +39,7 @@ Credentials and temporary mount password files always live under `~/.config/tv-t
 | Active `config.json` (see table above) | Media paths, remote mounts, key bindings |
 | `~/.local/share/tv-time-capsule/state.json` | Per-episode watch flags, in-progress bookmarks |
 | `~/.local/share/tv-time-capsule/youtube/` | YouTube catalog cache (~24h) and per-video pillarbox crop cache (~30d) |
+| First writable `media_paths` entry (else `~/.local/share/tv-time-capsule/youtube-offline/`) | Forever yt-dlp offline episode tree when `youtube.cache.enabled` and `cache.directory` is unset |
 | `~/.local/share/tv-time-capsule/admin.pid` | Previous admin server PID (used to free the port on restart) |
 | `~/.config/tv-time-capsule/` | Credentials files, temp CIFS creds, secrets helpers |
 
@@ -368,11 +369,33 @@ Simplified browsing for young viewers. Toggle at runtime with **Tab** (default `
 | Field | Default | Description |
 |-------|---------|-------------|
 | `default_enabled` | `false` | Used on first launch when `enabled` has never been saved |
-| `enabled` | *(from `default_enabled`)* | **Persisted** parent/kids mode — written when you toggle at runtime; restored on next start |
+| `enabled` | *(from `default_enabled`)* | **Persisted** last parent/kids mode — written when you toggle at runtime; restored on next start |
 | `interleave_shows_movies` | `false` | In kids mode, show one combined alphabetical list of shows and movies instead of separate library screens |
-| `allowlist` | *(absent / `null`)* | When **absent**, kids mode shows the full library (legacy). When **present** (even empty), kids mode only shows tagged titles. Parent **K** toggles tags on the show/movie/catalog cursor and creates the list on first use |
+| `allowlist` | *(absent / `null`)* | Tagged titles for kids mode (`shows` / `movies`). Parent **K** creates and updates it. Kids mode cannot be entered until at least one tagged title is in the library |
 
 Kid mode auto-plays when a show is selected (resume or next-up in the last-watched season). Autoplay after an episode ends follows `playback.autoplay`. Quit (**Esc**, **Q**, window close) is disabled until you toggle back to parent mode. See [Controls → Kid-friendly mode](controls.md#kid-friendly-mode).
+
+## `home_menu`
+
+Top-level **LIBRARY** picker rows for parent vs kids. Pin Weather, decades, or other specials next to Shows / Movies.
+
+```json
+{
+  "home_menu": {
+    "parent": ["shows", "movies", "weather"],
+    "kids": ["shows", "movies", "weather"]
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `parent` | `["shows", "movies", "weather"]` | Adult home-menu tokens (order = on-screen order) |
+| `kids` | `["shows", "movies", "weather"]` | Kids home-menu tokens |
+
+**Tokens:** `shows`, `movies`, `weather`, `1950s`…`2000s`, `directory` (`000`), `001` / `002` / `003` (test patterns). Unknown tokens are skipped. Rows for disabled features (`features.weather` / `features.retro_tv`) are omitted. Empty show/movie libraries are omitted when that library type is not present.
+
+Kids can open pinned specials from the menu; digit easter-egg codes remain parent-only. See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md).
 
 ## `network`
 
@@ -480,6 +503,8 @@ Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated 
 ```json
 {
   "retro_tv": {
+    "playback_mode": "live",
+    "cache_directory": null,
     "filters": {
       "box_c": true,
       "box_s": true,
@@ -504,8 +529,10 @@ Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated 
 
 | Field | Default | Meaning |
 |-------|---------|---------|
+| `playback_mode` | `live` | `live` = Chrome CDP screencast (desktop). `cached` = drive the site only to discover YouTube ids, download a rolling pair of clips with yt-dlp, play via ffmpeg (much lighter on Raspberry Pi). |
+| `cache_directory` | `null` | Temp tree root for `cached` mode (`null` → `~/.local/share/tv-time-capsule/retro-tv-cache/`). Wiped per decade when you leave Decades — never the forever YouTube offline cache. |
 | `filters` | `null` | Map of checkbox ids (`box_c` = Cartoons, `box_s` = Comedy, …) to on/off. `null` leaves the site default (all on) until you change them. Shared across all decades. |
-| `volume` | `null` | Last Chrome media gain 0–100. `null` starts at 100. |
+| `volume` | `null` | Last media gain 0–100. `null` starts at 100. |
 
 See [Fun tweaks & easter eggs → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
 
@@ -546,9 +573,75 @@ Episode titles that embed codes such as `S01E02`, `1x02`, `Season 7 Episode 22` 
 
 Per-channel rules (below) run **after** these globals. Prefer globals for patterns that repeat across shows; keep `title_deletions` / `title_substitutions` for brand-specific marketing lines only. `strip_title_prefix` strips a leading `Title -` / `Title |` / `Title :` when `title` is set.
 
+## `features`
+
+Master switches. When false, the feature is removed from dials/help and Chrome is never started for it.
+
+```json
+{
+  "features": {
+    "weather": true,
+    "retro_tv": true,
+    "youtube": true
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `weather` | `true` | Dial `004` Weather Channel |
+| `retro_tv` | `true` | MyRetroTVs decade dials (`1950`–`2009`) |
+| `youtube` | `true` | YouTube virtual shows + catalog scrape |
+
 ## `youtube_channels`
 
-List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Per-video pillarbox crop decisions from playback are cached under `youtube/crops/` for 30 days so replaying an episode skips the load-time crop probe. Press **T** during playback to toggle zoom on/off for that episode (persisted in the crop cache). Long-press **R** / admin rescan refreshes the catalog cache. Playback opens `youtube.com/watch?v=…` in Chrome CDP screencast (requires Chrome/Chromium, same as Weather and Retro TV).
+List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Per-video pillarbox crop decisions from playback are cached under `youtube/crops/` for 30 days so replaying an episode skips the load-time crop probe. Press **T** during playback to toggle zoom on/off for that episode (persisted in the crop cache). Long-press **R** / admin rescan refreshes the catalog cache. By default, playback opens `youtube.com/watch?v=…` in Chrome CDP screencast (requires Chrome/Chromium, same as Weather and Retro TV).
+
+### `youtube` (playback mode + forever offline cache)
+
+Optional dual-backend settings. Distinct from the remote-mount **`cache`** block (NFS/SMB copy).
+
+```json
+{
+  "youtube": {
+    "playback_mode": "prefer_cache",
+    "cache": {
+      "enabled": true,
+      "directory": null,
+      "max_bytes": null,
+      "download_when_idle": true,
+      "idle_seconds": 30,
+      "idle_gap_seconds": 60,
+      "rate_limit_cooldown_seconds": 1800,
+      "exclude_unavailable": false,
+      "format": "bv*[height<=720]+ba/b[height<=720]/b"
+    }
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `playback_mode` | `live` | `live` always uses Chrome; `prefer_cache` plays a yt-dlp file when present else live; `cached_only` blocks uncached episodes (Pi 1 / Zero) |
+| `cache.enabled` | `false` | Download configured channels into a forever tree via yt-dlp |
+| `cache.directory` | first writable `media_paths` entry | Offline tree root (null → first writable media path, usually `/media/usb`; falls back to `~/.local/share/tv-time-capsule/youtube-offline` if media is missing/unwritable). Layout matches the local library: `Show/s01/S01E01 - Title [id].mp4`. Override to a NAS path to fill once and play everywhere |
+| `cache.max_bytes` | `null` | Soft cap; `null` never deletes completed files. When set, new downloads are skipped once over budget |
+| `cache.download_when_idle` | `true` | Background downloads while browsing/menus/screensaver (paused during PLAYING / Weather / Retro). Priority cache-now (Y / Enter on miss) still runs immediately unless rate-limited |
+| `cache.idle_seconds` | `30` | Seconds without UI input before background fills start (screensaver uses its own timeout; cache progress does not count as activity) |
+| `cache.idle_gap_seconds` | `60` | Seconds to wait between background idle batches (does not apply to priority Y/Enter) |
+| `cache.rate_limit_cooldown_seconds` | `1800` | After a bot / HTTP 429 style block, pause **all** cache downloads for this long (escalates on repeat hits, capped at 6h). Queued priority jobs resume when the cooldown ends |
+| `cache.exclude_unavailable` | `false` | Hide YouTube episodes marked **UNAVAILABLE** from browse lists and episode counts (alias `excludeUnavailable`). Leave false if you want to retry them with **Y** |
+| `cache.format` | 720p max | yt-dlp format string |
+| `cache.layout` | `season_folders` | `season_folders` → `Show/sNN/SxxExx - Title [id].mp4`; `flat` → `Show/SxxExx - Title [id].mp4` (no season subfolder) |
+| `cache.batch_size` | `1` | Concurrent yt-dlp downloads (clamped 1–8). Raise to 2–4 when a single connection is throttled |
+
+**Priority cache-now:** press **Y** to queue (show → bulk ``rest``; season/episode → end of that show's boost lane, still ahead of bulk fill). **Y** also clears an **UNAVAILABLE** skip for the selected episode/season/show so a failed id can be retried; idle fills still skip those until cleared. Play (**Enter**) on an uncached episode in `cached_only` jumps that title to the **front** of the line and auto-plays it when caching finishes — unless you **Enter** another episode first (that becomes the new pending target). **Y** alone does not set pending autoplay. Background idle fills pause while any priority job remains. Episode subtitles show **CACHING...** / **NOT CACHED**. yt-dlp uses web/tv player clients. Permanent removals / private / members-only / unavailable live recordings are marked **UNAVAILABLE**. Bot / rate-limit errors pause further requests until cooldown.
+
+**CLI:** `tv-time-capsule --youtube-cache-sync` fills missing episodes headlessly (requires `cache.enabled` and `yt-dlp`; Poetry installs yt-dlp on Python ≥3.10). Episode rows show **CACHED** / **CACHING...** / **NOT CACHED** when the offline cache is enabled. With `cached_only`, play attempts on misses show a **CACHING...** snackbar when queued (or **NOT CACHED** / unavailable). File and live backends share the pillarbox crop cache; press **T** to toggle zoom on either path.
+
+See also [Pi offline YouTube plan](../development/pi-features-offline-youtube-plan.md).
+
+Weather screencast knobs live under `weather.screencast` (`mode`, `min_fps`, `max_fps`, `target_fps`, `jpeg_quality`) — see `config.example.json` `_weather` comments and [Raspberry Pi profiles](raspberry-pi.md#device-profiles-features--youtube-cache).
 
 **Channel numbers** work like local shows: auto 1-based position in the ordered lineup, with optional overrides via `channels.order` / `channels.numbers` or the web admin **Channel lineup** page.
 

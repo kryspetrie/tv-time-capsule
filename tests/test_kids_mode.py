@@ -75,6 +75,9 @@ class KidsModeTests(unittest.TestCase):
         pygame.display.set_mode((800, 600))
         app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         app._kids_mode_active = False
+        app.show_names = ["Bluey"]
+        app.shows = {"Bluey": {"seasons": {}}}
+        app._kids_allowlist = {"shows": ["Bluey"], "movies": []}
         saved = {}
 
         def capture_save(cfg):
@@ -85,6 +88,62 @@ class KidsModeTests(unittest.TestCase):
         ):
             app._toggle_kids_mode()
         self.assertTrue(saved.get("enabled"))
+        self.assertTrue(app._kids_mode_active)
+
+    def test_toggle_kids_blocked_without_allowlist(self):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app._kids_mode_active = False
+        app._kids_allowlist = None
+        app.show_names = ["Bluey"]
+        with unittest.mock.patch("tv_time_capsule.app.save_config") as save:
+            app._toggle_kids_mode()
+        self.assertFalse(app._kids_mode_active)
+        self.assertEqual(app._mode_toast_message, "Assign kids shows first")
+        save.assert_not_called()
+
+    def test_toggle_kids_blocked_when_allowlist_empty(self):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app._kids_mode_active = False
+        app.show_names = ["Bluey"]
+        app._kids_allowlist = {"shows": [], "movies": []}
+        app._toggle_kids_mode()
+        self.assertFalse(app._kids_mode_active)
+        self.assertEqual(app._mode_toast_message, "Assign kids shows first")
+
+    def test_load_kids_mode_restores_enabled_bool(self):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app.config["kids_mode"] = {
+            "default_enabled": False,
+            "enabled": True,
+            "allowlist": {"shows": ["Bluey"], "movies": []},
+        }
+        app._load_kids_mode_config()
+        self.assertTrue(app._kids_mode_active)
+
+    def test_load_kids_mode_null_enabled_uses_default(self):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app.config["kids_mode"] = {
+            "default_enabled": True,
+            "enabled": None,
+        }
+        app._load_kids_mode_config()
+        self.assertTrue(app._kids_mode_active)
 
 
 class KidsLibrarySelectorTests(unittest.TestCase):

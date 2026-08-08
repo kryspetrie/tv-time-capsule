@@ -109,13 +109,15 @@ Hidden or discoverable extras — no config switch; they are always available wh
 
 **Label:** easter egg
 
-On parent browse screens, press **`000`** for a full-screen listing of the special channels below. Esc / `0` backs out. Help Overview points at this page under number keys.
+On parent screens (browse, playback, weather, retro), press **`000`** for a full-screen listing of the special channels below. Esc / `0` backs out. Help Overview points at this page under number keys.
 
-### Secret test patterns (parent browse)
+Pin specials on the home menu with [`home_menu`](configuration.md#home_menu) (Weather is on by default for parent and kids).
+
+### Secret test patterns (parent)
 
 **Label:** easter egg
 
-On any **parent** browse screen (library picker, shows, movies, seasons, episodes), press these codes (third digit commits after a short hold with other `00x` codes):
+On any **parent** screen (home, shows, movies, seasons, episodes, playback), press these codes (third digit commits after a short hold with other `00x` codes):
 
 | Press | Pattern | Asset file |
 |------|---------|------------|
@@ -127,7 +129,7 @@ On any **parent** browse screen (library picker, shows, movies, seasons, episode
 
 **Label:** easter egg
 
-Dial **`004`** for a live weather.com/retro screencast (Chromium CDP). Configure `weather.zip` / location in config (default Boston). Volume keys control the embedded player; Esc / back exits to the previous browse view.
+Dial **`004`** for a live weather.com/retro screencast (Chromium CDP). Configure `weather.zip` / location in config (default Boston). Screencast FPS/quality adapt automatically (`weather.screencast.mode: auto`) so older Pis stay usable at 1–2 FPS. Volume keys control the embedded player; Esc / back exits to the previous browse view. Disable with `features.weather: false`.
 
 Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use the `00x` special family only.
 
@@ -144,7 +146,7 @@ Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use 
 
 **Label:** easter egg
 
-Dial any **4-digit year from 1950–2009** on a parent browse screen to open that decade’s [MyRetroTVs](https://www.myretrotvs.com/) stream (Chromium CDP), cropped to the video only:
+Dial any **4-digit year from 1950–2009** on a parent screen (or pin `1990s` etc. under `home_menu`) to open that decade’s [MyRetroTVs](https://www.myretrotvs.com/) stream, cropped to the video only:
 
 | Years | Stream |
 |------|--------|
@@ -155,7 +157,12 @@ Dial any **4-digit year from 1950–2009** on a parent browse screen to open tha
 | 1990–1999 | 90s |
 | 2000–2009 | 00s |
 
-Volume keys adjust gain; left/right change channel on the site; **Enter / Space** opens a channel-type filter menu; Esc / back exits (or closes the menu first). Filter choices and volume are saved under `retro_tv` in config. Requires Chrome/Chromium (same as Weather).
+**Playback modes** (`retro_tv.playback_mode`):
+
+- `live` (default) — Chromium CDP screencast of the site (same stack as Weather).
+- `cached` — Chrome only drives the site (power on, filters, CH▼) to learn which YouTube clip is next; yt-dlp downloads a **temporary** rolling pair of files and ffmpeg plays them. Much lighter on Raspberry Pi. Temp files are wiped when you leave Decades (not the forever YouTube offline cache).
+
+Volume keys adjust gain; left/right change channel (in `cached` mode both directions skip forward to the next prefetched clip). **Enter / Space** opens the Retro TV menu with **Change Channel** focused — Enter again retunes (cached: drop current clip, play the prefetched next, start caching the following; live: site CH▲). **Channel Setup** is the channel-type filter checklist. Esc backs one menu level, then exits Decades from playback. Filter choices and volume are saved under `retro_tv` in config. Requires Chrome/Chromium and, for `cached`, yt-dlp. Disable with `features.retro_tv: false`.
 
 ---
 
@@ -172,8 +179,8 @@ Volume keys adjust gain; left/right change channel on the site; **Enter / Space*
 | Gamepad | Input | `gamepad.enabled` | on |
 | Test patterns `001` / `002` / `003` | Easter egg | *(none)* | always if PNGs exist |
 | Secret directory `000` | Easter egg | *(none)* | always |
-| Weather `004` | Easter egg | `weather.zip` etc. | always (Chrome required) |
-| MyRetroTVs `1950`–`2009` | Easter egg | *(none)* | always (Chrome required) |
+| Weather `004` | Easter egg | `weather.*`, `features.weather` | on (Chrome; adaptive screencast) |
+| MyRetroTVs `1950`–`2009` | Easter egg | `features.retro_tv`, `retro_tv.playback_mode` | on (`live` screencast; use `cached` on Pi) |
 
 Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` when the new keys are absent.
 

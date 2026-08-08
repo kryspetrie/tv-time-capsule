@@ -33,23 +33,24 @@ Same numeric entry on every browse screen; meaning depends on where you are. Dig
 | Press | Timing | Action |
 |------|--------|--------|
 | `1`…`999` (no leading zero) | Timeout ~1.5s | Jump to that channel / list index and show its page |
-| `0` | Timeout | **Back** (same as Esc back flow); during playback, stops and returns to menu |
+| `0` | Timeout | **Back** one level (same as Esc); during playback, stops to the episode list |
 | `01` | Short delay (~0.5s) | **Previous page** (by visible row count) |
 | `02` | Short delay (~0.5s) | **Next page** |
 | `00` | Timeout | Alphabet jump menu (parent show/movie only) |
-| `001` / `002` / `003` | Immediate on 3rd digit | Secret test patterns (any parent browse screen) |
+| `001` / `002` / `003` | Short hold on 3rd digit | Secret test patterns (parent screens + playback) |
 | Other leading-zero codes | — | Invalid |
 
 Shows, movies, seasons, and episodes use a **paged stack**: several titles visible at once. `01`/`02` move the window by one full page (e.g. items 1–5 → 6–10). ↑/↓ still move one row.
 
 | Screen | What 1–9 selects |
 |--------|------------------|
-| **Library picker** | Shows / Movies row |
+| **Library / home** | Home-menu row (Shows, Movies, Weather, pinned decades, …) |
 | **Kids catalog** | Show or movie channel |
 | **Show list** | Cable-style show channel |
 | **Movie list** | Movie channel |
 | **Season list** | Season 1, 2, 3… |
 | **Episode list** | Episode 1, 2, 3… (starts playback after static burst) |
+| **During playback** | Show (or movie) cable channel — cancellable countdown, then nested list |
 
 **Fun tweak:** with [channel snow](fun-tweaks-and-easter-eggs.md#channel-snow) enabled (default), committing a number plays a short static burst over the destination screen (not when using arrow keys).
 
@@ -61,17 +62,19 @@ On the **parent** show or movie list, press **`00`** (or press **L**) to open th
 
 ### Kids allowlist
 
-In **parent** mode on the show or movie list, press **K** to tag/untag the current title for kids mode (a small blue `[kids]` stays at the right of the title bar, immediately before the channel number). Until you tag at least once, kids mode shows the full library. After the allowlist exists in config, kids mode shows **only** tagged titles.
+In **parent** mode on the show or movie list, press **K** to tag/untag the current title for kids mode (a small blue `[kids]` stays at the right of the title bar, immediately before the channel number). Kids mode only shows tagged titles; **Tab** into kids mode is blocked with **Assign kids shows first** until at least one tagged title is in the library.
 
-### Quit confirmation
+### Back / quit
 
-On the show list, movie list, or library picker, **Esc** opens a **Quit?** dialog (not an instant exit). **← / →** choose Yes or No; **Enter** confirms. Left = Yes, Right = No.
+**Esc** (and dial `0`) moves **one level up**: episode → season or show list → home menu → **Quit?** at the top level (parent mode only). Weather / Retro / secret overlays exit first. On Retro TV, Esc closes Channel Setup → root menu → then exits Decades.
 
-When a split library is configured, **←** from the show or movie list returns to the **Library** picker instead of quitting.
+**Retro TV (Decades):** Enter opens **Change Channel** / **Channel Setup**; Enter again on Change Channel retunes. See [Fun tweaks → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
+
+**←** uses the same hierarchical back (without opening Quit? from mid-stack).
 
 ### Watch progress
 
-**In-progress episodes:** if you stop mid-episode (Esc), the app bookmarks the timestamp. That episode shows **RESUME** and a `Resume M:SS` line; playing it again continues from there. Finishing the episode (or stopping in the last ~10s) marks it **WATCHED**.
+**In-progress episodes:** if you stop mid-episode (Esc), the app bookmarks the timestamp. That episode shows a green `Resume M:SS` subtitle line; playing it again continues from there. Finishing the episode (or stopping in the last ~10s) marks it **WATCHED**.
 
 **Next up:** the first unwatched episode in the season shows **NEXT** (green border).
 
@@ -97,7 +100,7 @@ Press **Tab** (or your configured `kids_mode_toggle` key) to switch between **pa
 - **Autoplay:** when an episode finishes, behavior follows `playback.autoplay` in config.
 - **Simpler UI:** no status bar, no **H** help screen, no alphabet menu, and no key remapping (**F2**). Browse lists use taller rows and fewer per page.
 - **No quit:** **Esc**, **Q**, and closing the window do not exit the app while kids mode is on. Switch back to **parent mode** with **Tab** first.
-- **Allowlist:** only titles tagged with **K** in parent mode appear (after the allowlist has been created). Press **`0`** for back; **`01`/`02`** still page.
+- **Allowlist:** only titles tagged with **K** in parent mode appear. Entering kids mode requires at least one tagged title. Press **`0`** for back; **`01`/`02`** still page.
 
 ### Status bar & help
 
@@ -108,9 +111,9 @@ Press **H** for context help: it opens on the page for the current screen (Shows
 Optional config under [Configuration → kids_mode](configuration.md#kids_mode):
 
 - `default_enabled` — used on first launch before you have toggled mode at least once
-- `enabled` — saved automatically when you toggle; restored on next start
+- `enabled` — saved automatically when you toggle; restored on next start (last used parent/kids mode)
 - `interleave_shows_movies` — one combined alphabetical list of shows and movies as the first screen while in kids mode (only when both libraries exist)
-- `allowlist` — `{ "shows": [...], "movies": [...] }` written when you tag with **K**; absent means all titles for kids
+- `allowlist` — `{ "shows": [...], "movies": [...] }` written when you tag with **K**; required before kids mode can be entered
 
 ## During playback
 
@@ -119,7 +122,9 @@ Optional config under [Configuration → kids_mode](configuration.md#kids_mode):
 | ↑ / ↓ | Volume up / down |
 | ← / → | Seek back / forward 10s |
 | Space / Enter | Pause / resume |
-| Esc / `0` | Stop and return to menu |
+| Esc | Stop and return to the episode list (or movie list) |
+| `0` (dial timeout) | Same as Esc — back to episode / movie list |
+| `1`…`N` | Tune to that show/movie channel after a cancellable countdown |
 | C | Cancel background cache (when progress overlay is shown) |
 
 ### Key configuration (F2)

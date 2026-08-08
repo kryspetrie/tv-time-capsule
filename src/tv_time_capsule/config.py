@@ -304,6 +304,12 @@ def _parse_kids_mode(raw: dict | None) -> dict[str, Any]:
     return out
 
 
+def _parse_home_menu(raw: dict | None) -> dict[str, list[str]]:
+    from .home_menu import parse_home_menu
+
+    return parse_home_menu(raw if isinstance(raw, dict) else None)
+
+
 def _parse_network(raw: dict | None) -> dict[str, Any]:
     net = raw or {}
     if not isinstance(net, dict):
@@ -361,6 +367,156 @@ def _parse_cache(raw: dict | None) -> dict[str, Any]:
     }
 
 
+_DEFAULT_YOUTUBE_FORMAT = "bv*[height<=720]+ba/b[height<=720]/b"
+
+
+def _parse_youtube_offline_cache(raw: dict | None) -> dict[str, Any]:
+    """Forever yt-dlp cache (not the remote-mount playback ``cache`` block)."""
+    cache = raw or {}
+    if not isinstance(cache, dict):
+        cache = {}
+    directory = cache.get("directory")
+    if directory is not None:
+        directory = str(directory).strip() or None
+    raw_max = cache.get("max_bytes", None)
+    if raw_max is None:
+        max_bytes = None
+    else:
+        try:
+            max_bytes = max(0, int(raw_max))
+        except (TypeError, ValueError):
+            max_bytes = None
+    try:
+        idle_seconds = int(cache.get("idle_seconds", 30))
+    except (TypeError, ValueError):
+        idle_seconds = 30
+    idle_seconds = max(5, idle_seconds)
+    try:
+        idle_gap_seconds = int(cache.get("idle_gap_seconds", 60))
+    except (TypeError, ValueError):
+        idle_gap_seconds = 60
+    idle_gap_seconds = max(5, idle_gap_seconds)
+    try:
+        rate_limit_cooldown_seconds = int(
+            cache.get("rate_limit_cooldown_seconds", 1800)
+        )
+    except (TypeError, ValueError):
+        rate_limit_cooldown_seconds = 1800
+    rate_limit_cooldown_seconds = max(60, rate_limit_cooldown_seconds)
+    # snake_case preferred; camelCase accepted as an alias.
+    exclude_unavailable = bool(
+        cache.get(
+            "exclude_unavailable",
+            cache.get("excludeUnavailable", False),
+        )
+    )
+    fmt = cache.get("format")
+    if fmt is None or not str(fmt).strip():
+        fmt = _DEFAULT_YOUTUBE_FORMAT
+    else:
+        fmt = str(fmt).strip()
+    layout = str(cache.get("layout") or "season_folders").strip().lower()
+    if layout not in ("season_folders", "flat"):
+        layout = "season_folders"
+    try:
+        batch_size = int(cache.get("batch_size", 1))
+    except (TypeError, ValueError):
+        batch_size = 1
+    batch_size = max(1, min(8, batch_size))
+    return {
+        "enabled": bool(cache.get("enabled", False)),
+        "directory": directory,
+        "max_bytes": max_bytes,
+        "download_when_idle": bool(cache.get("download_when_idle", True)),
+        "idle_seconds": idle_seconds,
+        "idle_gap_seconds": idle_gap_seconds,
+        "rate_limit_cooldown_seconds": rate_limit_cooldown_seconds,
+        "exclude_unavailable": exclude_unavailable,
+        "format": fmt,
+        "layout": layout,
+        "batch_size": batch_size,
+    }
+
+
+def _parse_youtube(raw: dict | None) -> dict[str, Any]:
+    """Playback mode + forever offline cache settings for YouTube shows."""
+    block = raw or {}
+    if not isinstance(block, dict):
+        block = {}
+    mode = str(block.get("playback_mode") or "live").strip().lower()
+    if mode not in ("live", "prefer_cache", "cached_only"):
+        mode = "live"
+    return {
+        "playback_mode": mode,
+        "cache": _parse_youtube_offline_cache(block.get("cache")),
+    }
+
+
+def _parse_features(raw: dict | None) -> dict[str, Any]:
+    """Master switches — false removes dial/UI entry and never starts Chrome."""
+    block = raw or {}
+    if not isinstance(block, dict):
+        block = {}
+    return {
+        "weather": bool(block.get("weather", True)),
+        "retro_tv": bool(block.get("retro_tv", True)),
+        "youtube": bool(block.get("youtube", True)),
+    }
+
+
+def _parse_weather_screencast(raw: dict | None) -> dict[str, Any]:
+    """Adaptive / fixed screencast knobs for the Weather Channel."""
+    block = raw or {}
+    if not isinstance(block, dict):
+        block = {}
+    mode = str(block.get("mode") or "auto").strip().lower()
+    if mode not in ("auto", "fixed"):
+        mode = "auto"
+    try:
+        min_fps = float(block.get("min_fps", 1))
+    except (TypeError, ValueError):
+        min_fps = 1.0
+    try:
+        max_fps = float(block.get("max_fps", 15))
+    except (TypeError, ValueError):
+        max_fps = 15.0
+    min_fps = max(0.5, min(30.0, min_fps))
+    max_fps = max(min_fps, min(30.0, max_fps))
+    target_raw = block.get("target_fps")
+    target_fps = None
+    if target_raw is not None and str(target_raw).strip() != "":
+        try:
+            target_fps = float(target_raw)
+        except (TypeError, ValueError):
+            target_fps = None
+        if target_fps is not None:
+            target_fps = max(min_fps, min(max_fps, target_fps))
+
+    def _opt_int(key: str, default: int | None = None) -> int | None:
+        val = block.get(key, default)
+        if val is None or str(val).strip() == "":
+            return default
+        try:
+            return max(1, int(val))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        jpeg_quality = int(block.get("jpeg_quality", 80))
+    except (TypeError, ValueError):
+        jpeg_quality = 80
+    jpeg_quality = max(20, min(95, jpeg_quality))
+    return {
+        "mode": mode,
+        "min_fps": min_fps,
+        "max_fps": max_fps,
+        "target_fps": target_fps,
+        "max_width": _opt_int("max_width"),
+        "max_height": _opt_int("max_height"),
+        "jpeg_quality": jpeg_quality,
+    }
+
+
 def _parse_accessibility(raw: dict | None) -> dict[str, Any]:
     acc = raw or {}
     if not isinstance(acc, dict):
@@ -413,6 +569,7 @@ def _parse_weather(raw: dict | None) -> dict[str, Any]:
         "name": _opt_str("name"),
         "latitude": latitude,
         "longitude": longitude,
+        "screencast": _parse_weather_screencast(weather.get("screencast")),
     }
 
 
@@ -422,6 +579,9 @@ def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
     ``filters`` maps checkbox ids (``box_c``, ``box_s``, …) to enabled flags.
     ``null`` / omitted means “use the site default” (typically all on) until
     the user changes them in the in-app menu.
+
+    ``playback_mode`` is ``live`` (Chrome screencast) or ``cached`` (site as
+    playlist oracle + temporary yt-dlp pair played via ffmpeg).
     """
     retro = raw or {}
     if not isinstance(retro, dict):
@@ -466,9 +626,21 @@ def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
     if volume_i is not None:
         volume_i = max(0, min(100, volume_i))
 
+    mode_raw = retro.get("playback_mode", defaults.get("playback_mode", "live"))
+    playback_mode = str(mode_raw or "live").strip().lower()
+    if playback_mode not in ("live", "cached"):
+        playback_mode = "live"
+
+    cache_dir_raw = retro.get("cache_directory", defaults.get("cache_directory"))
+    cache_directory = None
+    if cache_dir_raw is not None and str(cache_dir_raw).strip():
+        cache_directory = str(cache_dir_raw).strip()
+
     return {
         "filters": filters,
         "volume": volume_i,
+        "playback_mode": playback_mode,
+        "cache_directory": cache_directory,
     }
 
 
@@ -951,6 +1123,7 @@ def _default_config() -> dict[str, Any]:
             "default_enabled": False,
             "interleave_shows_movies": False,
         },
+        "home_menu": _parse_home_menu(None),
         "network": {
             "mdns_hostname": "vintage-tv",
             "admin_port": 8765,
@@ -972,19 +1145,24 @@ def _default_config() -> dict[str, Any]:
             "high_contrast": False,
             "play_all_unwatched": False,
         },
+        "features": _parse_features(None),
         "weather": {
             "zip": "02108",
             "query": None,
             "name": "Boston",
             "latitude": None,
             "longitude": None,
+            "screencast": _parse_weather_screencast(None),
         },
         "retro_tv": {
             "filters": None,
             "volume": None,
+            "playback_mode": "live",
+            "cache_directory": None,
         },
         "youtube_channels": _parse_youtube_channels(_default_youtube_channels()),
         "youtube_title_rules": list(DEFAULT_YOUTUBE_TITLE_RULES),
+        "youtube": _parse_youtube(None),
     }
 
 
@@ -1023,10 +1201,12 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "channels": _parse_channels(raw.get("channels")),
         "library": _parse_library(raw.get("library")),
         "kids_mode": _parse_kids_mode(raw.get("kids_mode")),
+        "home_menu": _parse_home_menu(raw.get("home_menu")),
         "network": _parse_network(raw.get("network")),
         "cache": _parse_cache(raw.get("cache")),
         "admin": _parse_admin(raw.get("admin")),
         "accessibility": _parse_accessibility(raw.get("accessibility")),
+        "features": _parse_features(raw.get("features")),
         "weather": _parse_weather(raw.get("weather")),
         "retro_tv": _parse_retro_tv(raw.get("retro_tv")),
         "youtube_channels": _parse_youtube_channels(
@@ -1039,6 +1219,7 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
             if "youtube_title_rules" in raw
             else list(DEFAULT_YOUTUBE_TITLE_RULES)
         ),
+        "youtube": _parse_youtube(raw.get("youtube")),
     }
 
 

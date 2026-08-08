@@ -91,6 +91,11 @@ from .movie_nav import (
     present_letters,
 )
 from .dial_nav import DialKind, classify_dial, page_cursor
+from .home_menu import (
+    decade_slug_for_token,
+    label_for_decade_slug,
+    year_digits_for_decade_slug,
+)
 from .playback_cache import PlaybackCache
 from .player import (
     EmbeddedPlayer,
@@ -122,11 +127,14 @@ from .hidden_channels import (
 )
 from .weather_channel import WeatherChannel, resolve_weather_location
 from .retro_tv_channel import RetroTvChannel, url_for_decade
+from .retro_tv_cache import RetroTvTempCache
+from .retro_tv_menu import MenuCommand, RetroTvMenu, draw_retro_tv_menu
 from .youtube_catalog import (
     is_youtube_episode,
     load_youtube_shows,
     merge_youtube_channel_numbers,
 )
+from .youtube_offline_cache import YoutubeOfflineCache, is_idle_for_youtube_cache
 from .youtube_player import YouTubePlayer
 from .state import (
     clear_resume_ep,
@@ -300,10 +308,17 @@ class TVTimeCapsule:
         self._now_playing_splash_ms = int(splash_seconds * 1000)
         self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
         self._playback_cache = PlaybackCache(self.config)
+        self._yt_offline = YoutubeOfflineCache(self.config)
+        self._yt_offline.set_shows_provider(lambda: self.shows)
+        self._yt_offline_idle = False
+        # Enter on uncached episode: play automatically when that id finishes caching
+        # (replaced if Enter is pressed on a different episode first).
+        self._pending_cache_play: dict[str, Any] | None = None
         self._playing_source_path: str | None = None
         self._playback_allow_hot_swap = True
         self._playback_cache_suppressed = False
         self._playback_cache_switched = False
+        self._playing_youtube_file = False
         self._load_kids_mode_config()
         ui_cfg = self.config.get("ui") or {}
         self._footer_hints_enabled = bool(ui_cfg.get("footer_hints", True))
@@ -343,8 +358,15 @@ class TVTimeCapsule:
         self._retro_tv_channel: RetroTvChannel | None = None
         self._retro_tv_decade: str | None = None
         self._retro_tv_year_flash: str = ""
-        self._retro_tv_menu_open = False
-        self._retro_tv_menu_cursor = 0
+        self._retro_tv_menu = RetroTvMenu()
+        self._retro_tv_cached_mode = False
+        self._retro_tv_temp_cache: RetroTvTempCache | None = None
+        self._retro_tv_player = None
+        self._retro_tv_current_id: str | None = None
+        self._retro_tv_next_id: str | None = None
+        self._retro_tv_status: str = ""
+        self._retro_tv_prefetch_gen = 0
+        self._retro_tv_advance_lock = threading.Lock()
         self._youtube_lock = threading.Lock()
         self._youtube_pending: dict[str, dict] | None = None
         self._youtube_worker: threading.Thread | None = None
@@ -444,7 +466,12 @@ class TVTimeCapsule:
         self._letter_menu_cursor = 0
         self._load_kids_allowlist()
         self._apply_library_discovery(set_initial_view=True)
-        if self._kids_mode_active:
+        if self._kids_mode_active and not self._kids_has_assigned_titles():
+            # Last session left kids on, but nothing is tagged yet / media missing.
+            self._kids_mode_active = False
+            self._mode_toast_message = "Assign kids shows first"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+        elif self._kids_mode_active:
             self._apply_kids_startup_view()
         self.cur_show = None
         self.cur_season = None
@@ -504,6 +531,16 @@ class TVTimeCapsule:
         elif self._admin_server is None:
             self._start_admin_server()
 
+        if self._youtube_feature_enabled():
+            self._yt_offline.start_idle_worker()
+
+    def _feature_enabled(self, name: str) -> bool:
+        feats = self.config.get("features") or {}
+        return bool(feats.get(name, True))
+
+    def _youtube_feature_enabled(self) -> bool:
+        return self._feature_enabled("youtube")
+
     def _load_kids_mode_config(self) -> None:
         km_cfg = self.config.get("kids_mode") or {}
         style = str(km_cfg.get("browse_style", "card"))
@@ -513,10 +550,13 @@ class TVTimeCapsule:
         if style not in ("card", "full"):
             style = "card"
         self._kids_browse_style = style
-        if "enabled" in km_cfg:
-            self._kids_mode_active = bool(km_cfg["enabled"])
-        else:
+        # ``enabled`` is always present after parse (None until first toggle).
+        # Only a real bool restores last mode; otherwise use default_enabled.
+        saved = km_cfg.get("enabled")
+        if saved is None:
             self._kids_mode_active = bool(km_cfg.get("default_enabled", False))
+        else:
+            self._kids_mode_active = bool(saved)
         self._load_kids_allowlist()
 
     def _load_kids_allowlist(self) -> None:
@@ -566,6 +606,14 @@ class TVTimeCapsule:
         if self._kids_mode_active:
             return self._kids_filtered_movie_names()
         return list(self.movie_names)
+
+    def _kids_has_assigned_titles(self) -> bool:
+        """True when at least one tagged kids title is present in the library."""
+        if self._kids_allowlist is None:
+            return False
+        return bool(
+            self._kids_filtered_show_names() or self._kids_filtered_movie_names()
+        )
 
     def _title_kids_tagged(self, *, show: str | None = None, movie: str | None = None) -> bool:
         if self._kids_allowlist is None:
@@ -631,6 +679,11 @@ class TVTimeCapsule:
             self.cursor = 0
 
     def _toggle_kids_mode(self) -> None:
+        entering_kids = not self._kids_mode_active
+        if entering_kids and not self._kids_has_assigned_titles():
+            self._mode_toast_message = "Assign kids shows first"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
         self._kids_mode_active = not self._kids_mode_active
         self._mode_toast_message = "Kids mode" if self._kids_mode_active else "Parent mode"
         self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
@@ -638,6 +691,7 @@ class TVTimeCapsule:
         self.channel_timer = 0
         self._reset_marquee_timeline()
         if self.view == self.PLAYING:
+            self._persist_kids_mode()
             return
         if self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
             self.exit_key_config()
@@ -755,9 +809,8 @@ class TVTimeCapsule:
             return
         # Collect all unwatched episodes across all seasons
         episodes: list[dict] = []
-        for s_num in sorted(show.get("seasons", {}).keys()):
-            season = show["seasons"][s_num]
-            season_eps = season.get("episodes", [])
+        for s_num in self.seasons_for_show(show_name):
+            season_eps = self._season_episodes(show_name, s_num)
             watched = get_watched_episodes(
                 self.state, show_name, s_num, episodes=season_eps
             )
@@ -768,16 +821,104 @@ class TVTimeCapsule:
             self._mode_toast_message = "All episodes watched"
             self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
             return
-        if not self._can_start_episode(episodes[0]):
-            self.channel_error = "NO PLAYER"
-            self.channel_error_time = pygame.time.get_ticks()
+        # cached_only: drop uncached YouTube so the queue is playable
+        playable = [ep for ep in episodes if self._can_start_episode(ep)]
+        if not playable:
+            self._mode_toast_message = (
+                "Nothing cached"
+                if self._yt_offline.enabled
+                and self._yt_offline.playback_mode == "cached_only"
+                else "NO PLAYER"
+            )
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
             return
+        episodes = playable
         self.playing_episodes = episodes
         self.playing_index = 0
         self.playing_show = show_name
         self._playing_is_movie = False
         self.cur_movie = None
         self._start_current_episode(show_splash=True)
+
+    def _youtube_cache_now_action(self) -> None:
+        """Priority-cache the selected YouTube episode, season, or show now.
+
+        Also clears UNAVAILABLE skips for the selected scope so Y can retry a
+        previously failed id (idle fills still skip those until cleared).
+        """
+        if self._kids_mode_active:
+            return
+        if not self._yt_offline.enabled:
+            self._mode_toast_message = "YouTube cache off"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
+        retrying = False
+        if self.view == self.SHOW_LIST:
+            names = self._browse_show_names()
+            if not names or not (0 <= self.cursor < len(names)):
+                return
+            show_name = names[self.cursor]
+            show = self.shows.get(show_name) or {}
+            items = self._yt_offline.missing_items_for_show(
+                show_name, show, retry_unavailable=True
+            )
+            scope = "show"
+        elif self.view == self.SEASON_SELECT:
+            show_name = self.cur_show
+            if not show_name:
+                return
+            seasons = self.seasons_for_show(show_name)
+            if not seasons or not (0 <= self.cursor < len(seasons)):
+                return
+            season_num = seasons[self.cursor]
+            show = self.shows.get(show_name) or {}
+            items = self._yt_offline.missing_items_for_season(
+                show_name, season_num, show, retry_unavailable=True
+            )
+            scope = f"S{int(season_num):02d}"
+        elif self.view == self.EPISODE_SELECT:
+            show_name = self.cur_show
+            if not show_name or self.cur_season is None:
+                return
+            show = self.shows.get(show_name) or {}
+            if show.get("source") != "youtube":
+                self._mode_toast_message = "Not a YouTube show"
+                self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+                return
+            episodes = self._season_episodes(show_name, self.cur_season)
+            if not episodes or not (0 <= self.cursor < len(episodes)):
+                return
+            ep = episodes[self.cursor]
+            yid = youtube_id_from_episode(ep)
+            retrying = bool(yid and self._yt_offline.is_unavailable(yid))
+            items = self._yt_offline.missing_items_for_episode(
+                show_name, int(self.cur_season), ep, retry_unavailable=True
+            )
+            scope = "episode"
+        else:
+            return
+
+        show = self.shows.get(show_name) or {}
+        if show.get("source") != "youtube":
+            self._mode_toast_message = "Not a YouTube show"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
+
+        # Y: append to that show's boost lane (FIFO among Y presses), still
+        # ahead of show/season ``rest`` fill. Play-on-uncached uses front=True.
+        bump = self.view in (self.SEASON_SELECT, self.EPISODE_SELECT)
+        added = self._yt_offline.request_priority(
+            items, bump=bump, front=False, retry_unavailable=True
+        )
+        if added <= 0:
+            self._mode_toast_message = "Already cached"
+        elif retrying and added == 1:
+            self._mode_toast_message = "Retrying cache"
+        elif added == 1:
+            self._mode_toast_message = f"Queued 1 ({scope})"
+        else:
+            self._mode_toast_message = f"Queued {added} ({scope})"
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
 
     def _kids_play_show(self, show_name: str) -> None:
         show = self.shows.get(show_name)
@@ -795,11 +936,18 @@ class TVTimeCapsule:
             season_has_in_progress=season_has_in_progress,
         )
         self.cur_season = season
-        episodes = show.get("seasons", {}).get(season, {}).get("episodes", [])
+        episodes = self._season_episodes(show_name, season)
         if not episodes:
             return
         if not self._can_start_episode(episodes[0]):
-            self.channel_error = "NO PLAYER"
+            queued = self._priority_cache_episode_on_play_block(
+                show_name, season, episodes[0]
+            )
+            self.channel_error = (
+                "CACHING..."
+                if queued
+                else (self._youtube_start_blocked_message(episodes[0]) or "NO PLAYER")
+            )
             self.channel_error_time = pygame.time.get_ticks()
             return
 
@@ -866,11 +1014,122 @@ class TVTimeCapsule:
         self._movie_channel = movie_to_ch
         self._channel_movie = ch_to_movie
 
+    def _home_menu_tokens(self) -> list[str]:
+        hm = self.config.get("home_menu") or {}
+        key = "kids" if self._kids_mode_active else "parent"
+        tokens = hm.get(key)
+        if not isinstance(tokens, list) or not tokens:
+            return ["shows", "movies", "weather"]
+        return [str(t) for t in tokens]
+
+    def _resolved_home_rows(self) -> list[dict]:
+        """Active home-menu rows after feature / library filters."""
+        show_count = len(self._browse_show_names())
+        movie_count = len(self._browse_movie_names())
+        rows: list[dict] = []
+        for tok in self._home_menu_tokens():
+            if tok == "shows":
+                if self.library_layout == "movies_only" and show_count == 0:
+                    continue
+                rows.append(
+                    {
+                        "kind": "shows",
+                        "token": "shows",
+                        "name": "SHOWS",
+                        "count": show_count,
+                        "subtitle": f"{show_count} title{'s' if show_count != 1 else ''}",
+                    }
+                )
+            elif tok == "movies":
+                if self.library_layout == "legacy" and movie_count == 0:
+                    continue
+                rows.append(
+                    {
+                        "kind": "movies",
+                        "token": "movies",
+                        "name": "MOVIES",
+                        "count": movie_count,
+                        "subtitle": f"{movie_count} title{'s' if movie_count != 1 else ''}",
+                    }
+                )
+            elif tok == "weather":
+                if not self._feature_enabled("weather"):
+                    continue
+                rows.append(
+                    {
+                        "kind": "weather",
+                        "token": "weather",
+                        "name": "WEATHER",
+                        "count": None,
+                        "subtitle": "Channel 004",
+                    }
+                )
+            elif tok == "directory":
+                if self._kids_mode_active:
+                    continue
+                rows.append(
+                    {
+                        "kind": "directory",
+                        "token": "directory",
+                        "name": "DIRECTORY",
+                        "count": None,
+                        "subtitle": "Secret channels",
+                    }
+                )
+            elif tok in ("001", "002", "003"):
+                if self._kids_mode_active:
+                    continue
+                titles = {
+                    "001": "COLOR BARS",
+                    "002": "GRID",
+                    "003": "INDIAN HEAD",
+                }
+                rows.append(
+                    {
+                        "kind": "pattern",
+                        "token": tok,
+                        "name": titles[tok],
+                        "count": None,
+                        "subtitle": f"Channel {tok}",
+                        "dial": tok,
+                    }
+                )
+            else:
+                slug = decade_slug_for_token(tok)
+                if slug is None or not self._feature_enabled("retro_tv"):
+                    continue
+                rows.append(
+                    {
+                        "kind": "retro",
+                        "token": tok,
+                        "name": label_for_decade_slug(slug).upper(),
+                        "count": None,
+                        "subtitle": "Retro TV",
+                        "decade": slug,
+                        "year_digits": year_digits_for_decade_slug(slug),
+                    }
+                )
+        return rows
+
+    def _uses_home_menu(self) -> bool:
+        """True when the top-level picker should be shown (multiple home rows)."""
+        return len(self._resolved_home_rows()) > 1
+
     def _view_for_library_layout(self) -> int:
-        if self.library_layout == "split":
+        rows = self._resolved_home_rows()
+        if len(rows) > 1:
+            return self.LIBRARY_SELECT
+        if len(rows) == 1:
+            kind = rows[0].get("kind")
+            if kind == "shows":
+                return self.SHOW_LIST
+            if kind == "movies":
+                return self.MOVIE_LIST
             return self.LIBRARY_SELECT
         if self.library_layout == "movies_only":
             return self.MOVIE_LIST
+        if self.library_layout == "split":
+            return self.LIBRARY_SELECT
         return self.SHOW_LIST
 
     def _merge_youtube_into_shows(
@@ -880,6 +1139,8 @@ class TVTimeCapsule:
         schedule_refresh: bool = True,
     ) -> None:
         """Overlay YouTube channels from cache/stubs; scrape runs in the background."""
+        if not self._youtube_feature_enabled():
+            return
         yt_shows = load_youtube_shows(
             self.config,
             force_refresh=False,
@@ -899,6 +1160,8 @@ class TVTimeCapsule:
 
     def _schedule_youtube_catalog_refresh(self, *, force: bool = False) -> None:
         """Kick off a background Chrome scrape if one is not already running."""
+        if not self._youtube_feature_enabled():
+            return
         if force:
             self._youtube_refresh_force = True
         worker = self._youtube_worker
@@ -1158,13 +1421,23 @@ class TVTimeCapsule:
         else:
             info = f"{n_total} ep"
         if is_yt:
-            info = f"{info} - Youtube"
+            if self._yt_offline.enabled:
+                cached, total, pct = self._yt_offline.show_cache_progress(data)
+                if pct is not None:
+                    info = f"{info} - {pct}% cached ({cached}/{total})"
+                else:
+                    info = f"{info} - Youtube"
+                if self._yt_offline.is_caching_show(show_name):
+                    info = f"{info} - Caching..."
+            else:
+                info = f"{info} - Youtube"
         return info
 
     def _display_movie_channel(self, movie_key: str) -> int:
         return self._movie_channel.get(movie_key, 0)
 
     def _is_split_library(self) -> bool:
+        """Legacy: both show and movie libraries discovered on disk."""
         return self.library_layout == "split"
 
     def _movie_episode_entry(self, movie_key: str) -> dict:
@@ -1181,7 +1454,9 @@ class TVTimeCapsule:
         if self.view == self.PLAYING:
             return False
 
-        has_youtube = bool(self.config.get("youtube_channels"))
+        has_youtube = bool(
+            self._youtube_feature_enabled() and (self.config.get("youtube_channels") or [])
+        )
 
         # Check each media path for presence before scanning.
         # If no media is present (unplugged USB, unmounted share), preserve
@@ -1275,7 +1550,13 @@ class TVTimeCapsule:
             self.view = self._view_for_library_layout()
             self.cursor = 0
 
-        if self._kids_mode_active:
+        if self._kids_mode_active and not self._kids_has_assigned_titles():
+            self._kids_mode_active = False
+            self._mode_toast_message = "Assign kids shows first"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            self.view = self._view_for_library_layout()
+            self.cursor = 0
+        elif self._kids_mode_active:
             self._apply_kids_startup_view()
 
         self._duration_cache.clear()
@@ -1609,53 +1890,74 @@ class TVTimeCapsule:
         if result.kind == DialKind.BACK:
             if self._letter_menu_open:
                 self._close_letter_menu()
+            elif self.view == self.PLAYING:
+                self.stop_playback()
             else:
                 self._process_browse_action("back")
             return
-        if result.kind == DialKind.PAGE_UP:
-            self._page_browse(-1)
-            return
-        if result.kind == DialKind.PAGE_DOWN:
-            self._page_browse(1)
-            return
-        if result.kind == DialKind.LETTER_MENU:
+        if result.kind in (DialKind.PAGE_UP, DialKind.PAGE_DOWN, DialKind.LETTER_MENU):
+            if self.view == self.PLAYING:
+                self.channel_error = f"Ch {digits} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
+                return
+            if result.kind == DialKind.PAGE_UP:
+                self._page_browse(-1)
+                return
+            if result.kind == DialKind.PAGE_DOWN:
+                self._page_browse(1)
+                return
             self._open_letter_menu()
             return
         if result.kind == DialKind.HIDDEN_GUIDE:
-            if self._test_pattern_dial_allowed():
+            if self._secret_dial_allowed():
+                self._leave_playback_if_needed()
                 self._enter_hidden_channels_guide()
             else:
                 self.channel_error = f"Ch {digits} Not Found"
                 self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.TEST_PATTERN:
-            if self._test_pattern_dial_allowed():
+            if self._secret_dial_allowed():
+                self._leave_playback_if_needed()
                 if self._commit_show_list_test_pattern(digits):
                     return
             self.channel_error = f"Ch {digits} Not Found"
             self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.WEATHER:
-            if self._test_pattern_dial_allowed() or self.view in (
+            if not self._feature_enabled("weather"):
+                self.channel_error = f"Ch {digits} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
+                return
+            if self._secret_dial_allowed() or self.view in (
                 self.WEATHER,
                 self.RETRO_TV,
             ):
+                self._leave_playback_if_needed()
                 self._enter_weather_channel()
             else:
                 self.channel_error = f"Ch {digits} Not Found"
                 self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.RETRO_TV and result.decade is not None:
-            if self._test_pattern_dial_allowed() or self.view in (
+            if not self._feature_enabled("retro_tv"):
+                self.channel_error = f"Ch {digits} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
+                return
+            if self._secret_dial_allowed() or self.view in (
                 self.WEATHER,
                 self.RETRO_TV,
             ):
+                self._leave_playback_if_needed()
                 self._enter_retro_tv(result.decade, year_digits=digits)
             else:
                 self.channel_error = f"Ch {digits} Not Found"
                 self.channel_error_time = pygame.time.get_ticks()
             return
         if result.kind == DialKind.CHANNEL and result.channel is not None:
+            if self.view == self.PLAYING:
+                self._playback_channel_switch(result.channel)
+                return
             success = self.jump_to_channel(result.channel)
             if success:
                 self.channel_flash = str(result.channel)
@@ -2547,9 +2849,21 @@ class TVTimeCapsule:
         frame = self._weather_channel.get_frame()
         if frame is not None:
             # Full-bleed like embedded video: scale to the draw surface.
-            # (Preserving aspect left black bars even at 0% safe zone.)
+            # Prefer nearest-neighbor on weak ARM / when already near canvas size.
             if frame.get_size() != (self.sw, self.sh):
-                frame = pygame.transform.smoothscale(frame, (self.sw, self.sh))
+                fw, fh = frame.get_size()
+                near = abs(fw - self.sw) <= 2 and abs(fh - self.sh) <= 2
+                weak = False
+                try:
+                    from .screencast_adapt import _is_weak_arm
+
+                    weak = _is_weak_arm()
+                except Exception:
+                    weak = False
+                if near or weak:
+                    frame = pygame.transform.scale(frame, (self.sw, self.sh))
+                else:
+                    frame = pygame.transform.smoothscale(frame, (self.sw, self.sh))
             self.screen.blit(frame, (0, 0))
         else:
             self.screen.fill(C.BLACK)
@@ -2576,15 +2890,24 @@ class TVTimeCapsule:
             return True
         return False
 
-    def _test_pattern_dial_allowed(self) -> bool:
-        """Easter egg dials work on any parent browse screen."""
-        return not self._kids_mode_active and self.view in (
+    def _secret_dial_allowed(self) -> bool:
+        """Easter-egg number codes (parent mode, non-modal screens)."""
+        if self._kids_mode_active:
+            return False
+        return self.view in (
             self.LIBRARY_SELECT,
             self.SHOW_LIST,
             self.MOVIE_LIST,
             self.SEASON_SELECT,
             self.EPISODE_SELECT,
+            self.PLAYING,
+            self.WEATHER,
+            self.RETRO_TV,
         )
+
+    def _test_pattern_dial_allowed(self) -> bool:
+        """Backward-compatible alias for secret dial gating."""
+        return self._secret_dial_allowed()
 
     def _commit_show_list_test_pattern(self, dial: str) -> bool:
         """Show a secret test pattern for dial codes 001 / 002 / 003."""
@@ -2604,6 +2927,10 @@ class TVTimeCapsule:
         Snow / static starts *immediately* and keeps animating while Chrome
         boots on a background thread (no main-thread network / CDP wait).
         """
+        if not self._feature_enabled("weather"):
+            self.channel_error = "Ch 004 Not Found"
+            self.channel_error_time = pygame.time.get_ticks()
+            return
         if self.view == self.RETRO_TV:
             prev = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
             self._exit_retro_tv()
@@ -2638,6 +2965,7 @@ class TVTimeCapsule:
                         self.canvas_w,
                         self.canvas_h,
                         location=location,
+                        screencast=weather_cfg.get("screencast"),
                     )
                 result["ok"] = bool(self._weather_channel.start())
             except Exception:
@@ -2698,7 +3026,10 @@ class TVTimeCapsule:
         self.view = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
 
     def _draw_retro_tv(self) -> None:
-        """Render the MyRetroTVs screencast frame full-bleed."""
+        """Render MyRetroTVs: live screencast or cached ffmpeg frames."""
+        if self._retro_tv_cached_mode:
+            self._draw_retro_tv_cached()
+            return
         if self._retro_tv_channel is None or not self._retro_tv_channel.is_available():
             self.screen.fill(C.BLACK)
             t = self.font_md.render("RETRO TV UNAVAILABLE", True, self._dim_color())
@@ -2713,105 +3044,43 @@ class TVTimeCapsule:
             self.screen.fill(C.BLACK)
             t = self.font_sm.render("LOADING...", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
-        if self._retro_tv_menu_open:
-            self._draw_retro_tv_filter_menu()
+        self._draw_retro_tv_menu_overlay()
         self.draw_volume_overlay()
 
-    def _retro_tv_menu_rows(self) -> list[tuple[str, str, bool | None]]:
-        """Menu rows: (kind, label, on). kind is all|none|filter id."""
-        rows: list[tuple[str, str, bool | None]] = [
-            ("all", "Select All", None),
-            ("none", "Select None", None),
-        ]
+    def _draw_retro_tv_cached(self) -> None:
+        """Full-bleed ffmpeg frames for playlist-oracle Decades mode."""
+        self.screen.fill(C.BLACK)
+        player = self._retro_tv_player
+        status = self._retro_tv_status or "TUNING..."
+        if player is not None:
+            frame = player.get_frame()
+            if frame is not None:
+                if frame.get_size() != (self.sw, self.sh):
+                    frame = pygame.transform.scale(frame, (self.sw, self.sh))
+                self.screen.blit(frame, (0, 0))
+            else:
+                t = self.font_sm.render(status, True, self._dim_color())
+                self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+        else:
+            t = self.font_sm.render(status, True, self._dim_color())
+            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+        self._draw_retro_tv_menu_overlay()
+        self.draw_volume_overlay()
+
+    def _draw_retro_tv_menu_overlay(self) -> None:
+        """Draw Change Channel / Channel Setup overlay when open."""
+        if not self._retro_tv_menu.is_open:
+            return
         filters: list[dict] = []
         if self._retro_tv_channel is not None:
             filters = self._retro_tv_channel.get_filters()
-        for item in filters:
-            rows.append((str(item["id"]), str(item["name"]), bool(item["on"])))
-        return rows
-
-    def _open_retro_tv_filter_menu(self) -> None:
-        self._retro_tv_menu_open = True
-        rows = self._retro_tv_menu_rows()
-        if self._retro_tv_menu_cursor >= len(rows):
-            self._retro_tv_menu_cursor = 0
-
-    def _close_retro_tv_filter_menu(self) -> None:
-        self._retro_tv_menu_open = False
-        self._retro_tv_menu_cursor = 0
-
-    def _draw_retro_tv_filter_menu(self) -> None:
-        """Overlay listing MyRetroTVs channel-type filters."""
-        rows = self._retro_tv_menu_rows()
-        if not rows:
-            return
-        if self._retro_tv_menu_cursor >= len(rows):
-            self._retro_tv_menu_cursor = max(0, len(rows) - 1)
-
-        overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 180))
-        self.screen.blit(overlay, (0, 0))
-
-        box_w = min(420, self.sw - 40)
-        line_h = self.font_sm.get_linesize() + 6
-        header_h = 56
-        visible = min(len(rows), max(6, (self.sh - 100) // line_h))
-        box_h = min(self.sh - 40, header_h + visible * line_h + 48)
-        box_x = (self.sw - box_w) // 2
-        box_y = (self.sh - box_h) // 2
-        pygame.draw.rect(
-            self.screen, C.BG_CARD, (box_x, box_y, box_w, box_h), border_radius=10
-        )
-        pygame.draw.rect(
-            self.screen, C.CYAN, (box_x, box_y, box_w, box_h), 2, border_radius=10
-        )
-
-        title = self.font_md.render("CHANNEL TYPES", True, C.BRIGHT)
-        self.screen.blit(
-            title, title.get_rect(centerx=self.sw // 2, top=box_y + 14)
-        )
-
-        # Keep cursor row visible.
-        first = 0
-        if len(rows) > visible:
-            first = max(
-                0,
-                min(
-                    self._retro_tv_menu_cursor - visible // 2,
-                    len(rows) - visible,
-                ),
-            )
-
-        list_top = box_y + header_h
-        for i in range(first, min(first + visible, len(rows))):
-            kind, label, on = rows[i]
-            y = list_top + (i - first) * line_h
-            focused = i == self._retro_tv_menu_cursor
-            if focused:
-                pygame.draw.rect(
-                    self.screen,
-                    C.CYAN,
-                    (box_x + 8, y - 2, box_w - 16, line_h),
-                    border_radius=4,
-                )
-            if kind in ("all", "none"):
-                mark = "*" if focused else " "
-                text = f" {mark} {label}"
-                color = C.BLACK if focused else C.GREEN
-            else:
-                mark = "X" if on else " "
-                text = f"[{mark}] {label}"
-                color = C.BLACK if focused else (C.GREEN if on else C.WHITE)
-            surf = self.font_sm.render(text, True, color)
-            self.screen.blit(surf, (box_x + 20, y))
-
-        hint = self.font_sm.render(
-            "enter toggle  |  esc close",
-            True,
-            self._dim_color(),
-        )
-        self.screen.blit(
-            hint, hint.get_rect(centerx=self.sw // 2, bottom=box_y + box_h - 12)
+        draw_retro_tv_menu(
+            self.screen,
+            font_md=self.font_md,
+            font_sm=self.font_sm,
+            dim_color=self._dim_color(),
+            menu=self._retro_tv_menu,
+            filters=filters,
         )
 
     def _persist_retro_tv_settings(self) -> None:
@@ -2834,58 +3103,52 @@ class TVTimeCapsule:
         if not action:
             return False
 
-        if self._retro_tv_menu_open:
-            rows = self._retro_tv_menu_rows()
-            if action == "back":
-                self._close_retro_tv_filter_menu()
-                return True
-            if not rows:
-                return True
-            if action == "up":
-                self._retro_tv_menu_cursor = (
-                    self._retro_tv_menu_cursor - 1
-                ) % len(rows)
-                return True
-            if action == "down":
-                self._retro_tv_menu_cursor = (
-                    self._retro_tv_menu_cursor + 1
-                ) % len(rows)
-                return True
-            if action == "select":
-                kind, _label, _on = rows[self._retro_tv_menu_cursor % len(rows)]
-                if self._retro_tv_channel is None:
-                    return True
-                if kind == "all":
-                    self._retro_tv_channel.select_all_filters()
-                elif kind == "none":
-                    self._retro_tv_channel.select_none_filters()
-                else:
-                    self._retro_tv_channel.toggle_filter(kind)
-                self._persist_retro_tv_settings()
-                return True
+        if self._retro_tv_menu.is_open:
+            filters: list[dict] = []
+            if self._retro_tv_channel is not None:
+                filters = self._retro_tv_channel.get_filters()
+            for cmd in self._retro_tv_menu.handle(action, filters):
+                self._dispatch_retro_tv_menu_command(cmd)
             return True
 
         if action == "select":
-            self._open_retro_tv_filter_menu()
+            self._retro_tv_menu.open()
             return True
         if action == "up":
-            if self._retro_tv_channel is not None:
+            if self._retro_tv_cached_mode and self._retro_tv_player is not None:
+                self._retro_tv_player.adjust_volume(10)
+                if self._retro_tv_channel is not None:
+                    self._retro_tv_channel.set_volume(int(self._retro_tv_player.volume))
+                self.volume_overlay_timer = pygame.time.get_ticks()
+                self._persist_retro_tv_settings()
+            elif self._retro_tv_channel is not None:
                 self._retro_tv_channel.adjust_volume(10)
                 self.volume_overlay_timer = pygame.time.get_ticks()
                 self._persist_retro_tv_settings()
             return True
         if action == "down":
-            if self._retro_tv_channel is not None:
+            if self._retro_tv_cached_mode and self._retro_tv_player is not None:
+                self._retro_tv_player.adjust_volume(-10)
+                if self._retro_tv_channel is not None:
+                    self._retro_tv_channel.set_volume(int(self._retro_tv_player.volume))
+                self.volume_overlay_timer = pygame.time.get_ticks()
+                self._persist_retro_tv_settings()
+            elif self._retro_tv_channel is not None:
                 self._retro_tv_channel.adjust_volume(-10)
                 self.volume_overlay_timer = pygame.time.get_ticks()
                 self._persist_retro_tv_settings()
             return True
         if action == "right":
-            if self._retro_tv_channel is not None:
+            if self._retro_tv_cached_mode:
+                self._retro_tv_advance_clip(reason="skip")
+            elif self._retro_tv_channel is not None:
                 self._retro_tv_channel.channel_up()
             return True
         if action == "left":
-            if self._retro_tv_channel is not None:
+            # Cached mode is forward-biased (site playlist); both directions skip.
+            if self._retro_tv_cached_mode:
+                self._retro_tv_advance_clip(reason="skip")
+            elif self._retro_tv_channel is not None:
                 self._retro_tv_channel.channel_down()
             return True
         if action == "back":
@@ -2893,8 +3156,38 @@ class TVTimeCapsule:
             return True
         return False
 
+    def _dispatch_retro_tv_menu_command(self, cmd: MenuCommand) -> None:
+        """Apply a :class:`MenuCommand` from the Retro TV menu module."""
+        if cmd.kind == "close":
+            return
+        if cmd.kind == "change_channel":
+            if self._retro_tv_cached_mode:
+                self._retro_tv_advance_clip(reason="skip")
+            elif self._retro_tv_channel is not None:
+                self._retro_tv_channel.channel_up()
+            return
+        if self._retro_tv_channel is None:
+            return
+        if cmd.kind == "select_all":
+            self._retro_tv_channel.select_all_filters()
+        elif cmd.kind == "select_none":
+            self._retro_tv_channel.select_none_filters()
+        elif cmd.kind == "toggle_filter":
+            if not cmd.filter_id:
+                return
+            self._retro_tv_channel.toggle_filter(cmd.filter_id)
+        else:
+            return
+        self._persist_retro_tv_settings()
+        if self._retro_tv_cached_mode:
+            self._retro_tv_reprime_after_filter_change()
+
     def _enter_retro_tv(self, decade: str, *, year_digits: str) -> None:
-        """Switch to a MyRetroTVs decade stream (Chrome screencast)."""
+        """Switch to a MyRetroTVs decade stream (live screencast or cached)."""
+        if not self._feature_enabled("retro_tv"):
+            self.channel_error = f"Ch {year_digits} Not Found"
+            self.channel_error_time = pygame.time.get_ticks()
+            return
         if self.view == self.WEATHER:
             # Preserve browse destination; exit restores weather's previous view.
             prev = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
@@ -2917,7 +3210,7 @@ class TVTimeCapsule:
         )
 
         if not same_decade:
-            self._close_retro_tv_filter_menu()
+            self._retro_tv_menu.close()
 
         self._retro_tv_decade = decade
         self._retro_tv_year_flash = year_digits
@@ -2934,45 +3227,79 @@ class TVTimeCapsule:
             self._animate_channel_snow_burst()
             return
 
-        if self._retro_tv_channel is not None:
-            self._retro_tv_channel.stop()
-            self._retro_tv_channel = None
+        self._stop_retro_tv_session(keep_view=True)
 
+        retro_cfg = self.config.get("retro_tv") or {}
+        mode = str(retro_cfg.get("playback_mode") or "live").strip().lower()
+        self._retro_tv_cached_mode = mode == "cached"
+        # Pause forever-cache (idle + priority) so Decades can use yt-dlp/network.
+        self._yt_offline.set_suspended(True)
         url = url_for_decade(decade)
-        result: dict = {"ok": False}
+        result: dict = {"ok": False, "error": "", "cancelled": False}
 
         def _boot() -> None:
             try:
-                retro_cfg = self.config.get("retro_tv") or {}
                 filters = retro_cfg.get("filters")
                 if not isinstance(filters, dict):
                     filters = None
                 volume = retro_cfg.get("volume")
+                director = self._retro_tv_cached_mode
                 self._retro_tv_channel = RetroTvChannel(
                     url,
                     self.canvas_w,
                     self.canvas_h,
                     filters=filters,
                     volume=volume if isinstance(volume, int) else None,
+                    director=director,
                 )
-                result["ok"] = bool(self._retro_tv_channel.start())
-            except Exception:
+                if director:
+                    ok = bool(self._retro_tv_channel.start_director())
+                    if ok and not result.get("cancelled"):
+                        self._retro_tv_channel.request_pause_embed()
+                        ok = bool(self._boot_retro_tv_cached_session())
+                    result["ok"] = bool(ok) and not result.get("cancelled")
+                else:
+                    result["ok"] = bool(self._retro_tv_channel.start())
+            except Exception as exc:
                 LOG.exception("Retro TV start failed")
                 result["ok"] = False
+                result["error"] = str(exc)
 
         boot = threading.Thread(target=_boot, daemon=True, name="retro-tv-boot")
         boot.start()
 
         min_ms = FX_DURATION_MS
-        max_ms = 45_000
+        max_ms = 90_000 if self._retro_tv_cached_mode else 45_000
         t0 = pygame.time.get_ticks()
         while True:
-            pygame.event.pump()
+            cancelled = False
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    cancelled = True
+                elif event.type == pygame.KEYDOWN and (
+                    key_matches(self.keymap, event.key, "back")
+                    or key_matches(self.keymap, event.key, "quit")
+                ):
+                    cancelled = True
+            if cancelled:
+                result["cancelled"] = True
+                result["ok"] = False
+                channel = self._retro_tv_channel
+                if channel is not None:
+                    try:
+                        channel.stop()
+                    except Exception:
+                        pass
+                LOG.info("Retro TV boot cancelled by user")
+                break
+
             elapsed = pygame.time.get_ticks() - t0
 
             if self._channel_fx.snow_enabled:
                 self._channel_fx.extend()
 
+            if self._retro_tv_cached_mode and not self._retro_tv_status:
+                self._retro_tv_status = "TUNING... (Esc to cancel)"
             self._paint_retro_tv_tune_frame()
             self.present()
             self.clock.tick(60)
@@ -2984,12 +3311,349 @@ class TVTimeCapsule:
 
         boot.join(timeout=2.0)
 
+        if result.get("cancelled"):
+            self._exit_retro_tv()
+            return
         if not result.get("ok") or (
             self._retro_tv_channel is None or not self._retro_tv_channel.is_available()
         ):
             self.channel_error = "Retro TV Unavailable"
             self.channel_error_time = pygame.time.get_ticks()
             self._exit_retro_tv()
+            return
+        if self._retro_tv_cached_mode and self._retro_tv_player is None:
+            self.channel_error = "CACHE FAILED"
+            self.channel_error_time = pygame.time.get_ticks()
+            self._exit_retro_tv()
+
+    def _boot_retro_tv_cached_session(self) -> bool:
+        """Prime first clip via director id + yt-dlp; start ffmpeg playback."""
+        channel = self._retro_tv_channel
+        decade = self._retro_tv_decade or "xx"
+        if channel is None:
+            return False
+        self._retro_tv_status = "TUNING... (Esc to cancel)"
+        # Director start no longer blocks on the embed; wait here for the id.
+        yid = channel.current_youtube_id() or channel.wait_for_youtube_id(timeout=60.0)
+        if not channel.is_available():
+            return False
+        if not yid:
+            LOG.warning("Retro TV director: no youtube id after power-on wait")
+            # Nudge CH▼ once in case the site stuck before loading an embed.
+            channel.channel_down()
+            yid = channel.wait_for_youtube_id(timeout=30.0)
+        if not yid:
+            LOG.warning("Retro TV director: no youtube id")
+            return False
+        LOG.info("Retro TV caching first clip id=%s", yid)
+        channel.request_pause_embed()
+        self._retro_tv_temp_cache = RetroTvTempCache(self.config, decade=decade)
+        self._retro_tv_status = "CACHING..."
+        path = self._retro_tv_temp_cache.download(yid)
+        if path is None:
+            # Try one channel skip for a different clip (DRM / unavailable).
+            channel.channel_down()
+            yid2 = channel.wait_for_youtube_id(timeout=30.0, different_from=yid)
+            if not yid2:
+                return False
+            channel.request_pause_embed()
+            yid = yid2
+            LOG.info("Retro TV caching fallback clip id=%s", yid)
+            path = self._retro_tv_temp_cache.download(yid)
+            if path is None:
+                return False
+        if not self._start_retro_tv_cached_clip(yid, path):
+            return False
+        self._retro_tv_schedule_prefetch()
+        return True
+
+    def _start_retro_tv_cached_clip(self, youtube_id: str, path) -> bool:
+        """Start EmbeddedPlayer on a cached decade clip."""
+        self._stop_retro_tv_player()
+        player = self._create_player()
+        if player is None:
+            return False
+        retro_cfg = self.config.get("retro_tv") or {}
+        vol = retro_cfg.get("volume")
+        if isinstance(vol, int):
+            player.volume = max(0, min(100, vol))
+        elif self._retro_tv_channel is not None:
+            player.volume = int(self._retro_tv_channel.volume)
+        if not player.start(str(path)):
+            try:
+                player.stop()
+            except Exception:
+                pass
+            return False
+        self._retro_tv_player = player
+        self._retro_tv_current_id = youtube_id
+        self._retro_tv_status = ""
+        if self._retro_tv_temp_cache is not None:
+            keep = {youtube_id}
+            if self._retro_tv_next_id:
+                keep.add(self._retro_tv_next_id)
+            self._retro_tv_temp_cache.retain(keep)
+        return True
+
+    def _stop_retro_tv_player(self) -> None:
+        player = self._retro_tv_player
+        self._retro_tv_player = None
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                LOG.exception("Retro TV player stop failed")
+
+    def _retro_tv_schedule_prefetch(self) -> None:
+        """CH▼ on site, scrape next id, download into the second slot."""
+        if not self._retro_tv_cached_mode:
+            return
+        channel = self._retro_tv_channel
+        cache = self._retro_tv_temp_cache
+        if channel is None or cache is None:
+            return
+        current = self._retro_tv_current_id
+        self._retro_tv_prefetch_gen += 1
+        gen = self._retro_tv_prefetch_gen
+
+        def worker() -> None:
+            try:
+                skip_from = current
+                for attempt in range(4):
+                    if gen != self._retro_tv_prefetch_gen:
+                        return
+                    channel.channel_down()
+                    nxt = channel.wait_for_youtube_id(
+                        timeout=30.0, different_from=skip_from
+                    )
+                    if gen != self._retro_tv_prefetch_gen:
+                        return
+                    if not nxt:
+                        LOG.info("Retro TV prefetch: no next id")
+                        return
+                    channel.request_pause_embed()
+                    path = cache.download(
+                        nxt, keep={x for x in (self._retro_tv_current_id,) if x}
+                    )
+                    if gen != self._retro_tv_prefetch_gen:
+                        return
+                    if path is not None:
+                        self._retro_tv_next_id = nxt
+                        keep = {x for x in (self._retro_tv_current_id, nxt) if x}
+                        cache.retain(keep)
+                        LOG.info("Retro TV prefetched id=%s", nxt)
+                        return
+                    LOG.info(
+                        "Retro TV prefetch download failed id=%s (try %s)",
+                        nxt,
+                        attempt + 1,
+                    )
+                    skip_from = nxt
+            except Exception:
+                LOG.exception("Retro TV prefetch failed")
+
+        threading.Thread(
+            target=worker, daemon=True, name="retro-tv-prefetch"
+        ).start()
+
+    def _retro_tv_advance_clip(self, *, reason: str = "end") -> None:
+        """Play the prefetched clip (or fetch one) and refill the next slot.
+
+        Ready clips switch immediately on the UI thread. Cache misses run on a
+        worker so yt-dlp / site waits cannot freeze the app.
+        """
+        if not self._retro_tv_cached_mode:
+            return
+        if not self._retro_tv_advance_lock.acquire(blocking=False):
+            return
+        try:
+            cache = self._retro_tv_temp_cache
+            channel = self._retro_tv_channel
+            if cache is None or channel is None:
+                self._retro_tv_advance_lock.release()
+                return
+            nxt = self._retro_tv_next_id
+            path = cache.path_for(nxt) if nxt else None
+            if path is not None and nxt:
+                self._retro_tv_apply_advance(nxt, path, reason=reason)
+                self._retro_tv_advance_lock.release()
+                return
+
+            # Invalidate in-flight prefetch; fetch next clip off the UI thread.
+            self._retro_tv_prefetch_gen += 1
+            self._retro_tv_status = "CACHING..."
+            self._retro_tv_next_id = None
+            prev = self._retro_tv_current_id
+            gen = self._retro_tv_prefetch_gen
+
+            def worker() -> None:
+                try:
+                    self._retro_tv_advance_fetch_and_play(
+                        prev=prev, reason=reason, gen=gen
+                    )
+                finally:
+                    self._retro_tv_advance_lock.release()
+
+            threading.Thread(
+                target=worker, daemon=True, name="retro-tv-advance"
+            ).start()
+        except Exception:
+            self._retro_tv_advance_lock.release()
+            raise
+
+    def _retro_tv_apply_advance(
+        self,
+        nxt: str,
+        path,
+        *,
+        reason: str,
+    ) -> None:
+        """Switch player to *nxt* and start prefetching the following clip."""
+        cache = self._retro_tv_temp_cache
+        old = self._retro_tv_current_id
+        if not self._start_retro_tv_cached_clip(nxt, path):
+            self.channel_error = "PLAY FAILED"
+            self.channel_error_time = pygame.time.get_ticks()
+            self._retro_tv_status = ""
+            return
+        self._retro_tv_next_id = None
+        if old and cache is not None:
+            cache.retain({nxt})
+        LOG.info("Retro TV advanced (%s) -> %s", reason, nxt)
+        self._retro_tv_schedule_prefetch()
+
+    def _retro_tv_advance_fetch_and_play(
+        self,
+        *,
+        prev: str | None,
+        reason: str,
+        gen: int,
+    ) -> None:
+        """Background: CH▼ until a clip caches, then play it."""
+        cache = self._retro_tv_temp_cache
+        channel = self._retro_tv_channel
+        if cache is None or channel is None:
+            self._retro_tv_status = ""
+            return
+        skip_from = prev
+        try:
+            for attempt in range(4):
+                if gen != self._retro_tv_prefetch_gen:
+                    return
+                channel.channel_down()
+                nxt = channel.wait_for_youtube_id(
+                    timeout=30.0, different_from=skip_from
+                )
+                if gen != self._retro_tv_prefetch_gen:
+                    return
+                if not nxt:
+                    self.channel_error = "NO NEXT CLIP"
+                    self.channel_error_time = pygame.time.get_ticks()
+                    self._retro_tv_status = ""
+                    return
+                channel.request_pause_embed()
+                path = cache.download(
+                    nxt, keep={x for x in (self._retro_tv_current_id,) if x}
+                )
+                if gen != self._retro_tv_prefetch_gen:
+                    return
+                if path is not None:
+                    self._retro_tv_apply_advance(nxt, path, reason=reason)
+                    return
+                LOG.info(
+                    "Retro TV advance download failed id=%s (try %s)",
+                    nxt,
+                    attempt + 1,
+                )
+                skip_from = nxt
+            self.channel_error = "CACHE FAILED"
+            self.channel_error_time = pygame.time.get_ticks()
+            self._retro_tv_status = ""
+        except Exception:
+            LOG.exception("Retro TV advance fetch failed")
+            self._retro_tv_status = ""
+
+    def _retro_tv_reprime_after_filter_change(self) -> None:
+        """Clear the rolling pair and retune after channel-type filters change."""
+        if not self._retro_tv_cached_mode:
+            return
+        self._retro_tv_prefetch_gen += 1
+        self._retro_tv_next_id = None
+        self._stop_retro_tv_player()
+        if self._retro_tv_temp_cache is not None:
+            self._retro_tv_temp_cache.wipe()
+            decade = self._retro_tv_decade or "xx"
+            self._retro_tv_temp_cache = RetroTvTempCache(self.config, decade=decade)
+        self._retro_tv_status = "TUNING..."
+
+        def worker() -> None:
+            try:
+                channel = self._retro_tv_channel
+                if channel is None:
+                    return
+                # Give the site a moment to apply checkbox changes.
+                time.sleep(1.2)
+                channel.channel_down()
+                yid = channel.wait_for_youtube_id(timeout=35.0)
+                if not yid or self._retro_tv_temp_cache is None:
+                    self._retro_tv_status = "FILTER FAILED"
+                    return
+                channel.request_pause_embed()
+                self._retro_tv_status = "CACHING..."
+                path = self._retro_tv_temp_cache.download(yid, keep=set())
+                if path is None:
+                    self._retro_tv_status = "CACHE FAILED"
+                    return
+                self._start_retro_tv_cached_clip(yid, path)
+                self._retro_tv_schedule_prefetch()
+            except Exception:
+                LOG.exception("Retro TV filter reprime failed")
+                self._retro_tv_status = "FILTER FAILED"
+
+        threading.Thread(
+            target=worker, daemon=True, name="retro-tv-reprime"
+        ).start()
+
+    def _tick_retro_tv_cached(self) -> None:
+        """Advance when the current cached clip finishes."""
+        if not self._retro_tv_cached_mode:
+            return
+        player = self._retro_tv_player
+        if player is None:
+            return
+        try:
+            if player.is_finished():
+                self._retro_tv_advance_clip(reason="end")
+        except Exception:
+            LOG.exception("Retro TV finish check failed")
+
+    def _stop_retro_tv_session(self, *, keep_view: bool = False) -> None:
+        """Tear down director/player/temp cache."""
+        self._retro_tv_prefetch_gen += 1
+        self._stop_retro_tv_player()
+        if self._retro_tv_temp_cache is not None:
+            try:
+                self._retro_tv_temp_cache.wipe()
+            except Exception:
+                LOG.exception("Retro TV cache wipe failed")
+            self._retro_tv_temp_cache = None
+        if self._retro_tv_channel is not None:
+            try:
+                self._retro_tv_channel.stop()
+            except Exception:
+                LOG.exception("Retro TV channel stop failed")
+            self._retro_tv_channel = None
+        self._retro_tv_current_id = None
+        self._retro_tv_next_id = None
+        self._retro_tv_status = ""
+        self._retro_tv_cached_mode = False
+        if not keep_view:
+            self._retro_tv_decade = None
+            self._retro_tv_year_flash = ""
+        # Resume forever YouTube cache unless another Retro session is starting
+        # (``_enter_retro_tv`` re-suspends immediately after keep_view stop).
+        if not keep_view:
+            self._yt_offline.set_suspended(False)
 
     def _paint_retro_tv_tune_frame(self) -> None:
         """Draw retro TV destination under channel snow (safe-zone aware)."""
@@ -3000,6 +3664,14 @@ class TVTimeCapsule:
         else:
             with self._ui_layout(letterbox=True):
                 self._draw_channel_tune_frame()
+                if self._retro_tv_cached_mode and self._retro_tv_status:
+                    tip = self.font_sm.render(
+                        self._retro_tv_status, True, C.GREEN
+                    )
+                    self.screen.blit(
+                        tip,
+                        tip.get_rect(centerx=self.sw // 2, bottom=self.sh - 28),
+                    )
                 self.draw_channel_overlay()
                 self._draw_rescan_banner()
         if self._channel_fx.snow_enabled:
@@ -3007,13 +3679,10 @@ class TVTimeCapsule:
 
     def _exit_retro_tv(self) -> None:
         """Leave MyRetroTVs and return to the previous browse view."""
-        self._close_retro_tv_filter_menu()
-        if self._retro_tv_channel is not None:
-            self._retro_tv_channel.stop()
-            self._retro_tv_channel = None
-        self._retro_tv_decade = None
-        self._retro_tv_year_flash = ""
-        self.view = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
+        self._retro_tv_menu.close()
+        prev = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
+        self._stop_retro_tv_session(keep_view=False)
+        self.view = prev
 
     def _apply_channel_fx(self):
         """Brief static burst when tuning channels (if enabled)."""
@@ -3404,7 +4073,18 @@ class TVTimeCapsule:
 
     def _count_total_eps(self, show_data):
         """Count total episodes across all seasons."""
-        return sum(len(s.get('episodes', [])) for s in show_data.get('seasons', {}).values())
+        if not isinstance(show_data, dict):
+            return 0
+        is_yt = show_data.get("source") == "youtube"
+        total = 0
+        for season in (show_data.get("seasons") or {}).values():
+            if not isinstance(season, dict):
+                continue
+            eps = list(season.get("episodes") or [])
+            if is_yt:
+                eps = self._yt_offline.filter_episodes(eps)
+            total += len(eps)
+        return total
 
     def _wrap_text(self, text, font, max_width):
         """Word-wrap text to fit within max_width pixels. Returns list of lines."""
@@ -3422,6 +4102,22 @@ class TVTimeCapsule:
         if current_line:
             lines.append(current_line)
         return lines if lines else [text]
+
+    def _draw_centered_empty_message(self, message: str) -> None:
+        """Centered multi-line empty-state copy (ASCII-safe fonts)."""
+        if not message:
+            return
+        max_w = max(80, self.sw - 80)
+        lines = self._wrap_text(message, self.font_md, max_w)
+        line_h = self.font_md.get_linesize()
+        gap = 4
+        total_h = line_h * len(lines) + gap * max(0, len(lines) - 1)
+        y = (self.sh - total_h) // 2
+        color = self._dim_color()
+        for line in lines:
+            surf = self.font_md.render(line, True, color)
+            self.screen.blit(surf, surf.get_rect(centerx=self.sw // 2, top=y))
+            y += line_h + gap
 
     def _draw_popup_banner(
         self,
@@ -3475,7 +4171,32 @@ class TVTimeCapsule:
         self._draw_popup_banner(self._mode_toast_message)
 
     def seasons_for_show(self, show):
-        return sorted(self.shows.get(show, {}).get('seasons', {}).keys())
+        seasons = sorted(self.shows.get(show, {}).get("seasons", {}).keys())
+        show_data = self.shows.get(show) or {}
+        if (
+            isinstance(show_data, dict)
+            and show_data.get("source") == "youtube"
+            and self._yt_offline.enabled
+            and self._yt_offline.exclude_unavailable
+        ):
+            return [s for s in seasons if self._season_episodes(show, s)]
+        return seasons
+
+    def _season_episodes(self, show_name: str | None, season_num) -> list:
+        """Episodes for a season, optionally hiding YouTube UNAVAILABLE rows."""
+        if not show_name or season_num is None:
+            return []
+        show = self.shows.get(show_name) or {}
+        seasons = show.get("seasons") or {}
+        season_data = seasons.get(season_num)
+        if season_data is None:
+            season_data = seasons.get(str(season_num))
+        if not isinstance(season_data, dict):
+            return []
+        episodes = list(season_data.get("episodes") or [])
+        if show.get("source") == "youtube":
+            return self._yt_offline.filter_episodes(episodes)
+        return episodes
 
     def _show_uses_season_browser(self, show: dict | None) -> bool:
         """True when the show has more than one season to pick from."""
@@ -3484,6 +4205,18 @@ class TVTimeCapsule:
         seasons = show.get("seasons") or {}
         if not isinstance(seasons, dict):
             return False
+        if (
+            show.get("source") == "youtube"
+            and self._yt_offline.enabled
+            and self._yt_offline.exclude_unavailable
+        ):
+            visible = 0
+            for sdata in seasons.values():
+                if not isinstance(sdata, dict):
+                    continue
+                if self._yt_offline.filter_episodes(sdata.get("episodes")):
+                    visible += 1
+            return visible > 1
         return len(seasons) > 1
 
     def season_display_name(self, show, season_num):
@@ -3496,15 +4229,7 @@ class TVTimeCapsule:
 
     def current_items(self):
         if self.view == self.LIBRARY_SELECT:
-            if self._kids_mode_active:
-                return [
-                    {"name": "SHOWS", "count": len(self._kids_filtered_show_names())},
-                    {"name": "MOVIES", "count": len(self._kids_filtered_movie_names())},
-                ]
-            return [
-                {"name": "SHOWS", "count": len(self.show_names)},
-                {"name": "MOVIES", "count": len(self.movie_names)},
-            ]
+            return list(self._resolved_home_rows())
         if self.view == self.SHOW_LIST:
             names = self._browse_show_names()
             return [{'name': n, 'data': self.shows[n]} for n in names if n in self.shows]
@@ -3512,13 +4237,18 @@ class TVTimeCapsule:
             return [self.movies[k] for k in self._browse_movie_names() if k in self.movies]
         elif self.view == self.SEASON_SELECT:
             show = self.shows.get(self.cur_show, {})
-            seasons = sorted(show.get('seasons', {}).keys())
-            return [{'name': self.season_display_name(self.cur_show, s), 'number': s,
-                     'data': show['seasons'][s]} for s in seasons]
+            seasons = self.seasons_for_show(self.cur_show)
+            return [
+                {
+                    "name": self.season_display_name(self.cur_show, s),
+                    "number": s,
+                    "data": show["seasons"][s],
+                }
+                for s in seasons
+                if s in (show.get("seasons") or {})
+            ]
         else:
-            show = self.shows.get(self.cur_show, {})
-            season_data = show.get('seasons', {}).get(self.cur_season, {})
-            return list(season_data.get('episodes', []))
+            return self._season_episodes(self.cur_show, self.cur_season)
 
     def total_items(self):
         items = self.current_items()
@@ -3617,12 +4347,11 @@ class TVTimeCapsule:
         shows = self._browse_show_names()
         if not shows:
             msg = (
-                "Nothing for kids yet — tag titles in parent mode"
+                "Nothing for kids yet. Tag titles in parent mode"
                 if self._kids_mode_active and self._kids_allowlist is not None
                 else "No shows found"
             )
-            t = self.font_md.render(msg, True, self._dim_color())
-            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+            self._draw_centered_empty_message(msg)
             return
 
         total = len(shows)
@@ -3693,36 +4422,43 @@ class TVTimeCapsule:
                 text_right = thumb_x - 10
 
             info = self._show_info_line(name, data)
-            info_surf = self.font_sm.render(info, True, self._dim_color())
             line1_h = self.font_md.get_height()
-            total_text_h = line1_h + info_surf.get_height() + 2
+            line2_h = self.font_sm.get_height()
+            total_text_h = line1_h + line2_h + 2
             text_top = rect.y + (rect.height - total_text_h) // 2
+            text_avail = max(1, text_right - label_x)
             self._blit_marquee_text(
                 name.upper(),
                 self.font_md,
                 C.BRIGHT if selected else C.WHITE,
                 label_x,
                 text_top,
-                max(1, text_right - label_x),
+                text_avail,
                 key=("show", name),
                 active=selected,
             )
-            self.screen.blit(
-                info_surf,
-                (label_x, text_top + line1_h + 2),
+            self._blit_marquee_text(
+                info,
+                self.font_sm,
+                self._dim_color(),
+                label_x,
+                text_top + line1_h + 2,
+                text_avail,
+                key=("show-info", name),
+                active=selected,
             )
 
         if not kids:
             self._draw_footer()
 
     def draw_library_selector(self):
-        """Top-level Shows / Movies picker when both library folders exist."""
-        if self._kids_mode_active:
+        """Top-level home menu (shows / movies / pinned specials)."""
+        items = self.current_items()
+        if self._kids_mode_active and 1 <= len(items) <= 2:
             self._draw_kids_library_selector()
             return
 
         self.screen.fill(C.BG)
-        items = self.current_items()
         if not items:
             t = self.font_md.render("No library", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
@@ -3752,12 +4488,10 @@ class TVTimeCapsule:
             )
 
             label = item["name"]
-            count = item["count"]
+            subtitle = item.get("subtitle") or ""
             label_x = rect.x + 14 + ch_surf.get_width() + 16
             title = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
-            info = self.font_sm.render(
-                f"{count} title{'s' if count != 1 else ''}", True, self._dim_color()
-            )
+            info = self.font_sm.render(subtitle, True, self._dim_color())
             self.screen.blit(title, (label_x, rect.y + 12))
             self.screen.blit(info, (rect.right - info.get_width() - 16, rect.y + 14))
 
@@ -3889,11 +4623,14 @@ class TVTimeCapsule:
         inner.h = max(1, inner.h)
 
         ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else self._dim_color())
-        count_text = f"{count} title{'s' if count != 1 else ''}"
-        count_surf = self.font_sm.render(count_text, True, C.BLUE)
+        if kind in ("show", "movie"):
+            count_text = f"{count} title{'s' if count != 1 else ''}"
+        else:
+            count_text = ""
+        count_surf = self.font_sm.render(count_text, True, C.BLUE) if count_text else None
         sidebar_w = max(
             ch_surf.get_width() + 20,
-            count_surf.get_width() + 20,
+            (count_surf.get_width() + 20) if count_surf else 0,
         )
         sidebar_w = min(sidebar_w, max(80, inner.w // 3))
         sidebar_gap = 14
@@ -3909,15 +4646,24 @@ class TVTimeCapsule:
         ch_y = sidebar.y + (sidebar.h - ch_surf.get_height()) // 2
         self.screen.blit(ch_surf, (sidebar.x, ch_y))
         # Count text: bottom of sidebar
-        count_y = sidebar.bottom - count_surf.get_height() - 8
-        self.screen.blit(count_surf, (sidebar.x, count_y))
+        if count_surf is not None:
+            count_y = sidebar.bottom - count_surf.get_height() - 8
+            self.screen.blit(count_surf, (sidebar.x, count_y))
 
         if kind == "show":
             all_paths = self._show_thumbnail_paths()
             start_idx = self._library_shows_thumb_idx
-        else:
+        elif kind == "movie":
             all_paths = self._movie_thumbnail_paths()
             start_idx = self._library_movies_thumb_idx
+        else:
+            # Weather / decades / specials — label only.
+            label_surf = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
+            self.screen.blit(
+                label_surf,
+                label_surf.get_rect(center=thumb_area.center),
+            )
+            return
 
         slot_count, cell_w, cell_h = self._library_thumb_slot_layout(
             thumb_area.w,
@@ -3926,6 +4672,11 @@ class TVTimeCapsule:
         )
         thumb_paths = self._library_thumb_window(all_paths, start_idx, slot_count)
         if not thumb_paths:
+            label_surf = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
+            self.screen.blit(
+                label_surf,
+                label_surf.get_rect(center=thumb_area.center),
+            )
             return
 
         gap = LIBRARY_THUMB_GAP
@@ -3992,11 +4743,23 @@ class TVTimeCapsule:
         if kind == "show":
             all_paths = self._show_thumbnail_paths()
             start_idx = self._library_shows_thumb_idx
-        else:
+        elif kind == "movie":
             all_paths = self._movie_thumbnail_paths()
             start_idx = self._library_movies_thumb_idx
+        else:
+            label_surf = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
+            self.screen.blit(
+                label_surf,
+                label_surf.get_rect(center=thumb_area.center),
+            )
+            return
 
         if not all_paths:
+            label_surf = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
+            self.screen.blit(
+                label_surf,
+                label_surf.get_rect(center=thumb_area.center),
+            )
             return
 
         # Carousel: 3 slots — left (small), center (big), right (small)
@@ -4082,12 +4845,20 @@ class TVTimeCapsule:
             for i, item in enumerate(items):
                 y = header_h + pad + i * (panel_h + gap)
                 rect = pygame.Rect(pad, y, panel_w, panel_h)
-                kind = "show" if item["name"] == "SHOWS" else "movie"
+                kind = item.get("kind") or "shows"
+                panel_kind = (
+                    "show"
+                    if kind == "shows"
+                    else "movie"
+                    if kind == "movies"
+                    else "special"
+                )
+                count = item.get("count")
                 self._draw_kids_carousel_panel(
                     rect,
                     item["name"],
-                    item["count"],
-                    kind=kind,
+                    0 if count is None else int(count),
+                    kind=panel_kind,
                     channel_num=i + 1,
                     selected=(i == self.cursor),
                 )
@@ -4095,12 +4866,20 @@ class TVTimeCapsule:
             for i, item in enumerate(items):
                 y = header_h + pad + i * (panel_h + gap)
                 rect = pygame.Rect(pad, y, panel_w, panel_h)
-                kind = "show" if item["name"] == "SHOWS" else "movie"
+                kind = item.get("kind") or "shows"
+                panel_kind = (
+                    "show"
+                    if kind == "shows"
+                    else "movie"
+                    if kind == "movies"
+                    else "special"
+                )
+                count = item.get("count")
                 self._draw_kids_library_panel(
                     rect,
                     item["name"],
-                    item["count"],
-                    kind=kind,
+                    0 if count is None else int(count),
+                    kind=panel_kind,
                     channel_num=i + 1,
                     selected=(i == self.cursor),
                 )
@@ -4111,12 +4890,11 @@ class TVTimeCapsule:
         movies = self._browse_movie_names()
         if not movies:
             msg = (
-                "Nothing for kids yet — tag titles in parent mode"
+                "Nothing for kids yet. Tag titles in parent mode"
                 if self._kids_mode_active and self._kids_allowlist is not None
                 else "No movies found"
             )
-            t = self.font_md.render(msg, True, self._dim_color())
-            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+            self._draw_centered_empty_message(msg)
             return
 
         total = len(movies)
@@ -4225,12 +5003,11 @@ class TVTimeCapsule:
 
         if not names:
             msg = (
-                "Nothing for kids yet — tag titles in parent mode"
+                "Nothing for kids yet. Tag titles in parent mode"
                 if self._kids_allowlist is not None
                 else "Nothing to watch"
             )
-            t = self.font_md.render(msg, True, self._dim_color())
-            self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+            self._draw_centered_empty_message(msg)
             return
 
         total = len(names)
@@ -4363,7 +5140,7 @@ class TVTimeCapsule:
             s_label = self.season_display_name(self.cur_show, season_num)
 
             # Episode count / status (right side) — measure first for label truncation
-            season_eps = season_data.get('episodes', [])
+            season_eps = self._season_episodes(self.cur_show, season_num)
             n_eps = len(season_eps)
             watched_eps = get_watched_episodes(
                 self.state, self.cur_show, season_num, episodes=season_eps
@@ -4506,13 +5283,16 @@ class TVTimeCapsule:
                 self.screen.blit(thumb, (tx, ty))
                 content_right = tx - 8
 
-            # Status indicator (right of card)
+            # Watch-state badges stay on the right (short). Cache status goes in
+            # the subtitle so the episode title keeps full width.
             status_text = ""
             status_color = self._dim_color()
-            if is_in_progress and not selected:
-                status_text = "RESUME"
-                status_color = C.GREEN
-            elif is_next and not selected:
+            cache_mark = None
+            if is_youtube_episode(ep):
+                cache_mark = self._yt_offline.cache_marker_for_episode(ep)
+            caching = bool(cache_mark and cache_mark.startswith("CACHING"))
+            # Resume lives only in the subtitle ("Resume M:SS"), not a right badge.
+            if is_next and not selected and not is_in_progress:
                 status_text = "NEXT"
                 status_color = C.GREEN
             elif is_watched and not is_next and not is_in_progress:
@@ -4520,10 +5300,7 @@ class TVTimeCapsule:
                 status_color = self._dim_color()
             st = self.font_sm.render(status_text, True, status_color) if status_text else None
 
-            # Calculate available width for text and right-side indicators.
-            right_margin = 0
-            if st:
-                right_margin += st.get_width() + 6
+            right_margin = (st.get_width() + 6) if st else 0
             avail_w = content_right - label_x - right_margin - 8
 
             # ── Line 1: "E-01  Episode Name" ──
@@ -4533,7 +5310,7 @@ class TVTimeCapsule:
             el = self.font_md.render(ep_label, True, C.BRIGHT if selected else C.WHITE)
             gap_w = self.font_md.size("  ")[0]
 
-            # Vertically center the one or two lines
+            # Line 2: duration / resume + cache status (NOT CACHED / CACHING… / …)
             dur_text = self._get_duration(ep['path'])
             if not dur_text and ep.get("duration"):
                 try:
@@ -4555,6 +5332,24 @@ class TVTimeCapsule:
                 resume_label = f"Resume {mins}:{secs:02d}"
                 line2_text = f"{resume_label}  {dur_text}" if dur_text else resume_label
                 line2_color = C.GREEN
+
+            cache_sub = None
+            if caching:
+                cache_sub = cache_mark
+                line2_color = C.CYAN
+            elif cache_mark == "UNAVAILABLE":
+                cache_sub = "UNAVAILABLE"
+            elif cache_mark == "NOT CACHED":
+                cache_sub = "NOT CACHED"
+            elif cache_mark == "CACHED" and not is_watched:
+                cache_sub = "CACHED"
+                if not is_in_progress:
+                    line2_color = C.GREEN
+            if cache_sub:
+                line2_text = (
+                    f"{line2_text} - {cache_sub}" if line2_text else cache_sub
+                )
+
             has_line2 = bool(line2_text)
             line1_h = el.get_height()
             line2_h = self.font_sm.size("0:00")[1] if has_line2 else 0
@@ -4579,10 +5374,18 @@ class TVTimeCapsule:
 
             # ── Line 2: Duration / resume point ──
             if has_line2:
-                dur = self.font_sm.render(line2_text, True, line2_color)
                 dur_y = text_top + line1_h + 2
-                if dur_y + dur.get_height() <= rect.y + rect.height - 2:
-                    self.screen.blit(dur, (label_x, dur_y))
+                if dur_y + line2_h <= rect.y + rect.height - 2:
+                    self._blit_marquee_text(
+                        line2_text,
+                        self.font_sm,
+                        line2_color,
+                        label_x,
+                        dur_y,
+                        avail_w,
+                        key=(self.cur_show, self.cur_season, ep_num, "line2"),
+                        active=selected,
+                    )
 
             # Status indicator (right side)
             if st:
@@ -4736,6 +5539,8 @@ class TVTimeCapsule:
         vol = None
         if self.view == self.WEATHER and self._weather_channel is not None:
             vol = min(self._weather_channel.volume, 100)
+        elif self.view == self.RETRO_TV and self._retro_tv_cached_mode and self._retro_tv_player is not None:
+            vol = min(self._retro_tv_player.volume, 100)
         elif self.view == self.RETRO_TV and self._retro_tv_channel is not None:
             vol = min(self._retro_tv_channel.volume, 100)
         elif self.player:
@@ -4839,9 +5644,19 @@ class TVTimeCapsule:
                 [
                     *format_hidden_help_rows(),
                     ("notes", "Works on library / show / movie browse (parent mode)"),
-                    ("weather tip", "Set weather zip in config for dial 004"),
-                    ("retro tip", "Dial any year 1950-2009 for MyRetroTVs"),
-                    ("retro menu", "Enter/Space toggles channel types"),
+                    *(
+                        [("weather tip", "Set weather zip in config for dial 004")]
+                        if self._feature_enabled("weather")
+                        else []
+                    ),
+                    *(
+                        [
+                            ("retro tip", "Dial any year 1950-2009 for MyRetroTVs"),
+                            ("retro menu", "Enter/Space toggles channel types"),
+                        ]
+                        if self._feature_enabled("retro_tv")
+                        else []
+                    ),
                 ],
             ),
             (
@@ -4874,6 +5689,7 @@ class TVTimeCapsule:
                     ("alphabet jump", bind("letter_menu")),
                     ("tag for kids", bind("kids_tag_toggle")),
                     ("reset watch / rescan", f"tap {bind('reset')} / hold"),
+                    ("cache YouTube now", bind("youtube_cache_now")),
                     (
                         "channel jump",
                         "type the show channel number"
@@ -4924,6 +5740,7 @@ class TVTimeCapsule:
                         else "keyboard number keys",
                     ),
                     ("reset season", bind("reset")),
+                    ("cache season now", bind("youtube_cache_now")),
                 ],
             ),
             (
@@ -4946,6 +5763,7 @@ class TVTimeCapsule:
                         else "keyboard number keys",
                     ),
                     ("reset episode", bind("reset")),
+                    ("cache episode now", bind("youtube_cache_now")),
                 ],
             ),
             (
@@ -5148,7 +5966,7 @@ class TVTimeCapsule:
                     return
                 action = None
                 if event.type == pygame.KEYDOWN:
-                    self._note_keyboard_input()
+                    self._note_keyboard_input(repeat=bool(getattr(event, "repeat", False)))
                     key_action = self._action_for_key(event.key)
                     if key_action in ("back", "help"):
                         return
@@ -6252,7 +7070,7 @@ class TVTimeCapsule:
             else:
                 self.cur_season = seasons[0]
                 self.view = self.EPISODE_SELECT
-                eps = show["seasons"][self.cur_season]["episodes"]
+                eps = self._season_episodes(self.cur_show, self.cur_season)
                 watched_eps = get_watched_episodes(
                     self.state, self.cur_show, self.cur_season, episodes=eps
                 )
@@ -6267,7 +7085,7 @@ class TVTimeCapsule:
                 self.cur_season = seasons[self.cursor]
                 self.view = self.EPISODE_SELECT
                 self.cursor = 0
-                eps = self.shows[self.cur_show]['seasons'][self.cur_season]['episodes']
+                eps = self._season_episodes(self.cur_show, self.cur_season)
                 watched_eps = get_watched_episodes(
                     self.state, self.cur_show, self.cur_season, episodes=eps
                 )
@@ -6280,16 +7098,46 @@ class TVTimeCapsule:
             self.play_from_cursor()
 
         elif self.view == self.LIBRARY_SELECT:
-            if self.cursor == 0:
-                self.view = self.SHOW_LIST
-            else:
-                self.view = self.MOVIE_LIST
-            self.cursor = 0
+            rows = self._resolved_home_rows()
+            if not rows or self.cursor >= len(rows):
+                return
+            self._activate_home_row(rows[self.cursor])
 
         elif self.view == self.MOVIE_LIST:
             self.play_movie_from_cursor()
 
-    def go_back(self):
+    def _activate_home_row(self, row: dict) -> None:
+        """Open a home-menu row (shows / movies / specials)."""
+        kind = row.get("kind")
+        if kind == "shows":
+            self.view = self.SHOW_LIST
+            self.cursor = 0
+            return
+        if kind == "movies":
+            self.view = self.MOVIE_LIST
+            self.cursor = 0
+            return
+        if kind == "weather":
+            self._enter_weather_channel()
+            return
+        if kind == "directory":
+            self._enter_hidden_channels_guide()
+            return
+        if kind == "pattern":
+            dial = str(row.get("dial") or "")
+            if dial:
+                self._commit_show_list_test_pattern(dial)
+            return
+        if kind == "retro":
+            decade = row.get("decade")
+            year_digits = str(row.get("year_digits") or "")
+            if isinstance(decade, str) and decade:
+                self._enter_retro_tv(decade, year_digits=year_digits or "1990")
+
+    def go_back(self) -> bool:
+        """Move one browse level up. Returns True if the view changed."""
+        prev = self.view
+        prev_cursor = self.cursor
         if self.view == self.EPISODE_SELECT:
             show = self.shows.get(self.cur_show, {})
             if self._show_uses_season_browser(show):
@@ -6301,26 +7149,35 @@ class TVTimeCapsule:
                     self.cursor = 0
             else:
                 self.view = self.SHOW_LIST
-                if self.cur_show in self.show_names:
-                    self.cursor = self.show_names.index(self.cur_show)
+                names = self._browse_show_names()
+                if self.cur_show in names:
+                    self.cursor = names.index(self.cur_show)
                 else:
                     self.cursor = 0
 
         elif self.view == self.SEASON_SELECT:
             self.view = self.SHOW_LIST
-            if self.cur_show in self.show_names:
-                self.cursor = self.show_names.index(self.cur_show)
+            names = self._browse_show_names()
+            if self.cur_show in names:
+                self.cursor = names.index(self.cur_show)
             else:
                 self.cursor = 0
 
-        elif self.view == self.SHOW_LIST and self._is_split_library():
+        elif self.view == self.SHOW_LIST and self._uses_home_menu():
             self.view = self.LIBRARY_SELECT
-            self.cursor = 0
+            rows = self._resolved_home_rows()
+            self.cursor = next(
+                (i for i, r in enumerate(rows) if r.get("kind") == "shows"), 0
+            )
 
-        elif self.view == self.MOVIE_LIST and self._is_split_library():
+        elif self.view == self.MOVIE_LIST and self._uses_home_menu():
             self.view = self.LIBRARY_SELECT
-            self.cursor = 1
-        # On top-level lists without split layout, left arrow does nothing — use Escape to quit
+            rows = self._resolved_home_rows()
+            self.cursor = next(
+                (i for i, r in enumerate(rows) if r.get("kind") == "movies"), 0
+            )
+        # Top-level: no change (caller may open Quit?).
+        return self.view != prev or self.cursor != prev_cursor
 
     def jump_to_channel(self, channel_num):
         if self.view == self.SHOW_LIST:
@@ -6411,6 +7268,181 @@ class TVTimeCapsule:
             return False
 
         return False
+
+    def _teardown_playback_keep_view(self) -> None:
+        """Stop the player and bookmark progress without changing browse view."""
+        ep = self.playing_episode
+        if self.player:
+            if ep is not None:
+                self.player.update_time()
+                set_episode_position(
+                    self.state,
+                    self.playing_show,
+                    self.playing_season,
+                    ep["number"],
+                    self.player.time_pos,
+                    duration=self.player.duration,
+                    youtube_id=youtube_id_from_episode(ep),
+                    episode=ep,
+                )
+            self.player.stop()
+            self.player = None
+        self._cancel_youtube_preload()
+        self._playing_source_path = None
+        self._playback_cache_suppressed = False
+        self._playing_youtube_file = False
+        self._sync_playback_navigation_state()
+        self._playing_is_movie = False
+        self.cur_movie = None
+        self._exit_playback_display()
+        pygame.event.clear()
+        self._arm_quit_grace()
+
+    def _leave_playback_if_needed(self) -> None:
+        """If playing, stop and land on a browse screen before opening a special."""
+        if self.view != self.PLAYING:
+            return
+        return_movie = self._playing_is_movie
+        movie_key = self.cur_movie if return_movie else None
+        show_name = self.playing_show
+        season = self.playing_season
+        self._teardown_playback_keep_view()
+        if return_movie:
+            self.view = self.MOVIE_LIST
+            names = self._browse_movie_names()
+            if movie_key and movie_key in names:
+                self.cursor = names.index(movie_key)
+            else:
+                self.cursor = 0
+            return
+        if show_name and show_name in self.shows and season is not None:
+            self.cur_show = show_name
+            self.cur_season = season
+            self.view = self.EPISODE_SELECT
+            self.cursor = 0
+            return
+        self.view = self._view_for_library_layout()
+        self.cursor = 0
+
+    def _open_show_nested_list(self, show_name: str) -> None:
+        """Land on season list or episode list for *show_name*."""
+        self.cur_show = show_name
+        show = self.shows.get(show_name, {})
+        seasons = self.seasons_for_show(show_name)
+        if not seasons:
+            self.view = self.SHOW_LIST
+            names = self._browse_show_names()
+            self.cursor = names.index(show_name) if show_name in names else 0
+            return
+        if self._show_uses_season_browser(show):
+            self.view = self.SEASON_SELECT
+            self.cursor = 0
+            return
+        self.cur_season = seasons[0]
+        self.view = self.EPISODE_SELECT
+        eps = self._season_episodes(self.cur_show, self.cur_season)
+        watched_eps = get_watched_episodes(
+            self.state, self.cur_show, self.cur_season, episodes=eps
+        )
+        pos_ep, _ = get_episode_position(
+            self.state, self.cur_show, self.cur_season, episodes=eps
+        )
+        self.cursor = self._next_up_index(eps, watched_eps, pos_ep=pos_ep)
+
+    def _playback_channel_switch(self, channel_num: int) -> None:
+        """During playback: countdown then tune to show/movie channel."""
+        if self._playing_is_movie:
+            movie_key = show_at_channel(self._channel_movie, channel_num)
+            names = self._browse_movie_names()
+            if not movie_key or movie_key not in names:
+                self.channel_error = f"Ch {channel_num} Not Found"
+                self.channel_error_time = pygame.time.get_ticks()
+                return
+            title = (self.movies.get(movie_key) or {}).get("title") or movie_key
+            if not self._run_channel_switch_countdown(
+                channel_num, title, kind="movie"
+            ):
+                return
+            self._teardown_playback_keep_view()
+            self.view = self.MOVIE_LIST
+            self.cursor = names.index(movie_key)
+            self.channel_flash = str(channel_num)
+            self.channel_flash_time = pygame.time.get_ticks()
+            return
+
+        show_name = show_at_channel(self._channel_show, channel_num)
+        names = self._browse_show_names()
+        if not show_name or show_name not in names:
+            self.channel_error = f"Ch {channel_num} Not Found"
+            self.channel_error_time = pygame.time.get_ticks()
+            return
+        if not self._run_channel_switch_countdown(
+            channel_num, show_name, kind="show"
+        ):
+            return
+        self._teardown_playback_keep_view()
+        self._open_show_nested_list(show_name)
+        self.channel_flash = str(channel_num)
+        self.channel_flash_time = pygame.time.get_ticks()
+
+    def _run_channel_switch_countdown(
+        self, channel_num: int, title: str, *, kind: str
+    ) -> bool:
+        """Cancellable switch splash. Returns True to proceed."""
+        total = self._autoplay_countdown
+        if total <= 0:
+            return True
+        start = pygame.time.get_ticks()
+        duration_ms = total * 1000
+        while self.running:
+            for event in pygame.event.get():
+                if self._handle_window_event(event):
+                    continue
+                if event.type == pygame.QUIT:
+                    self._handle_quit_event("channel-switch-countdown")
+                    if not self.running:
+                        return False
+                if event.type == pygame.KEYDOWN:
+                    digit = digit_for_key(self.keymap, event.key)
+                    if digit is not None:
+                        # Ignore extra digits during countdown.
+                        continue
+                    if self._action_for_key(event.key) == "back":
+                        return False
+                action = self._gamepad.event_to_action(event)
+                if action == "back":
+                    return False
+
+            elapsed = pygame.time.get_ticks() - start
+            if elapsed >= duration_ms:
+                return True
+            remaining = max(1, (duration_ms - elapsed + 999) // 1000)
+            self._draw_channel_switch_splash(
+                channel_num, title, remaining, kind=kind
+            )
+            self.present()
+            self.clock.tick(30)
+        return False
+
+    def _draw_channel_switch_splash(
+        self, channel_num: int, title: str, seconds_left: int, *, kind: str
+    ) -> None:
+        self.screen.fill(C.BLACK)
+        header = f"CH {channel_num}"
+        kind_label = "MOVIE" if kind == "movie" else "SHOW"
+        lines = [
+            header,
+            title.upper() if title else kind_label,
+            f"Tuning in {seconds_left}s",
+            f"{format_action_keys(self.keymap, 'back')} to cancel",
+        ]
+        y = self.sh // 2 - 60
+        for i, text in enumerate(lines):
+            font = self.font_lg if i == 0 else self.font_md if i == 1 else self.font_sm
+            color = C.GREEN if i == 0 else C.BRIGHT if i == 1 else C.WHITE
+            surf = font.render(text, True, color)
+            self.screen.blit(surf, surf.get_rect(centerx=self.sw // 2, y=y))
+            y += surf.get_height() + 10
 
     def _create_player(self):
         """Build an EmbeddedPlayer using the best available backend."""
@@ -6564,8 +7596,13 @@ class TVTimeCapsule:
         return None
 
     def _can_start_episode(self, episode: dict | None) -> bool:
-        """True when local ffmpeg/omx or YouTube Chrome playback can run."""
+        """True when local ffmpeg/omx or YouTube Chrome/file playback can run."""
         if is_youtube_episode(episode):
+            backend = self._yt_offline.backend_for_episode(episode)
+            if backend == "blocked":
+                return False
+            if backend == "file":
+                return bool(self.player_cmd or self.player or detect_ffmpeg())
             return True
         return bool(self.player_cmd or self.player)
 
@@ -6653,6 +7690,204 @@ class TVTimeCapsule:
         self.present()
         self.clock.tick(60)
 
+    def _youtube_start_blocked_message(self, episode: dict | None) -> str | None:
+        """Snackbar copy when cached_only blocks an uncached episode."""
+        if not is_youtube_episode(episode):
+            return None
+        if self._yt_offline.backend_for_episode(episode) == "blocked":
+            return "NOT CACHED"
+        return None
+
+    def _priority_cache_episode_on_play_block(
+        self,
+        show_name: str | None,
+        season_num: int | None,
+        episode: dict | None,
+    ) -> bool:
+        """When live play is disabled, bump this episode to the priority cache front.
+
+        Marks the episode as pending autoplay once the download finishes (Enter =
+        watch now). A later Enter on a different uncached episode replaces the
+        pending target.
+
+        Returns True when a cache job was queued/boosted.
+        """
+        if not show_name or season_num is None or not isinstance(episode, dict):
+            return False
+        if not self._yt_offline.enabled:
+            return False
+        if self._yt_offline.playback_mode != "cached_only":
+            return False
+        if self._yt_offline.backend_for_episode(episode) != "blocked":
+            return False
+        items = self._yt_offline.missing_items_for_episode(
+            show_name, int(season_num), episode
+        )
+        yid = youtube_id_from_episode(episode)
+        if not items:
+            # Already cached, or unavailable — nothing to queue.
+            return bool(yid and self._yt_offline.is_priority_or_active(yid))
+        added = self._yt_offline.request_priority(items, bump=True, front=True)
+        ok = added > 0 or self._yt_offline.is_priority_or_active(items[0][4])
+        if ok and yid:
+            self._pending_cache_play = {
+                "show": str(show_name),
+                "season": int(season_num),
+                "youtube_id": yid,
+                "episode_number": int(episode.get("number") or 0),
+            }
+            LOG.info(
+                "YouTube pending autoplay after cache id=%s show=%s",
+                yid,
+                show_name,
+            )
+        return ok
+
+    def _clear_pending_cache_play(self) -> None:
+        self._pending_cache_play = None
+
+    def _tick_pending_cache_play(self) -> None:
+        """Auto-start a pending episode once its offline cache file is ready."""
+        pending = self._pending_cache_play
+        if not pending or not self._yt_offline.enabled:
+            return
+        # Don't interrupt active playback, screensaver, or non-browse overlays.
+        # Watch-now stays queued through the screensaver; play after dismiss.
+        if self._screensaver_active:
+            return
+        if self.view == self.PLAYING:
+            return
+        if self.view in (
+            self.WEATHER,
+            self.RETRO_TV,
+            self.KEY_CONFIG,
+            self.KEY_CAPTURE,
+            self.GAMEPAD_CONFIG,
+            self.GAMEPAD_CAPTURE,
+            self.SAFE_ZONE_EDIT,
+            self.CONFIRM_EXIT,
+        ):
+            return
+        yid = str(pending.get("youtube_id") or "")
+        if not yid:
+            self._clear_pending_cache_play()
+            return
+        if self._yt_offline.is_unavailable(yid):
+            self._clear_pending_cache_play()
+            self.channel_error = "UNAVAILABLE"
+            self.channel_error_time = pygame.time.get_ticks()
+            return
+        if not self._yt_offline.is_cached(yid):
+            return
+        # Snapshot then clear so a failed start doesn't loop forever.
+        self._clear_pending_cache_play()
+        self._screensaver_active = False
+        if self._start_pending_cached_episode(pending):
+            self.channel_error = "Playing"
+            self.channel_error_time = pygame.time.get_ticks()
+        else:
+            self.channel_error = "PLAY FAILED"
+            self.channel_error_time = pygame.time.get_ticks()
+
+    def _start_pending_cached_episode(self, pending: dict[str, Any]) -> bool:
+        """Start playback for a finished pending-cache target."""
+        show_name = str(pending.get("show") or "")
+        try:
+            season = int(pending.get("season"))
+        except (TypeError, ValueError):
+            return False
+        yid = str(pending.get("youtube_id") or "")
+        show = self.shows.get(show_name) or {}
+        seasons = show.get("seasons") or {}
+        season_data = seasons.get(season)
+        if season_data is None:
+            season_data = seasons.get(str(season))
+        if not isinstance(season_data, dict):
+            return False
+        episodes = season_data.get("episodes") or []
+        idx = next(
+            (
+                i
+                for i, ep in enumerate(episodes)
+                if isinstance(ep, dict) and youtube_id_from_episode(ep) == yid
+            ),
+            None,
+        )
+        if idx is None:
+            return False
+        if not self._can_start_episode(episodes[idx]):
+            return False
+
+        self.cur_show = show_name
+        self.cur_season = season
+        self.cursor = idx
+        self.view = self.EPISODE_SELECT
+        self._playing_is_movie = False
+        self.cur_movie = None
+        self.playing_show = show_name
+        self.playing_season = season
+        self.playing_episodes = episodes
+        self.playing_index = idx
+
+        pos_ep, pos_secs = get_episode_position(
+            self.state, show_name, season, episodes=episodes
+        )
+        resume_secs = None
+        if pos_ep is not None and episodes[idx].get("number") == pos_ep:
+            resume_secs = pos_secs
+        return bool(
+            self._start_current_episode(resume_secs=resume_secs, show_splash=True)
+        )
+
+    def _configure_youtube_file_crop(self, player, episode: dict, filepath: str) -> None:
+        """Resolve crop cache or probe the offline file; attach to MediaPlayer."""
+        from .youtube_crop import normalize_crop_rect, probe_file_pillarbox_crop
+        from .youtube_crop_cache import load_pillarbox_crop_entry, save_pillarbox_crop
+
+        yid = youtube_id_from_episode(episode)
+        w, h = self.canvas_w, self.canvas_h
+        entry = load_pillarbox_crop_entry(yid, width=w, height=h)
+        if entry is not None:
+            norm = normalize_crop_rect(entry.crop, w, h) if entry.crop else None
+            # Full-bleed stored as crop=None still carries apply flag.
+            if entry.crop is None:
+                norm = None
+            player.configure_youtube_crop(
+                youtube_id=yid, crop_norm=norm, apply=entry.apply and norm is not None
+            )
+            LOG.info(
+                "YouTube file crop cache hit apply=%s id=%s",
+                entry.apply and norm is not None,
+                yid,
+            )
+            return
+
+        LOG.info("YouTube file crop probe starting id=%s", yid)
+        ffmpeg = getattr(player, "ffmpeg_path", None) or detect_ffmpeg()
+        norm = probe_file_pillarbox_crop(filepath, ffmpeg_path=ffmpeg)
+        crop_px = None
+        if norm is not None:
+            from .youtube_crop import denormalize_crop_rect
+
+            crop_px = denormalize_crop_rect(norm, w, h)
+        save_pillarbox_crop(
+            yid,
+            crop_px,
+            width=w,
+            height=h,
+            apply=crop_px is not None,
+        )
+        player.configure_youtube_crop(
+            youtube_id=yid,
+            crop_norm=norm,
+            apply=norm is not None,
+        )
+        LOG.info(
+            "YouTube file crop probe done crop=%s id=%s",
+            norm is not None,
+            yid,
+        )
+
     def _start_current_episode(self, *, resume_secs=None, show_splash=True):
         """Start ``playing_episodes[playing_index]``. Returns True on success."""
         self._remember_playback_browse_state()
@@ -6662,6 +7897,26 @@ class TVTimeCapsule:
         source_path = episode["path"]
         self._playing_source_path = source_path
         youtube = is_youtube_episode(episode)
+        yt_backend = (
+            self._yt_offline.backend_for_episode(episode) if youtube else None
+        )
+        youtube_file = youtube and yt_backend == "file"
+        youtube_live = youtube and yt_backend == "live"
+        self._playing_youtube_file = bool(youtube_file)
+
+        if youtube and yt_backend == "blocked":
+            queued = self._priority_cache_episode_on_play_block(
+                self.playing_show,
+                self.playing_season,
+                episode,
+            )
+            self.channel_error = "CACHING..." if queued else "NOT CACHED"
+            self.channel_error_time = pygame.time.get_ticks()
+            self.view = self._playback_return_view()
+            if self._playing_is_movie:
+                self._playing_is_movie = False
+                self.cur_movie = None
+            return False
 
         splash_args = (
             self._splash_show_label(self.playing_show),
@@ -6671,8 +7926,18 @@ class TVTimeCapsule:
             resume_secs,
         )
 
-        if youtube:
+        if youtube_live:
             wait_result = None
+        elif youtube_file:
+            wait_result = None
+            cached = self._yt_offline.cached_path(youtube_id_from_episode(episode))
+            if cached is None:
+                self.channel_error = "NOT CACHED"
+                self.channel_error_time = pygame.time.get_ticks()
+                self.view = self._playback_return_view()
+                return False
+            source_path = str(cached)
+            self._playing_source_path = source_path
         elif self._playback_cache.should_cache_before_play(source_path):
             wait_result = self._wait_for_playback_cache(source_path, splash_args)
             if wait_result == "cancelled":
@@ -6685,6 +7950,7 @@ class TVTimeCapsule:
             wait_result = None
 
         self.view = self.PLAYING
+        self._screensaver_active = False
 
         self._playback_cache_suppressed = False
         self._playback_cache_switched = False
@@ -6696,7 +7962,9 @@ class TVTimeCapsule:
             )
         )
 
-        if youtube or wait_result == "stream":
+        if youtube_live or wait_result == "stream":
+            play_path = episode["path"] if youtube_live else source_path
+        elif youtube_file:
             play_path = source_path
         else:
             play_path = self._playback_cache.resolve_playback_path(source_path)
@@ -6721,7 +7989,7 @@ class TVTimeCapsule:
 
         self._enter_playback_display()
         prepared: YouTubePlayer | None = None
-        if youtube:
+        if youtube_live:
             prepared = self._claim_youtube_preload(play_path)
             if prepared is not None:
                 self.player = prepared
@@ -6729,6 +7997,8 @@ class TVTimeCapsule:
                 self.player = self._create_youtube_player()
         else:
             self.player = self._create_player()
+            if youtube_file and self.player is not None:
+                self._configure_youtube_file_crop(self.player, episode, play_path)
         if self.player is None:
             self._exit_playback_display()
             self.channel_error = "NO PLAYER"
@@ -6739,7 +8009,7 @@ class TVTimeCapsule:
                 self.cur_movie = None
             return False
 
-        if youtube:
+        if youtube_live:
             if self._channel_fx.snow_enabled:
                 self._channel_fx.trigger()
             self._draw_youtube_loading_frame()
@@ -6765,7 +8035,7 @@ class TVTimeCapsule:
             self.player = None
             self._exit_playback_display()
             self.channel_error = (
-                "YOUTUBE UNAVAILABLE" if youtube else "PLAY FAILED"
+                "YOUTUBE UNAVAILABLE" if youtube_live else "PLAY FAILED"
             )
             self.channel_error_time = pygame.time.get_ticks()
             self.view = self._playback_return_view()
@@ -6780,6 +8050,8 @@ class TVTimeCapsule:
         self.volume_overlay_timer = 0
         self._playback_stalled = False
         self._stall_auto_retry_done = False
+        # Any successful play replaces a prior "cache then watch" intent.
+        self._clear_pending_cache_play()
         return True
 
     def _maybe_switch_to_playback_cache(self) -> None:
@@ -6823,13 +8095,27 @@ class TVTimeCapsule:
         self._playback_cache_switched = True
 
     def _resolve_autoplay_target(self):
-        """Return (episodes, index, season) for autoplay, or None."""
+        """Return (episodes, index, season) for autoplay, or None.
+
+        When ``youtube.playback_mode`` is ``cached_only``, skips uncached
+        YouTube episodes so autoplay does not hang on a blocked title.
+        """
         if self._autoplay_mode == "off":
+            return None
+
+        def _usable(eps, start_idx):
+            for idx in range(start_idx, len(eps)):
+                if self._can_start_episode(eps[idx]):
+                    return eps, idx
             return None
 
         next_idx = self.playing_index + 1
         if next_idx < len(self.playing_episodes):
-            return self.playing_episodes, next_idx, self.playing_season
+            hit = _usable(self.playing_episodes, next_idx)
+            if hit is not None:
+                return hit[0], hit[1], self.playing_season
+            if self._autoplay_mode != "next_episode":
+                return None
 
         if self._autoplay_mode != "next_episode":
             return None
@@ -6842,15 +8128,16 @@ class TVTimeCapsule:
             si = seasons.index(self.playing_season)
         except ValueError:
             return None
-        if si + 1 >= len(seasons):
-            return None
-        next_season = seasons[si + 1]
-        eps = self.shows[self.playing_show]["seasons"].get(next_season, {}).get(
-            "episodes", []
-        )
-        if not eps:
-            return None
-        return eps, 0, next_season
+        for season in seasons[si + 1 :]:
+            eps = self.shows[self.playing_show]["seasons"].get(season, {}).get(
+                "episodes", []
+            )
+            if not eps:
+                continue
+            hit = _usable(eps, 0)
+            if hit is not None:
+                return hit[0], hit[1], season
+        return None
 
     def _draw_up_next_splash(self, episode, season, channel, seconds_left):
         self.screen.fill(C.BLACK)
@@ -6871,7 +8158,11 @@ class TVTimeCapsule:
             self.player = None
 
         if is_youtube_episode(episode):
-            self._begin_youtube_preload(episode)
+            if self._yt_offline.backend_for_episode(episode) == "file":
+                # File backend: no Chrome preload.
+                pass
+            else:
+                self._begin_youtube_preload(episode)
         elif self._playback_cache.prefetch_next:
             self._playback_cache.schedule_cache(episode["path"])
 
@@ -7036,19 +8327,22 @@ class TVTimeCapsule:
                 self._exit_retro_tv()
                 return
             if self._kids_mode_active:
-                if self.view == self.SHOW_LIST and self._is_split_library():
-                    self.view = self.LIBRARY_SELECT
-                    self.cursor = 0
-                elif self.view == self.MOVIE_LIST and self._is_split_library():
-                    self.view = self.LIBRARY_SELECT
-                    self.cursor = 1
+                if self.view in (
+                    self.EPISODE_SELECT,
+                    self.SEASON_SELECT,
+                    self.SHOW_LIST,
+                    self.MOVIE_LIST,
+                ):
+                    self.go_back()
                 return
-            if self.view == self.SHOW_LIST:
+            # Hierarchical back; Quit? only when already at the top level.
+            if self.view == self.LIBRARY_SELECT:
                 self._enter_confirm_exit()
-            elif self.view in (self.MOVIE_LIST, self.LIBRARY_SELECT):
+                return
+            if self.go_back():
+                return
+            if self.view in (self.SHOW_LIST, self.MOVIE_LIST, self.LIBRARY_SELECT):
                 self._enter_confirm_exit()
-            else:
-                self.go_back()
 
     def play_movie_from_cursor(self):
         if not self.player_cmd and not self.player:
@@ -7076,15 +8370,20 @@ class TVTimeCapsule:
             self.cur_movie = None
 
     def play_from_cursor(self):
-        show = self.shows.get(self.cur_show, {})
-        season_data = show.get('seasons', {}).get(self.cur_season, {})
-        episodes = season_data.get('episodes', [])
+        episodes = self._season_episodes(self.cur_show, self.cur_season)
         if not episodes:
             return
 
         start = min(self.cursor, len(episodes) - 1)
         if not self._can_start_episode(episodes[start]):
-            self.channel_error = "NO PLAYER"
+            queued = self._priority_cache_episode_on_play_block(
+                self.cur_show, self.cur_season, episodes[start]
+            )
+            if queued:
+                self.channel_error = "CACHING..."
+            else:
+                blocked = self._youtube_start_blocked_message(episodes[start])
+                self.channel_error = blocked or "NO PLAYER"
             self.channel_error_time = pygame.time.get_ticks()
             return
 
@@ -7169,6 +8468,7 @@ class TVTimeCapsule:
 
         self._playing_source_path = None
         self._playback_cache_suppressed = False
+        self._playing_youtube_file = False
         self._sync_playback_navigation_state()
 
         if self._kids_mode_active:
@@ -7216,13 +8516,21 @@ class TVTimeCapsule:
     # ─── Main loop ─────────────────────────────────────────────────────────
 
     def _touch_activity(self, device: str | None = None):
-        """Reset idle timer; leave screensaver on input."""
+        """Reset idle timer; leave screensaver on input.
+
+        Only user input should call this — never background cache / catalog work.
+        """
         self._last_activity_ms = pygame.time.get_ticks()
         self._screensaver_active = False
         if device in ("keyboard", "gamepad"):
             self._last_input_device = device
 
-    def _note_keyboard_input(self) -> None:
+    def _note_keyboard_input(self, *, repeat: bool = False) -> None:
+        # Key-repeat must not refresh the screensaver idle clock. A held Select
+        # (or a KEYUP eaten by event.clear during splash) would otherwise spam
+        # KEYDOWN forever and block the screensaver while cache UI keeps updating.
+        if repeat:
+            return
         self._touch_activity(device="keyboard")
 
     def _note_gamepad_input(self) -> None:
@@ -7275,6 +8583,33 @@ class TVTimeCapsule:
         self._screensaver.randomize_color()
         self._screensaver_active = True
 
+    def _tick_youtube_offline_idle(self) -> None:
+        """Pause/resume forever-cache downloads when not watching + UI-idle.
+
+        Background fills require a browse/screensaver view and either the
+        screensaver already running or ``idle_seconds`` without input. Priority
+        cache-now (Y / Enter on miss) still runs immediately via the worker.
+        Does not touch the screensaver activity timer.
+        """
+        if not self._yt_offline.enabled or not self._yt_offline.download_when_idle:
+            return
+        view_ok = is_idle_for_youtube_cache(
+            self.view,
+            screensaver_active=self._screensaver_active,
+            playing=self.PLAYING,
+            weather=self.WEATHER,
+            retro_tv=self.RETRO_TV,
+        )
+        now = pygame.time.get_ticks()
+        idle_ms = int(self._yt_offline.idle_seconds) * 1000
+        inactive_long_enough = self._screensaver_active or (
+            now - self._last_activity_ms >= idle_ms
+        )
+        want_idle = bool(view_ok and inactive_long_enough)
+        if want_idle != self._yt_offline_idle:
+            self._yt_offline_idle = want_idle
+            self._yt_offline.set_idle(want_idle)
+
     def _tick_screensaver(self):
         dt = max(self.clock.get_time(), 1) / 1000.0
         if self._screensaver.update(dt):
@@ -7326,6 +8661,14 @@ class TVTimeCapsule:
         self._now_playing_splash_ms = int(splash_seconds * 1000)
         self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
         self._playback_cache = PlaybackCache(self.config)
+        prev_yt = getattr(self, "_yt_offline", None)
+        if prev_yt is not None:
+            prev_yt.shutdown()
+        self._yt_offline = YoutubeOfflineCache(self.config)
+        self._yt_offline.set_shows_provider(lambda: self.shows)
+        self._yt_offline_idle = False
+        if self._youtube_feature_enabled():
+            self._yt_offline.start_idle_worker()
         self._load_kids_mode_config()
         ui_cfg = self.config.get("ui") or {}
         self._footer_hints_enabled = bool(ui_cfg.get("footer_hints", True))
@@ -7634,12 +8977,11 @@ class TVTimeCapsule:
         if self.player:
             self.player.stop()
         self._playback_cache.shutdown()
+        self._yt_offline.shutdown()
         if self._weather_channel is not None:
             self._weather_channel.stop()
             self._weather_channel = None
-        if self._retro_tv_channel is not None:
-            self._retro_tv_channel.stop()
-            self._retro_tv_channel = None
+        self._stop_retro_tv_session(keep_view=True)
         if shutdown_snapshot is not None:
             self._channel_fx.play_shutdown(
                 self.screen,
@@ -7667,6 +9009,8 @@ class TVTimeCapsule:
             )
 
             while self.running:
+                self._tick_youtube_offline_idle()
+                self._tick_pending_cache_play()
                 # ═══════════════════════════════════════════════════════════════════
                 # PLAYBACK MODE: embedded video rendering
                 # ═══════════════════════════════════════════════════════════════════
@@ -7685,12 +9029,14 @@ class TVTimeCapsule:
                                 break
                             action = None
                             if event.type == pygame.KEYDOWN:
-                                self._note_keyboard_input()
-                                # Dial 0 = stop, same as Esc back during playback.
-                                if digit_for_key(self.keymap, event.key) == 0:
-                                    action = "back"
-                                else:
-                                    action = self._key_to_playback_action(event.key)
+                                self._note_keyboard_input(
+                                    repeat=bool(getattr(event, "repeat", False))
+                                )
+                                digit = digit_for_key(self.keymap, event.key)
+                                if digit is not None:
+                                    self._append_dial_digit(digit)
+                                    continue
+                                action = self._key_to_playback_action(event.key)
                             else:
                                 action = self._gamepad.event_to_action(event)
                                 if action:
@@ -7709,8 +9055,10 @@ class TVTimeCapsule:
                                 self._playback_stalled = False
                                 self.stop_playback()
                                 break
+                        self._tick_dial_timeout()
                         self.screen.fill(C.BLACK)
                         self.draw_stall_overlay()
+                        self.draw_channel_overlay()
                         self.present()
                         self.clock.tick(30)
                         continue
@@ -7735,18 +9083,20 @@ class TVTimeCapsule:
                             break
                         action = None
                         if event.type == pygame.KEYDOWN:
-                            self._note_keyboard_input()
+                            self._note_keyboard_input(
+                                repeat=bool(getattr(event, "repeat", False))
+                            )
                             if (
                                 key_matches(self.keymap, event.key, "cache_cancel")
                                 and self._should_show_cache_overlay()
                             ):
                                 self._cancel_background_cache()
                                 continue
-                            # Dial 0 = stop, same as Esc back during playback.
-                            if digit_for_key(self.keymap, event.key) == 0:
-                                action = "back"
-                            else:
-                                action = self._key_to_playback_action(event.key)
+                            digit = digit_for_key(self.keymap, event.key)
+                            if digit is not None:
+                                self._append_dial_digit(digit)
+                                continue
+                            action = self._key_to_playback_action(event.key)
                         else:
                             action = self._gamepad.event_to_action(event)
                             if action:
@@ -7754,12 +9104,17 @@ class TVTimeCapsule:
                         if action and not self._process_playback_action(action):
                             break
 
+                    self._tick_dial_timeout()
+                    if self.view != self.PLAYING:
+                        continue
+
                     # Update time position for progress bar
                     if self.player and self.player.is_playing():
                         self.player.update_time()
 
                     # Render: video frame + overlays
                     self.draw_playback()
+                    self.draw_channel_overlay()
                     self.present()
                     self.clock.tick(30)
                     continue
@@ -7775,7 +9130,18 @@ class TVTimeCapsule:
                         if event.type == pygame.QUIT:
                             self._handle_quit_event("screensaver")
                         elif event.type == pygame.KEYDOWN:
-                            self._note_keyboard_input()
+                            # Ignore key-repeat so a held key cannot instantly
+                            # dismiss the screensaver the moment it appears.
+                            self._note_keyboard_input(
+                                repeat=bool(getattr(event, "repeat", False))
+                            )
+                        elif event.type in (
+                            pygame.JOYBUTTONDOWN,
+                            pygame.JOYHATMOTION,
+                            pygame.JOYAXISMOTION,
+                        ):
+                            if self._gamepad.event_to_action(event):
+                                self._note_gamepad_input()
                     if self.running:
                         self._tick_screensaver()
                         self.present()
@@ -7797,8 +9163,13 @@ class TVTimeCapsule:
                         self._handle_quit_event("browse")
 
                     elif event.type == pygame.KEYDOWN:
-                        self._note_keyboard_input()
+                        key_repeat = bool(getattr(event, "repeat", False))
+                        self._note_keyboard_input(repeat=key_repeat)
                         key_action = self._action_for_key(event.key)
+                        # Held Select must not re-fire play / cache-queue every
+                        # key-repeat tick (keeps idle timer + cache UX sane).
+                        if key_repeat and key_action == "select":
+                            continue
 
                         if self.view == self.WEATHER:
                             digit = digit_for_key(self.keymap, event.key)
@@ -7818,7 +9189,7 @@ class TVTimeCapsule:
                         if self.view == self.RETRO_TV:
                             digit = digit_for_key(self.keymap, event.key)
                             if digit is not None:
-                                if self._retro_tv_menu_open:
+                                if self._retro_tv_menu.is_open:
                                     continue
                                 self._append_dial_digit(digit)
                                 continue
@@ -7983,6 +9354,10 @@ class TVTimeCapsule:
                             self._play_all_unwatched_action()
                             continue
 
+                        if key_action == "youtube_cache_now":
+                            self._youtube_cache_now_action()
+                            continue
+
                         if key_action == "letter_menu" and not self._kids_mode_active:
                             self._open_letter_menu()
                             continue
@@ -8085,6 +9460,8 @@ class TVTimeCapsule:
                 self._tick_reset_hold()
                 self._tick_periodic_rescan()
                 self._tick_youtube_catalog()
+                if self.view == self.RETRO_TV:
+                    self._tick_retro_tv_cached()
 
                 if self.view == self.PLAYING:
                     continue
@@ -8117,7 +9494,14 @@ class TVTimeCapsule:
                 else:
                     self.draw()
                     self.present()
-                self.clock.tick(30)
+                if self.view == self.WEATHER and self._weather_channel is not None:
+                    try:
+                        fps = float(self._weather_channel.effective_fps)
+                    except Exception:
+                        fps = 10.0
+                    self.clock.tick(max(1, min(30, int(round(fps)) + 2)))
+                else:
+                    self.clock.tick(30)
         except Exception:
             LOG.exception("TV Time Capsule stopped due to an unexpected error")
         finally:

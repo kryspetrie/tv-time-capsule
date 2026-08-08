@@ -136,18 +136,27 @@ def build_ffmpeg_decode_cmd(
     *,
     resume_pos: float | None = None,
     hwaccel: str | None = None,
+    vf: str | None = None,
 ) -> list[str]:
-    """Build an ffmpeg command that outputs raw RGB24 to stdout."""
+    """Build an ffmpeg command that outputs raw RGB24 to stdout.
+
+    ``-ss`` is applied *before* ``-i`` (input seek) so resume/scrub can show
+    the first frame quickly. Audio uses the same input-seek pattern so A/V
+    stay aligned; starting audio only after the first video frame avoids a
+    "Loading..." screen with sound already playing.
+    """
     cmd = [ffmpeg_path]
     if resume_pos and resume_pos > 0:
         cmd.extend(["-ss", str(resume_pos)])
     if hwaccel:
         cmd.extend(["-hwaccel", hwaccel])
-    cmd.extend(["-i", filepath])
-    vf = (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
-    )
+    # Help containers with messy timestamps (common after yt-dlp merges).
+    cmd.extend(["-fflags", "+genpts", "-i", filepath])
+    if vf is None:
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
     cmd.extend(
         [
             "-vf",
@@ -165,8 +174,26 @@ def build_ffmpeg_decode_cmd(
     return cmd
 
 
+def _parse_frame_rate(rate: str | None, default: float = 24.0) -> float:
+    if not rate or not str(rate).strip():
+        return default
+    text = str(rate).strip()
+    try:
+        if "/" in text:
+            num, den = text.split("/", 1)
+            den_f = float(den)
+            return float(num) / den_f if den_f > 0 else default
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return default
+
+
 def get_video_info(filepath):
-    """Get video duration and FPS using ffprobe."""
+    """Get video duration and FPS using ffprobe.
+
+    Prefers ``avg_frame_rate`` over ``r_frame_rate`` so wall-clock frame pacing
+    matches real playback (YouTube files often advertise a higher r_frame_rate).
+    """
     try:
         result = subprocess.run(
             [
@@ -188,12 +215,12 @@ def get_video_info(filepath):
         duration = 0.0
         for s in info.get("streams", []):
             if s.get("codec_type") == "video":
-                fps_str = s.get("r_frame_rate", "24/1")
-                if "/" in fps_str:
-                    num, den = fps_str.split("/")
-                    fps = float(num) / float(den) if float(den) > 0 else 24.0
-                else:
-                    fps = float(fps_str)
+                avg = _parse_frame_rate(s.get("avg_frame_rate"), 0.0)
+                raw = _parse_frame_rate(s.get("r_frame_rate"), 0.0)
+                if avg > 1.0:
+                    fps = avg
+                elif raw > 1.0:
+                    fps = raw
                 break
         fmt = info.get("format", {})
         dur_str = fmt.get("duration", "0")
@@ -211,7 +238,8 @@ class EmbeddedPlayer:
 
     Video frames are piped from ffmpeg via subprocess as raw RGB24 data,
     converted to pygame Surfaces via numpy, and blitted directly to the canvas.
-    Audio is played via a separate ffplay process for perfect sync.
+    Audio is started with the first decoded video frame (matched input seek)
+    so resume/scrub never plays sound under a Loading banner.
 
     Key design:
     - The frame-reading thread throttles to video FPS so it doesn't
@@ -232,6 +260,8 @@ class EmbeddedPlayer:
         # Playback state
         self.proc = None  # FFmpeg video process
         self.audio_proc = None  # ffplay audio process
+        self._audio_src_proc = None  # ffmpeg feeding ffplay (matched seek)
+        self._pending_audio_pos: float | None = None  # start audio on first frame
         self.thread = None  # Frame-reading thread
         self.running = False  # Is playback active?
         self.finished = False  # Did the video reach the end naturally?
@@ -255,10 +285,69 @@ class EmbeddedPlayer:
         self._playback_started_at = 0.0
         self._last_frame_at = 0.0
         self.stalled = False
+        # Optional YouTube offline crop (normalized fractions + apply flag).
+        self._yt_crop_norm: tuple[float, float, float, float] | None = None
+        self._yt_crop_apply = False
+        self._yt_youtube_id: str | None = None
 
         # Omxplayer fallback state
         self.omx_proc = None
         self.omx_cmd = None
+
+    def configure_youtube_crop(
+        self,
+        *,
+        youtube_id: str | None,
+        crop_norm: tuple[float, float, float, float] | None,
+        apply: bool,
+    ) -> None:
+        """Attach offline YouTube crop state (call before or after start)."""
+        self._yt_youtube_id = youtube_id
+        self._yt_crop_norm = crop_norm
+        self._yt_crop_apply = bool(apply) and crop_norm is not None
+
+    def _decode_vf(self) -> str:
+        from .youtube_crop import ffmpeg_crop_filter
+
+        if self._yt_crop_norm is not None or self._yt_youtube_id:
+            return ffmpeg_crop_filter(
+                self._yt_crop_norm,
+                self.canvas_w,
+                self.canvas_h,
+                apply=self._yt_crop_apply,
+                cover=True,
+            )
+        return (
+            f"scale={self.canvas_w}:{self.canvas_h}:force_original_aspect_ratio=decrease,"
+            f"pad={self.canvas_w}:{self.canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
+
+    def toggle_content_zoom(self) -> bool | None:
+        """Toggle pillarbox zoom for offline YouTube; returns new apply state."""
+        if self._yt_crop_norm is None and not self._yt_youtube_id:
+            return None
+        if self._yt_crop_norm is None:
+            return None
+        self._yt_crop_apply = not self._yt_crop_apply
+        from .youtube_crop_cache import save_pillarbox_crop
+        from .youtube_crop import denormalize_crop_rect
+
+        crop = denormalize_crop_rect(
+            self._yt_crop_norm, self.canvas_w, self.canvas_h
+        )
+        save_pillarbox_crop(
+            self._yt_youtube_id,
+            crop,
+            width=self.canvas_w,
+            height=self.canvas_h,
+            apply=self._yt_crop_apply,
+        )
+        # Restart decode from current position with new filter.
+        pos = self.time_pos
+        path = self.filepath
+        if path:
+            self.start(path, resume_pos=pos)
+        return self._yt_crop_apply
 
     def start(self, filepath, resume_pos=None):
         """Start playing a video file. Returns True if successful."""
@@ -273,6 +362,14 @@ class EmbeddedPlayer:
         # Get video info for duration and fps
         self.fps, self.duration = get_video_info(filepath)
         self.frame_time = 1.0 / max(self.fps, 1.0)
+
+        # Omxplayer cannot apply crop filters — prefer ffmpeg when zoom crop needed.
+        if self.use_omx and self._yt_crop_apply and self._yt_crop_norm is not None:
+            if self.ffmpeg_path and np_frombuffer is not None:
+                LOG.info("YouTube crop active — using ffmpeg instead of omxplayer")
+                self.use_omx = False
+            else:
+                LOG.warning("YouTube crop requested but ffmpeg unavailable; playing uncropped via omx")
 
         # Omxplayer fallback for Pi without X11
         if self.use_omx:
@@ -292,6 +389,7 @@ class EmbeddedPlayer:
             H,
             resume_pos=resume_pos,
             hwaccel=self._hwaccel,
+            vf=self._decode_vf(),
         )
 
         try:
@@ -313,6 +411,7 @@ class EmbeddedPlayer:
                 H,
                 resume_pos=resume_pos,
                 hwaccel=None,
+                vf=self._decode_vf(),
             )
             try:
                 self.proc = subprocess.Popen(
@@ -330,28 +429,10 @@ class EmbeddedPlayer:
             self.proc = None
             return False
 
-        # Start audio via ffplay (silent, no window)
-        if self.ffplay_path:
-            audio_cmd = [
-                self.ffplay_path,
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "-volume",
-                str(int(self.volume)),
-            ]
-            if resume_pos and resume_pos > 0:
-                audio_cmd.extend(["-ss", str(resume_pos)])
-            audio_cmd.append(filepath)
-            try:
-                self.audio_proc = subprocess.Popen(
-                    audio_cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                self.audio_proc = None
+        # Defer audio until the first video frame so resume/scrub never plays
+        # sound under a "Loading..." banner while video is still seeking.
+        self._stop_audio()
+        self._pending_audio_pos = float(resume_pos or 0.0)
 
         self.running = True
         resume = float(resume_pos or 0)
@@ -373,6 +454,115 @@ class EmbeddedPlayer:
         self.thread.start()
 
         return True
+
+    def _stop_audio(self) -> None:
+        """Kill ffplay and any ffmpeg audio feeder."""
+        for proc_attr in ("audio_proc", "_audio_src_proc"):
+            proc = getattr(self, proc_attr, None)
+            if not proc:
+                continue
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            setattr(self, proc_attr, None)
+
+    def _start_audio_at(self, position: float) -> None:
+        """Start audio at ``position`` using the same input-seek as video.
+
+        Both paths use ``ffmpeg -ss POS -i file`` so scrub/resume stay aligned.
+        """
+        self._stop_audio()
+        if not self.ffplay_path or not self.filepath:
+            return
+        pos = max(0.0, float(position or 0.0))
+        filepath = self.filepath
+
+        if self.ffmpeg_path:
+            vol = max(0.0, min(1.0, float(self.volume) / 100.0))
+            ff_cmd = [
+                self.ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+            ]
+            if pos > 0:
+                ff_cmd.extend(["-ss", str(pos)])
+            ff_cmd.extend(
+                [
+                    "-fflags",
+                    "+genpts",
+                    "-i",
+                    filepath,
+                    "-vn",
+                    "-af",
+                    f"volume={vol}",
+                    "-f",
+                    "s16le",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "44100",
+                    "-",
+                ]
+            )
+            play_cmd = [
+                self.ffplay_path,
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                "-f",
+                "s16le",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                "-i",
+                "pipe:0",
+            ]
+            try:
+                play = subprocess.Popen(
+                    play_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                src = subprocess.Popen(
+                    ff_cmd,
+                    stdout=play.stdin,
+                    stderr=subprocess.DEVNULL,
+                )
+                if play.stdin is not None:
+                    play.stdin.close()
+                self.audio_proc = play
+                self._audio_src_proc = src
+                return
+            except Exception:
+                self._stop_audio()
+
+        # Fallback: direct ffplay (matched -ss before input when possible).
+        audio_cmd = [
+            self.ffplay_path,
+            "-nodisp",
+            "-autoexit",
+            "-loglevel",
+            "quiet",
+            "-volume",
+            str(int(self.volume)),
+        ]
+        if pos > 0:
+            audio_cmd.extend(["-ss", str(pos)])
+        audio_cmd.extend(["-i", filepath])
+        try:
+            self.audio_proc = subprocess.Popen(
+                audio_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self.audio_proc = None
 
     def _start_omx(self, filepath, resume_pos=None):
         """Start playback via omxplayer (Pi fallback)."""
@@ -410,6 +600,7 @@ class EmbeddedPlayer:
         seg_start = time.monotonic()
         paused_accum = 0.0
         frame_index = 0
+        audio_started = False
 
         while self.running:
             # Block here if paused (and remember how long we were paused)
@@ -435,6 +626,20 @@ class EmbeddedPlayer:
                 with self.frame_lock:
                     self.current_frame = surf
                 self._last_frame_at = time.monotonic()
+
+                # Start audio with the first visible frame (resume/scrub).
+                if not audio_started:
+                    audio_started = True
+                    pending = self._pending_audio_pos
+                    self._pending_audio_pos = None
+                    if pending is not None:
+                        pos = max(0.0, float(pending))
+                        self.time_pos = pos
+                        self.start_time = time.monotonic() - pos
+                        seg_start = time.monotonic()
+                        paused_accum = 0.0
+                        frame_index = 0
+                        self._start_audio_at(pos)
 
                 # Sleep only until this frame's scheduled time — no fixed
                 # per-frame delay, so decode time doesn't accumulate as drift.
@@ -469,6 +674,13 @@ class EmbeddedPlayer:
                 except Exception:
                     pass
             self.audio_proc = None
+        if self._audio_src_proc:
+            try:
+                self._audio_src_proc.kill()
+                self._audio_src_proc.wait(timeout=1)
+            except Exception:
+                pass
+            self._audio_src_proc = None
         self.finished = True
         self.running = False
 
@@ -483,13 +695,7 @@ class EmbeddedPlayer:
             except Exception:
                 pass
             self.proc = None
-        if self.audio_proc:
-            try:
-                self.audio_proc.kill()
-                self.audio_proc.wait(timeout=1)
-            except Exception:
-                pass
-            self.audio_proc = None
+        self._stop_audio()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2)
         self.thread = None
@@ -536,6 +742,7 @@ class EmbeddedPlayer:
         self.running = False
         self.finished = False
         self.stalled = False
+        self._pending_audio_pos = None
         self._pause_event.set()  # Unblock frame thread so it can exit
 
         # Kill FFmpeg
@@ -547,14 +754,7 @@ class EmbeddedPlayer:
                 pass
             self.proc = None
 
-        # Kill audio
-        if self.audio_proc:
-            try:
-                self.audio_proc.kill()
-                self.audio_proc.wait(timeout=2)
-            except Exception:
-                pass
-            self.audio_proc = None
+        self._stop_audio()
 
         # Kill omxplayer
         if self.omx_proc:
@@ -596,13 +796,7 @@ class EmbeddedPlayer:
             # Block the frame-reading thread
             self._pause_event.clear()
             # Kill audio (ffplay can't pause via stdin)
-            if self.audio_proc and self.audio_proc.poll() is None:
-                try:
-                    self.audio_proc.kill()
-                    self.audio_proc.wait(timeout=1)
-                except Exception:
-                    pass
-                self.audio_proc = None
+            self._stop_audio()
         else:
             if self.pause_start > 0:
                 self.pause_offset += time.monotonic() - self.pause_start
@@ -613,29 +807,9 @@ class EmbeddedPlayer:
             self._resume_audio()
 
     def _resume_audio(self):
-        """Restart ffplay from the current time position after unpause."""
-        if not self.ffplay_path or not self.filepath:
-            return
+        """Restart audio from the current wall-clock position after unpause."""
         elapsed = time.monotonic() - self.start_time - self.pause_offset
-        resume = max(0, elapsed)
-        audio_cmd = [
-            self.ffplay_path,
-            "-nodisp",
-            "-autoexit",
-            "-loglevel",
-            "quiet",
-            "-volume",
-            str(int(self.volume)),
-            "-ss",
-            str(resume),
-            self.filepath,
-        ]
-        try:
-            self.audio_proc = subprocess.Popen(
-                audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-        except Exception:
-            self.audio_proc = None
+        self._start_audio_at(max(0.0, elapsed))
 
     def adjust_volume(self, delta):
         """Adjust volume by delta (e.g. +10 or -10). Range: 0-100.
@@ -646,19 +820,13 @@ class EmbeddedPlayer:
         self._apply_volume_live()
 
     def _apply_volume_live(self):
-        """Relaunch ffplay at the current position so a new volume applies now."""
+        """Relaunch audio at the current position so a new volume applies now."""
         if self.use_omx or self.paused or not self.running:
             return
         if not self.ffplay_path or not self.filepath:
             return
-        if self.audio_proc and self.audio_proc.poll() is None:
-            try:
-                self.audio_proc.kill()
-                self.audio_proc.wait(timeout=1)
-            except Exception:
-                pass
-        self.audio_proc = None
-        self._resume_audio()
+        elapsed = time.monotonic() - self.start_time - self.pause_offset
+        self._start_audio_at(max(0.0, elapsed))
 
     def seek(self, seconds):
         """Seek forward/backward by seconds. Restarts FFmpeg from new position."""
@@ -713,6 +881,7 @@ class EmbeddedPlayer:
             H,
             resume_pos=new_pos,
             hwaccel=hw,
+            vf=self._decode_vf(),
         )
         try:
             self.proc = subprocess.Popen(
@@ -733,6 +902,7 @@ class EmbeddedPlayer:
                 H,
                 resume_pos=new_pos,
                 hwaccel=None,
+                vf=self._decode_vf(),
             )
             try:
                 self.proc = subprocess.Popen(
@@ -746,26 +916,9 @@ class EmbeddedPlayer:
                 self.finished = True
                 return
 
-        # Restart audio from seek position
-        if self.ffplay_path:
-            audio_cmd = [
-                self.ffplay_path,
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "-volume",
-                str(int(self.volume)),
-                "-ss",
-                str(new_pos),
-                filepath,
-            ]
-            try:
-                self.audio_proc = subprocess.Popen(
-                    audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except Exception:
-                self.audio_proc = None
+        # Restart video; audio starts when the first post-seek frame arrives.
+        self._stop_audio()
+        self._pending_audio_pos = float(new_pos)
 
         self.running = True
         self.finished = False

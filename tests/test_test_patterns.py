@@ -72,6 +72,9 @@ class TestPatternDialViewsTests(unittest.TestCase):
             "LIBRARY_SELECT",
             "SEASON_SELECT",
             "EPISODE_SELECT",
+            "PLAYING",
+            "WEATHER",
+            "RETRO_TV",
         ):
             with self.subTest(view=view_name):
                 app = self._app(view_name)

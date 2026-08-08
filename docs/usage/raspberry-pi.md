@@ -74,3 +74,17 @@ After adding files on USB or NAS without rebooting, **hold R** on the show list 
 - `--graphical` autostart waits for a desktop session and sets `DISPLAY=:0`  
 
 See [Autostart & login](autostart.md) and [Networking](networking.md).
+
+## Device profiles (features + YouTube cache)
+
+| Hardware | Suggested config |
+|----------|------------------|
+| Pi 1 / Zero | `features.retro_tv: true` with `retro_tv.playback_mode: cached` (or `features.retro_tv: false`); `weather.screencast.mode: auto`; `youtube.playback_mode: cached_only`; `youtube.cache.enabled: true` with `directory` on NAS |
+| Pi 2 / 3 | Weather auto; Retro `cached` recommended; `prefer_cache` + optional local cache |
+| Pi 4 / 5 / desktop | All features on; Retro `live` or `cached`; `prefer_cache` or `live`; optional idle cache |
+
+**Offline YouTube workflow:** on a desktop/NAS with good bandwidth, set `youtube.cache.enabled: true` and run `tv-time-capsule --youtube-cache-sync`. Mount that directory on the Pi and use `cached_only` so weak devices never spawn Chrome for YouTube library playback. Crop/zoom (**T**) uses the shared crop cache for both live and file backends.
+
+**Decades (`1950`–`2009`):** `retro_tv.playback_mode: cached` keeps Chrome as a playlist oracle only (no screencast) and plays a rolling pair of yt-dlp temp files via ffmpeg — much cheaper than live CDP blit on Pi.
+
+See [Configuration](configuration.md) (`features`, `weather.screencast`, `youtube`, `retro_tv`) and the [offline YouTube plan](../development/pi-features-offline-youtube-plan.md).
