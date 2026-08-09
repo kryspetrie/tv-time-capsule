@@ -93,7 +93,7 @@ flowchart TD
     "max_bytes": null,
     "download_when_idle": true,
     "idle_seconds": 30,
-    "format": "bv*[height<=720]+ba/b[height<=720]/b"
+    "format": "bv*[height<=480]+ba/b[height<=480]/bv*[height<=360]+ba/b[height<=360]/bv*[height<=720]+ba/b[height<=720]/b"
   }
 }
 ```
@@ -380,7 +380,7 @@ Phases 1–2 and 3 can overlap. Phase 6 must not ship file playback as “done�
 | NAS locking / partial files? | Atomic rename policy confirmation |
 | Should catalog scrape stay Chrome-only on weak Pis? | Document “fill cache elsewhere” workflow |
 
-**Outputs:** [ ] Atomic write policy locked · [ ] Default format string confirmed (720p) · [ ] Partial-file handling |
+**Outputs:** [ ] Atomic write policy locked · [ ] Default format string confirmed (≤480p for 640×480) · [ ] Partial-file handling |
 
 ### Test plan (Phase 4)
 

@@ -129,7 +129,7 @@ On any **parent** screen (home, shows, movies, seasons, episodes, playback), pre
 
 **Label:** easter egg
 
-Dial **`004`** for a live weather.com/retro screencast (Chromium CDP). Configure `weather.zip` / location in config (default Boston). Screencast FPS/quality adapt automatically (`weather.screencast.mode: auto`) so older Pis stay usable at 1–2 FPS. Volume keys control the embedded player; Esc / back exits to the previous browse view. Disable with `features.weather: false`.
+Dial **`004`** for the Weather Channel. **Default** is `weather.provider: native` (custom pygame Retro Weather, no Chromium). Live Chrome providers (`twc` / `ws4kp`) are opt-in via config or the in-app picker (**Enter / Space**); they adapt FPS/quality (`weather.screencast.mode: auto`). Configure `weather.zip` / location (default Boston). Volume keys control music/announcements (native) or the embedded player (live); Esc / back exits the menu first, then leaves Weather. Disable with `features.weather: false`. See [Native weather & cached defaults](native-cached-defaults.md).
 
 Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use the `00x` special family only.
 
@@ -157,10 +157,10 @@ Dial any **4-digit year from 1950–2009** on a parent screen (or pin `1990s` et
 | 1990–1999 | 90s |
 | 2000–2009 | 00s |
 
-**Playback modes** (`retro_tv.playback_mode`):
+**Playback modes** (`retro_tv.playback_mode`; **default `cached`**):
 
-- `live` (default) — Chromium CDP screencast of the site (same stack as Weather).
-- `cached` — Chrome only drives the site (power on, filters, CH▼) to learn which YouTube clip is next; yt-dlp downloads a **temporary** rolling pair of files and ffmpeg plays them. Much lighter on Raspberry Pi. Temp files are wiped when you leave Decades (not the forever YouTube offline cache).
+- `cached` (**default**) — Chrome only drives the site (power on, filters, CH▼) to learn which YouTube clip is next; yt-dlp downloads a **temporary** rolling pair of files and ffmpeg plays them. Much lighter on Raspberry Pi. Temp files are wiped when you leave Decades (not the forever YouTube offline cache).
+- `live` (opt-in) — Chromium CDP screencast of the site.
 
 Volume keys adjust gain; left/right change channel (in `cached` mode both directions skip forward to the next prefetched clip). **Enter / Space** opens the Retro TV menu with **Change Channel** focused — Enter again retunes (cached: drop current clip, play the prefetched next, start caching the following; live: site CH▲). **Channel Setup** is the channel-type filter checklist. Esc backs one menu level, then exits Decades from playback. Filter choices and volume are saved under `retro_tv` in config. Requires Chrome/Chromium and, for `cached`, yt-dlp. Disable with `features.retro_tv: false`.
 
@@ -179,8 +179,8 @@ Volume keys adjust gain; left/right change channel (in `cached` mode both direct
 | Gamepad | Input | `gamepad.enabled` | on |
 | Test patterns `001` / `002` / `003` | Easter egg | *(none)* | always if PNGs exist |
 | Secret directory `000` | Easter egg | *(none)* | always |
-| Weather `004` | Easter egg | `weather.*`, `features.weather` | on (Chrome; adaptive screencast) |
-| MyRetroTVs `1950`–`2009` | Easter egg | `features.retro_tv`, `retro_tv.playback_mode` | on (`live` screencast; use `cached` on Pi) |
+| Weather `004` | Easter egg | `weather.*`, `features.weather` | on (`native` pygame; live `twc`/`ws4kp` opt-in) |
+| MyRetroTVs `1950`–`2009` | Easter egg | `features.retro_tv`, `retro_tv.playback_mode` | on (`cached` default; `live` screencast opt-in) |
 
 Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` when the new keys are absent.
 

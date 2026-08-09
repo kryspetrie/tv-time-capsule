@@ -66,7 +66,7 @@ In **parent** mode on the show or movie list, press **K** to tag/untag the curre
 
 ### Back / quit
 
-**Esc** (and dial `0`) moves **one level up**: episode → season or show list → home menu → **Quit?** at the top level (parent mode only). Weather / Retro / secret overlays exit first. On Retro TV, Esc closes Channel Setup → root menu → then exits Decades.
+**Esc** (and dial `0`) moves **one level up**: episode → season or show list → home menu → **Quit?** at the top level (parent mode only). Weather / Retro / secret overlays exit first. On Weather, Esc closes the provider menu then exits the channel. On Retro TV, Esc closes Channel Setup → root menu → then exits Decades.
 
 **Retro TV (Decades):** Enter opens **Change Channel** / **Channel Setup**; Enter again on Change Channel retunes. See [Fun tweaks → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
 

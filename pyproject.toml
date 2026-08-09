@@ -27,10 +27,14 @@ Repository = "https://github.com/kryspetrie/tv-time-capsule"
 [project.scripts]
 tv-time-capsule = "tv_time_capsule.cli:main"
 tv-time-capsule-secrets = "tv_time_capsule.secrets_cli:main"
+tv-time-capsule-fetch-weather-music = "tv_time_capsule.weather.fetch_music:main"
 
 [tool.poetry]
 packages = [{ include = "tv_time_capsule", from = "src" }]
-include = ["src/tv_time_capsule/assets/*"]
+include = [
+    "src/tv_time_capsule/assets/*",
+    "src/tv_time_capsule/weather/assets/**/*",
+]
 
 [build-system]
 requires = ["poetry-core>=2.0.0"]

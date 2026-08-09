@@ -367,7 +367,13 @@ def _parse_cache(raw: dict | None) -> dict[str, Any]:
     }
 
 
-_DEFAULT_YOUTUBE_FORMAT = "bv*[height<=720]+ba/b[height<=720]/b"
+# Bias to the 640×480 canvas: prefer ≤480p (best quality at SD), then ≤360,
+# and only then ≤720 — avoids caching huge HD files we downscale away.
+_DEFAULT_YOUTUBE_FORMAT = (
+    "bv*[height<=480]+ba/b[height<=480]/"
+    "bv*[height<=360]+ba/b[height<=360]/"
+    "bv*[height<=720]+ba/b[height<=720]/b"
+)
 
 
 def _parse_youtube_offline_cache(raw: dict | None) -> dict[str, Any]:
@@ -424,7 +430,7 @@ def _parse_youtube_offline_cache(raw: dict | None) -> dict[str, Any]:
         batch_size = 1
     batch_size = max(1, min(8, batch_size))
     return {
-        "enabled": bool(cache.get("enabled", False)),
+        "enabled": bool(cache.get("enabled", True)),
         "directory": directory,
         "max_bytes": max_bytes,
         "download_when_idle": bool(cache.get("download_when_idle", True)),
@@ -443,9 +449,9 @@ def _parse_youtube(raw: dict | None) -> dict[str, Any]:
     block = raw or {}
     if not isinstance(block, dict):
         block = {}
-    mode = str(block.get("playback_mode") or "live").strip().lower()
+    mode = str(block.get("playback_mode") or "prefer_cache").strip().lower()
     if mode not in ("live", "prefer_cache", "cached_only"):
-        mode = "live"
+        mode = "prefer_cache"
     return {
         "playback_mode": mode,
         "cache": _parse_youtube_offline_cache(block.get("cache")),
@@ -506,11 +512,24 @@ def _parse_weather_screencast(raw: dict | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         jpeg_quality = 80
     jpeg_quality = max(20, min(95, jpeg_quality))
+
+    # Optional WS4KP-only FPS override (default 4 in the presenter when unset).
+    ws4kp_raw = block.get("ws4kp_target_fps")
+    ws4kp_target_fps = None
+    if ws4kp_raw is not None and str(ws4kp_raw).strip() != "":
+        try:
+            ws4kp_target_fps = float(ws4kp_raw)
+        except (TypeError, ValueError):
+            ws4kp_target_fps = None
+        if ws4kp_target_fps is not None:
+            ws4kp_target_fps = max(0.5, min(30.0, ws4kp_target_fps))
+
     return {
         "mode": mode,
         "min_fps": min_fps,
         "max_fps": max_fps,
         "target_fps": target_fps,
+        "ws4kp_target_fps": ws4kp_target_fps,
         "max_width": _opt_int("max_width"),
         "max_height": _opt_int("max_height"),
         "jpeg_quality": jpeg_quality,
@@ -526,6 +545,64 @@ def _parse_accessibility(raw: dict | None) -> dict[str, Any]:
         "large_text": bool(acc.get("large_text", defaults["large_text"])),
         "high_contrast": bool(acc.get("high_contrast", defaults["high_contrast"])),
         "play_all_unwatched": bool(acc.get("play_all_unwatched", defaults["play_all_unwatched"])),
+    }
+
+
+def _parse_weather_music(raw: dict | None) -> dict[str, Any]:
+    block = raw if isinstance(raw, dict) else {}
+    try:
+        volume = int(block.get("volume", 70))
+    except (TypeError, ValueError):
+        volume = 70
+    volume = max(0, min(100, volume))
+    directory = block.get("directory")
+    if directory is not None:
+        directory = str(directory).strip() or None
+    announcements_directory = block.get("announcements_directory")
+    if announcements_directory is not None:
+        announcements_directory = str(announcements_directory).strip() or None
+    return {
+        "enabled": bool(block.get("enabled", True)),
+        "directory": directory,
+        "announcements_directory": announcements_directory,
+        "volume": volume,
+    }
+
+
+def _parse_weather_native(raw: dict | None) -> dict[str, Any]:
+    block = raw if isinstance(raw, dict) else {}
+    try:
+        page_seconds = float(block.get("page_seconds", 12))
+    except (TypeError, ValueError):
+        page_seconds = 12.0
+    page_seconds = max(4.0, min(60.0, page_seconds))
+    style = str(block.get("alert_style") or "marquee").strip().lower()
+    if style not in ("marquee", "page"):
+        style = "marquee"
+    return {"page_seconds": page_seconds, "alert_style": style}
+
+
+def _parse_weather_maps(raw: dict | None) -> dict[str, Any]:
+    """NWS RIDGE regional radar loop for the native Radar page."""
+    block = raw if isinstance(raw, dict) else {}
+    enabled = bool(block.get("enabled", True))
+    region = block.get("region")
+    region_s = str(region).strip().upper().replace(" ", "").replace("-", "") if region else ""
+    # Legacy station key kept for older configs; mosaics use region, not site.
+    station = block.get("station") or block.get("radar_station")
+    station_s = str(station).strip().upper() if station is not None else ""
+    if station_s and len(station_s) == 3:
+        station_s = "K" + station_s
+    try:
+        ttl = float(block.get("ttl_seconds", 300))
+    except (TypeError, ValueError):
+        ttl = 300.0
+    ttl = max(60.0, min(3600.0, ttl))
+    return {
+        "enabled": enabled,
+        "region": region_s or None,
+        "station": station_s or None,
+        "ttl_seconds": ttl,
     }
 
 
@@ -563,12 +640,39 @@ def _parse_weather(raw: dict | None) -> dict[str, Any]:
         latitude = None
         longitude = None
 
+    from .weather.resolve import normalize_provider
+
+    provider = normalize_provider(
+        weather.get("provider", defaults.get("provider", "native"))
+    )
+    base = weather.get("ws4kp_base_url", defaults.get("ws4kp_base_url"))
+    ws4kp_base_url = str(base or "https://weatherstar.netbymatt.com/").strip()
+    if not ws4kp_base_url.endswith("/"):
+        ws4kp_base_url += "/"
+
     return {
+        "provider": provider,
         "zip": _opt_str("zip"),
         "query": _opt_str("query"),
         "name": _opt_str("name"),
         "latitude": latitude,
         "longitude": longitude,
+        "ws4kp_base_url": ws4kp_base_url,
+        "music": _parse_weather_music(
+            weather.get("music")
+            if isinstance(weather.get("music"), dict)
+            else defaults.get("music")
+        ),
+        "native": _parse_weather_native(
+            weather.get("native")
+            if isinstance(weather.get("native"), dict)
+            else defaults.get("native")
+        ),
+        "maps": _parse_weather_maps(
+            weather.get("maps")
+            if isinstance(weather.get("maps"), dict)
+            else defaults.get("maps")
+        ),
         "screencast": _parse_weather_screencast(weather.get("screencast")),
     }
 
@@ -580,8 +684,8 @@ def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
     ``null`` / omitted means “use the site default” (typically all on) until
     the user changes them in the in-app menu.
 
-    ``playback_mode`` is ``live`` (Chrome screencast) or ``cached`` (site as
-    playlist oracle + temporary yt-dlp pair played via ffmpeg).
+    ``playback_mode`` defaults to ``cached`` (site as playlist oracle + temporary
+    yt-dlp pair played via ffmpeg). Set ``live`` for Chrome CDP screencast.
     """
     retro = raw or {}
     if not isinstance(retro, dict):
@@ -626,10 +730,10 @@ def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
     if volume_i is not None:
         volume_i = max(0, min(100, volume_i))
 
-    mode_raw = retro.get("playback_mode", defaults.get("playback_mode", "live"))
-    playback_mode = str(mode_raw or "live").strip().lower()
+    mode_raw = retro.get("playback_mode", defaults.get("playback_mode", "cached"))
+    playback_mode = str(mode_raw or "cached").strip().lower()
     if playback_mode not in ("live", "cached"):
-        playback_mode = "live"
+        playback_mode = "cached"
 
     cache_dir_raw = retro.get("cache_directory", defaults.get("cache_directory"))
     cache_directory = None
@@ -1147,17 +1251,35 @@ def _default_config() -> dict[str, Any]:
         },
         "features": _parse_features(None),
         "weather": {
+            "provider": "native",
             "zip": "02108",
             "query": None,
             "name": "Boston",
             "latitude": None,
             "longitude": None,
+            "ws4kp_base_url": "https://weatherstar.netbymatt.com/",
+            "music": {
+                "enabled": True,
+                "directory": None,
+                "announcements_directory": None,
+                "volume": 70,
+            },
+            "native": {
+                "page_seconds": 12,
+                "alert_style": "marquee",
+            },
+            "maps": {
+                "enabled": True,
+                "region": None,
+                "station": None,
+                "ttl_seconds": 300,
+            },
             "screencast": _parse_weather_screencast(None),
         },
         "retro_tv": {
             "filters": None,
             "volume": None,
-            "playback_mode": "live",
+            "playback_mode": "cached",
             "cache_directory": None,
         },
         "youtube_channels": _parse_youtube_channels(_default_youtube_channels()),

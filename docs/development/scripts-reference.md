@@ -14,6 +14,7 @@ All paths relative to the repo root. Most scripts re-exec with `sudo` when neede
 | `scripts/verify-remote-mounts.sh` | Docker-based Samba / SFTP / FTP mount + library scan smoke test |
 | `scripts/fetch-sample-media.sh` | Download SampleLib MP4/PNG clips into `sample/media-a` + `sample/media-b` for layout testing |
 | `scripts/fetch-kids-demo-media.sh` | Build a realistic split `shows/` + `movies/` kids demo tree (20–30s clips, CC posters) under `media/` |
+| `scripts/fetch-weather-music.sh` | Download ws4kp-music + weather.com/retro music & announcements into `weather/assets/` (also run by `install.sh` / `install-pi.sh`) |
 | `scripts/reinstall-pipx.sh` | Force-reinstall this checkout into pipx (`--editable`) so bare `tv-time-capsule` on PATH tracks `src/` |
 
 ## Mode & session

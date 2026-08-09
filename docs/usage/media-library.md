@@ -138,7 +138,7 @@ Shows not listed in `order` append alphabetically after the ordered ones.
 
 Configured YouTube channels appear on the show list like local folders. By default, season **All Videos** is the channel uploads tab and other seasons are public playlists. Set ``playlists_as_shows`` / ``playlist_shows`` on a channel to unroll selected playlists into distinct shows (group related playlists such as Ghostwriter Season 1–3 into one multi-season show). Use ``include_playlists`` to keep a single channel show but only chosen playlist seasons. A playlist URL (or `watch?…&list=`) becomes a single-season show. Dial numbers follow the same auto-numbering / web-admin lineup as disk shows.
 
-**Playback backends:** by default (`youtube.playback_mode: live`) episodes open in headless Chrome. With `youtube.cache.enabled`, yt-dlp fills a forever offline tree; `prefer_cache` / `cached_only` play those files via ffmpeg (crop/zoom matches live when a crop cache entry exists). Fill on a desktop/NAS with `tv-time-capsule --youtube-cache-sync`, then point weak Pis at the same `youtube.cache.directory`.
+**Playback backends:** by default (`youtube.playback_mode: prefer_cache` + `youtube.cache.enabled: true`) episodes play from the forever yt-dlp tree when present and fall back to live Chrome on a miss. Set `playback_mode: live` to force Chrome always; `cached_only` blocks uncached titles (Pi 1 / Zero). Crop/zoom matches live when a crop cache entry exists. Fill on a desktop/NAS with `tv-time-capsule --youtube-cache-sync`, then point weak Pis at the same `youtube.cache.directory`. See [Native weather & cached defaults](native-cached-defaults.md).
 
 Disable the feature entirely with `features.youtube: false`.
 

@@ -97,11 +97,11 @@
     "cache_before_playing": false
   },
   "youtube": {
-    "_about": "Backends: live Chrome vs forever file cache. Crop/zoom parity is planned. Requires youtube_channels.",
-    "playback_mode": "live",
+    "_about": "DEFAULT: prefer_cache + cache.enabled (file when present, live Chrome on miss). Set playback_mode=live to force Chrome always; cached_only for Pi 1/Zero. See docs/usage/native-cached-defaults.md.",
+    "playback_mode": "prefer_cache",
     "cache": {
-      "_about": "Forever yt-dlp cache (local or NAS). directory null = first writable media_paths entry (else ~/.local/share/.../youtube-offline). Prefer fill on desktop then mount on weak Pis. max_bytes null = never delete. layout season_folders matches Show/s01/S01E01 - Title [id].mp4; flat omits the season folder. Press Y in browse to priority-cache the selected show/season/episode now.",
-      "enabled": false,
+      "_about": "Forever yt-dlp cache (local or NAS). DEFAULT enabled. directory null = first writable media_paths entry (else ~/.local/share/.../youtube-offline). Prefer fill on desktop then mount on weak Pis. max_bytes null = never delete. layout season_folders matches Show/s01/S01E01 - Title [id].mp4; flat omits the season folder. Press Y in browse to priority-cache the selected show/season/episode now. Set enabled=false to disable background fills (live still works).",
+      "enabled": true,
       "directory": null,
       "max_bytes": null,
       "download_when_idle": true,
@@ -109,7 +109,7 @@
       "idle_gap_seconds": 60,
       "rate_limit_cooldown_seconds": 1800,
       "exclude_unavailable": false,
-      "format": "bv*[height<=720]+ba/b[height<=720]/b",
+      "format": "bv*[height<=480]+ba/b[height<=480]/bv*[height<=360]+ba/b[height<=360]/bv*[height<=720]+ba/b[height<=720]/b",
       "layout": "season_folders",
       "batch_size": 1
     }
@@ -200,26 +200,45 @@
     "youtube": true
   },
   "weather": {
-    "_about": "Optional forecast location for dial 004 (weather.com/retro). Headless Pi has no GPS and often wrong GeoIP \u2014 set a zip or city. latitude+longitude override zip/query when both are set. Default: Boston, MA.",
+    "_about": "DEFAULT provider=native (custom pygame Retro Weather; no Chromium). Live screencast opt-in: twc (weather.com/retro) or ws4kp (WeatherStar 4000+). auto also resolves to native. Headless Pi has no GPS — set zip/city. latitude+longitude override zip/query when both are set. Default location: Boston, MA. See docs/usage/native-cached-defaults.md.",
     "zip": "02108",
     "query": null,
     "name": "Boston",
     "latitude": null,
     "longitude": null,
     "screencast": {
-      "_about": "auto = adapt FPS/quality/resolution from measured latency. Oldest Pis may land at 1\u20132 FPS. mode=fixed + target_fps for testing.",
+      "_about": "Only used by live providers (twc/ws4kp). auto = adapt FPS/quality/resolution from CDP frame latency + UI present FPS/blit cost (and Linux loadavg). Oldest Pis may land at 1\u20132 FPS; Chromium is required for live. mode=fixed + target_fps for testing. WS4KP ignores auto and stays at ws4kp_target_fps (default 4) — only the clock needs frequent updates.",
       "mode": "auto",
       "min_fps": 1,
       "max_fps": 15,
       "target_fps": null,
+      "ws4kp_target_fps": 4,
       "max_width": null,
       "max_height": null,
       "jpeg_quality": 80
+    },
+    "provider": "native",
+    "ws4kp_base_url": "https://weatherstar.netbymatt.com/",
+    "music": {
+      "enabled": true,
+      "directory": null,
+      "announcements_directory": null,
+      "volume": 70
+    },
+    "native": {
+      "page_seconds": 12,
+      "alert_style": "marquee"
+    },
+    "maps": {
+      "_about": "Native Radar page uses free NWS RIDGE regional loops (e.g. NORTHEAST_loop.gif) from radar.weather.gov/ridge/standard — no API key. Region is chosen from lat/lon (nearest mosaic); set region to override (NORTHEAST, CENTGRLAKES, SOUTHEAST, CONUS, …). Prefetched while Current is on screen.",
+      "enabled": true,
+      "region": null,
+      "ttl_seconds": 300
     }
   },
   "retro_tv": {
-    "_about": "MyRetroTVs decade streams (dial 1950-2009). playback_mode live = Chrome screencast; cached = site as playlist oracle + 2-slot temp yt-dlp + ffmpeg (recommended on Pi). filters maps box_* checkbox ids; volume is 0-100.",
-    "playback_mode": "live",
+    "_about": "MyRetroTVs decade streams (dial 1950-2009). DEFAULT playback_mode=cached (playlist oracle + 2-slot temp yt-dlp + ffmpeg). Set live for full Chrome CDP screencast. See docs/usage/native-cached-defaults.md. filters maps box_* checkbox ids; volume is 0-100.",
+    "playback_mode": "cached",
     "cache_directory": null,
     "filters": null,
     "volume": null
@@ -595,19 +614,23 @@
     "name": "Optional display name override for the location.",
     "latitude": "Optional; if set with longitude, used directly (overrides zip/query).",
     "longitude": "Optional; pair with latitude.",
-    "screencast.mode": "auto | fixed — auto adapts FPS/quality from latency (Pi-friendly)",
+    "provider": "DEFAULT native (custom pygame). Live opt-in: twc | ws4kp. auto → native",
+    "maps.enabled": "Native Radar page on/off (default true; uses free NWS RIDGE regional loops, no API key)",
+    "maps.region": "Optional mosaic id override (e.g. NORTHEAST, CENTGRLAKES); null = nearest from lat/lon",
+    "maps.ttl_seconds": "Radar loop cache lifetime (default 300)",
+    "screencast.mode": "Live providers only. auto | fixed — auto adapts FPS/quality from CDP latency + UI present FPS/blit",
     "screencast.min_fps": "Floor for auto adapt (default 1)",
     "screencast.max_fps": "Ceiling for auto adapt (default 15)",
     "screencast.target_fps": "When set (or mode=fixed), lock approximate FPS for testing",
     "screencast.jpeg_quality": "CDP JPEG quality 20–95 (default 80; auto may lower)"
   },
   "_features": {
-    "weather": "false removes dial 004 and never starts Weather Chrome (default true)",
+    "weather": "false removes dial 004 (default true). Native weather needs no Chromium; live twc/ws4kp do.",
     "retro_tv": "false removes decade dials / MyRetroTVs (default true)",
     "youtube": "false removes YouTube shows and catalog scrape (default true)"
   },
   "_retro_tv": {
-    "playback_mode": "live = Chrome screencast; cached = site as playlist oracle + 2-slot temp yt-dlp + ffmpeg (Pi-friendly)",
+    "playback_mode": "DEFAULT cached = playlist oracle + 2-slot temp yt-dlp + ffmpeg; live = full Chrome screencast (opt-in)",
     "cache_directory": "Temp root for cached mode (null = ~/.local/share/tv-time-capsule/retro-tv-cache/). Wiped when leaving Decades.",
     "filters": "box_* checkbox map; null = site default until changed in Enter menu",
     "volume": "0–100 media gain (null starts at 100)"
@@ -627,8 +650,8 @@
     "cache_before_playing": "Wait on the now-playing title screen with a progress bar until the episode is fully cached (default false; avoids mid-playback cache switch)"
   },
   "_youtube": {
-    "playback_mode": "live | prefer_cache | cached_only — live always uses Chrome; prefer_cache plays a yt-dlp file when present; cached_only blocks uncached episodes (Pi 1 / Zero)",
-    "cache.enabled": "Download configured channels into a forever tree via yt-dlp (default false). Distinct from playback cache above.",
+    "playback_mode": "DEFAULT prefer_cache (file when present, live Chrome on miss). live = always Chrome; cached_only = block uncached (Pi 1 / Zero)",
+    "cache.enabled": "Download configured channels into a forever tree via yt-dlp (DEFAULT true). Set false to disable fills; live still works on prefer_cache miss. Distinct from playback cache above.",
     "cache.directory": "Offline tree root (null = first writable media_paths entry; else state dir fallback). Point at NAS for shared Pi fills.",
     "cache.max_bytes": "Optional soft cap; null = forever (never delete completed files). When set, new downloads are skipped once over budget.",
     "cache.download_when_idle": "Background fills while browsing/menus/screensaver after idle_seconds without input (paused during PLAYING / Weather / Retro). Priority Y/Enter still runs immediately (unless rate-limited).",
@@ -636,7 +659,7 @@
     "cache.idle_gap_seconds": "Pause between background idle batches (default 60). Priority Y/Enter skips this gap.",
     "cache.rate_limit_cooldown_seconds": "After a bot/429 block, pause ALL cache downloads for this many seconds (default 1800). Escalates on repeat hits up to 6h.",
     "cache.exclude_unavailable": "When true, hide YouTube episodes marked UNAVAILABLE from browse/play counts (alias: excludeUnavailable). Press Y to clear a skip and retry while they remain visible.",
-    "cache.format": "yt-dlp format string (default 720p max)",
+    "cache.format": "yt-dlp format string — default prefers ≤480p for the 640×480 canvas (then ≤360, then ≤720)",
     "cache.layout": "season_folders = Show/s01/S01E01 - Title [id].mp4 (library parity); flat = Show/S01E01 - Title [id].mp4",
     "cache.batch_size": "Concurrent yt-dlp downloads (1–8, default 1). Raise to 2–4 if YouTube throttles single connections."
   },

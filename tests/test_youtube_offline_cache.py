@@ -179,8 +179,8 @@ class ConfigYoutubeTests(unittest.TestCase):
     def test_defaults(self):
         cfg = parse_config({})
         yt = cfg["youtube"]
-        self.assertEqual(yt["playback_mode"], "live")
-        self.assertFalse(yt["cache"]["enabled"])
+        self.assertEqual(yt["playback_mode"], "prefer_cache")
+        self.assertTrue(yt["cache"]["enabled"])
         self.assertIsNone(yt["cache"]["max_bytes"])
         self.assertTrue(yt["cache"]["download_when_idle"])
         self.assertEqual(yt["cache"]["idle_seconds"], 30)

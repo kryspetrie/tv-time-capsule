@@ -83,7 +83,7 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies", "weather"])
         self.assertIsNone(cfg["retro_tv"]["filters"])
         self.assertIsNone(cfg["retro_tv"]["volume"])
-        self.assertEqual(cfg["retro_tv"]["playback_mode"], "live")
+        self.assertEqual(cfg["retro_tv"]["playback_mode"], "cached")
         self.assertIsNone(cfg["retro_tv"]["cache_directory"])
         self.assertGreaterEqual(len(cfg["youtube_channels"]), 10)
         self.assertTrue(

@@ -33,7 +33,12 @@ LOG = logging.getLogger(__name__)
 
 MANIFEST_NAME = ".manifest.json"
 MANIFEST_VERSION = 1
-DEFAULT_FORMAT = "bv*[height<=720]+ba/b[height<=720]/b"
+# Prefer SD (~480p) for the 640×480 UI — smaller downloads, no wasted HD.
+DEFAULT_FORMAT = (
+    "bv*[height<=480]+ba/b[height<=480]/"
+    "bv*[height<=360]+ba/b[height<=360]/"
+    "bv*[height<=720]+ba/b[height<=720]/b"
+)
 DEFAULT_IDLE_SECONDS = 30
 PART_SUFFIX = ".part"
 
@@ -284,19 +289,23 @@ def resolve_playback_backend(
     file_present: bool,
 ) -> PlaybackBackend:
     """Map ``playback_mode`` + cache hit to file / live / blocked."""
-    mode = (playback_mode or "live").strip().lower()
+    mode = (playback_mode or "prefer_cache").strip().lower()
     if mode == "live":
         return "live"
     if file_present:
         return "file"
     if mode == "cached_only":
         return "blocked"
-    # prefer_cache (default hybrid) and unknown → live on miss
+    # prefer_cache (default) and unknown → live Chrome on cache miss
     return "live"
 
 
 class YoutubeOfflineCache:
-    """Disk layout + optional idle yt-dlp worker for configured channels."""
+    """Disk layout + idle yt-dlp worker for configured channels.
+
+    Adapter for :class:`tv_time_capsule.playback.ports.EpisodeOfflineCache`.
+    Default config enables fills and ``prefer_cache`` playback (live Chrome on miss).
+    """
 
     def __init__(self, config: dict[str, Any]):
         yt = config.get("youtube") or {}
@@ -306,11 +315,11 @@ class YoutubeOfflineCache:
         if not isinstance(cache_cfg, dict):
             cache_cfg = {}
 
-        self.playback_mode = str(yt.get("playback_mode") or "live").strip().lower()
+        self.playback_mode = str(yt.get("playback_mode") or "prefer_cache").strip().lower()
         if self.playback_mode not in ("live", "prefer_cache", "cached_only"):
-            self.playback_mode = "live"
+            self.playback_mode = "prefer_cache"
 
-        self.enabled = bool(cache_cfg.get("enabled", False))
+        self.enabled = bool(cache_cfg.get("enabled", True))
         self.download_when_idle = bool(cache_cfg.get("download_when_idle", True))
         try:
             self.idle_seconds = max(5, int(cache_cfg.get("idle_seconds", DEFAULT_IDLE_SECONDS)))

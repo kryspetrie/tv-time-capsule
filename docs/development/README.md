@@ -5,8 +5,9 @@ Docs for working on the TV Time Capsule codebase. For running the app as an oper
 ## Contents
 
 1. [Development setup](setup.md) — Poetry, running locally  
-2. [Architecture](architecture.md) — runtime flow, Pi vs desktop  
+2. [Architecture](architecture.md) — runtime flow, ports/adapters, Pi vs desktop  
 3. [Module map](modules.md) — package layout and responsibilities  
+3a. [Native weather & cached defaults](../usage/native-cached-defaults.md) — product defaults + live opt-in (operator + architecture)  
 4. [Packaging & release](packaging.md) — Poetry, pipx, wheels, assets  
 5. [Scripts reference](scripts-reference.md) — `scripts/` and `install-pi.sh`  
 6. [Remote mount testing](remote-mount-testing.md) — local Docker harness for Samba / SFTP / FTP  

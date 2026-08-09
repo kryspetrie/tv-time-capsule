@@ -13,6 +13,7 @@ git clone git@github.com:kryspetrie/tv-time-capsule.git
 cd tv-time-capsule
 poetry install
 ./scripts/ensure-pygame-mixer.sh
+./scripts/fetch-weather-music.sh   # native Retro Weather background tracks
 ```
 
 ## Run

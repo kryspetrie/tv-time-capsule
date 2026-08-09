@@ -44,7 +44,11 @@ def resolve_retro_tv_cache_dir(config: dict[str, Any] | None) -> Path:
 
 
 class RetroTvTempCache:
-    """Rolling pair of yt-dlp files for one Decades session."""
+    """Rolling pair of yt-dlp files for one Decades session.
+
+    Adapter for :class:`tv_time_capsule.playback.ports.RollingClipCache`.
+    Used when ``retro_tv.playback_mode`` is ``cached`` (the default).
+    """
 
     def __init__(
         self,

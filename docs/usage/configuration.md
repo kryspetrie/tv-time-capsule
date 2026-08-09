@@ -496,6 +496,8 @@ Legacy seasons with a single `ep` field (highest completed in order) migrate to 
 
 Episode list labels: **NEXT** (first unwatched), **RESUME** (bookmark), **WATCHED** (completed). Season list shows `21 eps` and `E-05 next` when applicable. Tap **R** on an episode to clear its watched flag and bookmark; hold **R** to rescan the library.
 
+> **Defaults:** the app ships **native Weather**, **YouTube `prefer_cache` + offline fills**, and **Decades `cached`**. Live Chrome modes stay fully supported — see [Native weather & cached defaults](native-cached-defaults.md).
+
 ## `retro_tv`
 
 Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated automatically when you change channel types or volume in-app.
@@ -503,7 +505,7 @@ Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated 
 ```json
 {
   "retro_tv": {
-    "playback_mode": "live",
+    "playback_mode": "cached",
     "cache_directory": null,
     "filters": {
       "box_c": true,
@@ -529,12 +531,12 @@ Preferences for MyRetroTVs decade streams (dial years **1950–2009**). Updated 
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `playback_mode` | `live` | `live` = Chrome CDP screencast (desktop). `cached` = drive the site only to discover YouTube ids, download a rolling pair of clips with yt-dlp, play via ffmpeg (much lighter on Raspberry Pi). |
+| `playback_mode` | **`cached`** | `cached` = site as playlist oracle + rolling yt-dlp pair + ffmpeg (**default**). `live` = full Chrome CDP screencast (opt-in). |
 | `cache_directory` | `null` | Temp tree root for `cached` mode (`null` → `~/.local/share/tv-time-capsule/retro-tv-cache/`). Wiped per decade when you leave Decades — never the forever YouTube offline cache. |
 | `filters` | `null` | Map of checkbox ids (`box_c` = Cartoons, `box_s` = Comedy, …) to on/off. `null` leaves the site default (all on) until you change them. Shared across all decades. |
 | `volume` | `null` | Last media gain 0–100. `null` starts at 100. |
 
-See [Fun tweaks & easter eggs → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
+See [Native weather & cached defaults](native-cached-defaults.md) and [Fun tweaks → MyRetroTVs](fun-tweaks-and-easter-eggs.md#myretrotvs-decades-19502009).
 
 ## `youtube_title_rules`
 
@@ -595,11 +597,11 @@ Master switches. When false, the feature is removed from dials/help and Chrome i
 
 ## `youtube_channels`
 
-List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Per-video pillarbox crop decisions from playback are cached under `youtube/crops/` for 30 days so replaying an episode skips the load-time crop probe. Press **T** during playback to toggle zoom on/off for that episode (persisted in the crop cache). Long-press **R** / admin rescan refreshes the catalog cache. By default, playback opens `youtube.com/watch?v=…` in Chrome CDP screencast (requires Chrome/Chromium, same as Weather and Retro TV).
+List YouTube channels (or a specific playlist URL) as virtual shows on the normal browse list. Catalog is scraped via headless Chrome (no API key) and cached under `~/.local/share/tv-time-capsule/youtube/` (about 24 hours). Per-video pillarbox crop decisions from playback are cached under `youtube/crops/` for 30 days so replaying an episode skips the load-time crop probe. Press **T** during playback to toggle zoom on/off for that episode (persisted in the crop cache). Long-press **R** / admin rescan refreshes the catalog cache. **Default playback** uses a forever yt-dlp file when present (`prefer_cache`), and falls back to Chrome live on a miss. Force Chrome always with `playback_mode: live`.
 
 ### `youtube` (playback mode + forever offline cache)
 
-Optional dual-backend settings. Distinct from the remote-mount **`cache`** block (NFS/SMB copy).
+Dual-backend settings (file cache + live Chrome). Distinct from the remote-mount **`cache`** block (NFS/SMB copy). Defaults are documented in [Native weather & cached defaults](native-cached-defaults.md).
 
 ```json
 {
@@ -614,7 +616,7 @@ Optional dual-backend settings. Distinct from the remote-mount **`cache`** block
       "idle_gap_seconds": 60,
       "rate_limit_cooldown_seconds": 1800,
       "exclude_unavailable": false,
-      "format": "bv*[height<=720]+ba/b[height<=720]/b"
+      "format": "bv*[height<=480]+ba/b[height<=480]/bv*[height<=360]+ba/b[height<=360]/bv*[height<=720]+ba/b[height<=720]/b"
     }
   }
 }
@@ -622,8 +624,8 @@ Optional dual-backend settings. Distinct from the remote-mount **`cache`** block
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `playback_mode` | `live` | `live` always uses Chrome; `prefer_cache` plays a yt-dlp file when present else live; `cached_only` blocks uncached episodes (Pi 1 / Zero) |
-| `cache.enabled` | `false` | Download configured channels into a forever tree via yt-dlp |
+| `playback_mode` | **`prefer_cache`** | File when present, else **live Chrome**. `live` always uses Chrome; `cached_only` blocks uncached episodes (Pi 1 / Zero) |
+| `cache.enabled` | **`true`** | Download configured channels into a forever tree via yt-dlp. Set `false` to disable fills (live fallback still works under `prefer_cache`) |
 | `cache.directory` | first writable `media_paths` entry | Offline tree root (null → first writable media path, usually `/media/usb`; falls back to `~/.local/share/tv-time-capsule/youtube-offline` if media is missing/unwritable). Layout matches the local library: `Show/s01/S01E01 - Title [id].mp4`. Override to a NAS path to fill once and play everywhere |
 | `cache.max_bytes` | `null` | Soft cap; `null` never deletes completed files. When set, new downloads are skipped once over budget |
 | `cache.download_when_idle` | `true` | Background downloads while browsing/menus/screensaver (paused during PLAYING / Weather / Retro). Priority cache-now (Y / Enter on miss) still runs immediately unless rate-limited |
@@ -631,7 +633,7 @@ Optional dual-backend settings. Distinct from the remote-mount **`cache`** block
 | `cache.idle_gap_seconds` | `60` | Seconds to wait between background idle batches (does not apply to priority Y/Enter) |
 | `cache.rate_limit_cooldown_seconds` | `1800` | After a bot / HTTP 429 style block, pause **all** cache downloads for this long (escalates on repeat hits, capped at 6h). Queued priority jobs resume when the cooldown ends |
 | `cache.exclude_unavailable` | `false` | Hide YouTube episodes marked **UNAVAILABLE** from browse lists and episode counts (alias `excludeUnavailable`). Leave false if you want to retry them with **Y** |
-| `cache.format` | 720p max | yt-dlp format string |
+| `cache.format` | **≤480p preferred** | yt-dlp format string. Default biases to the 640×480 canvas: best ≤480, then ≤360, then ≤720 — smallest practical file at SD quality |
 | `cache.layout` | `season_folders` | `season_folders` → `Show/sNN/SxxExx - Title [id].mp4`; `flat` → `Show/SxxExx - Title [id].mp4` (no season subfolder) |
 | `cache.batch_size` | `1` | Concurrent yt-dlp downloads (clamped 1–8). Raise to 2–4 when a single connection is throttled |
 
@@ -641,7 +643,9 @@ Optional dual-backend settings. Distinct from the remote-mount **`cache`** block
 
 See also [Pi offline YouTube plan](../development/pi-features-offline-youtube-plan.md).
 
-Weather screencast knobs live under `weather.screencast` (`mode`, `min_fps`, `max_fps`, `target_fps`, `jpeg_quality`) — see `config.example.json` `_weather` comments and [Raspberry Pi profiles](raspberry-pi.md#device-profiles-features--youtube-cache).
+Weather lives under `weather`: **`provider` defaults to `native`** (custom pygame Retro Weather). Also `auto` (→ native), `twc`, `ws4kp`. Location fields, optional `ws4kp_base_url`, `music`, `native` (`page_seconds`, `alert_style` = `marquee`|`page`), `maps` (Radar page), and screencast knobs for **live** providers only. While watching Weather, **Enter / Space** opens an in-app provider picker that writes `weather.provider` and restarts the channel — choose `twc` / `ws4kp` to enable live Chrome. Native music + RetroCast announcements are fetched on install via `scripts/fetch-weather-music.sh`; override with `weather.music.directory` / `weather.music.announcements_directory`. Full guide: [Native weather & cached defaults](native-cached-defaults.md).
+
+**Native Radar page** (`weather.maps`): free [NWS RIDGE regional loops](https://radar.weather.gov/) such as `radar.weather.gov/ridge/standard/NORTHEAST_loop.gif` — **no API key**. The mosaic sector is chosen from your lat/lon (nearest region; override with `maps.region`, e.g. `NORTHEAST`, `CENTGRLAKES`, `CONUS`). The loop is prefetched while the Current page is on screen, then animated on Radar. If a stale on-disk loop is shown, the lower-thirds bar shows `cached`. Live screencast providers (`twc` / `ws4kp`) still need Chromium. See `config.example.json` and [Raspberry Pi profiles](raspberry-pi.md#device-profiles-features--youtube-cache).
 
 **Channel numbers** work like local shows: auto 1-based position in the ordered lineup, with optional overrides via `channels.order` / `channels.numbers` or the web admin **Channel lineup** page.
 

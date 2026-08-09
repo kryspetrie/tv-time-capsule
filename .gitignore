@@ -28,3 +28,9 @@ media/
 sample/.cache/
 scripts/mount-test/media/
 scripts/mount-test/.ssh/
+
+# Downloaded weather music / announcements (see scripts/fetch-weather-music.sh)
+src/tv_time_capsule/weather/assets/music/*.mp3
+src/tv_time_capsule/weather/assets/music/*.mp3.tmp
+src/tv_time_capsule/weather/assets/announcements/*.mp3
+src/tv_time_capsule/weather/assets/announcements/*.mp3.tmp

@@ -113,6 +113,25 @@ echo -e "${CYAN}Ensuring pygame includes SDL_mixer (channel snow audio)...${NC}"
 "$SCRIPT_DIR/scripts/ensure-pygame-mixer.sh" || true
 
 echo ""
+echo -e "${CYAN}Downloading weather music assets (ws4kp-music)...${NC}"
+FETCH_PY=""
+if [[ "$USE_VENV" -eq 1 && -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
+    FETCH_PY="$SCRIPT_DIR/.venv/bin/python"
+elif command -v pipx >/dev/null 2>&1; then
+    PIPX_VENV="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+    if [[ -n "$PIPX_VENV" && -x "$PIPX_VENV/tv-time-capsule/bin/python" ]]; then
+        FETCH_PY="$PIPX_VENV/tv-time-capsule/bin/python"
+    fi
+fi
+if [[ -n "$FETCH_PY" ]]; then
+    "$SCRIPT_DIR/scripts/fetch-weather-music.sh" --python "$FETCH_PY" || \
+        echo -e "${YELLOW}Weather music download failed (native weather will be silent until fixed)${NC}"
+else
+    "$SCRIPT_DIR/scripts/fetch-weather-music.sh" || \
+        echo -e "${YELLOW}Weather music download failed (native weather will be silent until fixed)${NC}"
+fi
+
+echo ""
 echo -e "${CYAN}Next steps${NC}"
 echo "  tv-time-capsule --media-dir /path/to/media"
 echo "  Web admin:  http://${MDNS_HOSTNAME}.local:8765/ (when admin enabled)"

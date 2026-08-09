@@ -125,7 +125,9 @@ from .hidden_channels import (
     format_hidden_help_rows,
     hidden_channels_for_guide,
 )
-from .weather_channel import WeatherChannel, resolve_weather_location
+from .weather import WeatherSession
+from .weather.menu import WeatherMenu, WeatherMenuCommand, draw_weather_menu
+from .weather.resolve import normalize_provider
 from .retro_tv_channel import RetroTvChannel, url_for_decade
 from .retro_tv_cache import RetroTvTempCache
 from .retro_tv_menu import MenuCommand, RetroTvMenu, draw_retro_tv_menu
@@ -134,7 +136,8 @@ from .youtube_catalog import (
     load_youtube_shows,
     merge_youtube_channel_numbers,
 )
-from .youtube_offline_cache import YoutubeOfflineCache, is_idle_for_youtube_cache
+from .playback import create_episode_offline_cache
+from .youtube_offline_cache import is_idle_for_youtube_cache
 from .youtube_player import YouTubePlayer
 from .state import (
     clear_resume_ep,
@@ -308,7 +311,7 @@ class TVTimeCapsule:
         self._now_playing_splash_ms = int(splash_seconds * 1000)
         self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
         self._playback_cache = PlaybackCache(self.config)
-        self._yt_offline = YoutubeOfflineCache(self.config)
+        self._yt_offline = create_episode_offline_cache(self.config)
         self._yt_offline.set_shows_provider(lambda: self.shows)
         self._yt_offline_idle = False
         # Enter on uncached episode: play automatically when that id finishes caching
@@ -354,7 +357,8 @@ class TVTimeCapsule:
         )
         self._show_list_test_pattern: str | None = None
         self._hidden_channels_guide = False
-        self._weather_channel: WeatherChannel | None = None
+        self._weather_session: WeatherSession | None = None
+        self._weather_menu = WeatherMenu()
         self._retro_tv_channel: RetroTvChannel | None = None
         self._retro_tv_decade: str | None = None
         self._retro_tv_year_flash: str = ""
@@ -2841,12 +2845,13 @@ class TVTimeCapsule:
         letterboxing is handled only by :meth:`_ui_layout` when margins are set —
         we do not add a second aspect-ratio letterbox here.
         """
-        if self._weather_channel is None or not self._weather_channel.is_available():
+        if self._weather_session is None or not self._weather_session.is_available():
             self.screen.fill(C.BLACK)
             t = self.font_md.render("WEATHER UNAVAILABLE", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
-        frame = self._weather_channel.get_frame()
+        t0 = time.perf_counter()
+        frame = self._weather_session.get_frame()
         if frame is not None:
             # Full-bleed like embedded video: scale to the draw surface.
             # Prefer nearest-neighbor on weak ARM / when already near canvas size.
@@ -2869,26 +2874,133 @@ class TVTimeCapsule:
             self.screen.fill(C.BLACK)
             t = self.font_sm.render("LOADING...", True, self._dim_color())
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
+        blit_ms = (time.perf_counter() - t0) * 1000.0
+        try:
+            present_fps = float(self.clock.get_fps())
+        except Exception:
+            present_fps = 0.0
+        if present_fps > 0.05 and self._weather_session.needs_screencast_pacing:
+            self._weather_session.note_present_stats(present_fps, blit_ms)
+        self._draw_weather_menu_overlay()
         self.draw_volume_overlay()
 
+    def _draw_weather_menu_overlay(self) -> None:
+        """Draw Weather provider picker when open."""
+        if not self._weather_menu.is_open:
+            return
+        weather = self.config.get("weather") or {}
+        draw_weather_menu(
+            self.screen,
+            font_md=self.font_md,
+            font_sm=self.font_sm,
+            dim_color=self._dim_color(),
+            menu=self._weather_menu,
+            current=weather.get("provider"),
+        )
+
+    def _persist_weather_provider(self, provider: str) -> None:
+        """Write ``weather.provider`` to config."""
+        weather = dict(self.config.get("weather") or {})
+        weather["provider"] = provider
+        self.config["weather"] = weather
+        save_config(self.config)
+
+    def _restart_weather_session(self) -> None:
+        """Stop and re-boot Weather while staying on channel 004."""
+        if self._weather_session is not None:
+            self._weather_session.stop()
+            self._weather_session = None
+
+        if self._channel_fx.snow_enabled:
+            self._channel_fx.trigger()
+            self._paint_weather_tune_frame()
+            self.present()
+
+        result: dict = {"ok": False}
+
+        def _boot() -> None:
+            try:
+                self._weather_session = WeatherSession.from_config(
+                    self.config,
+                    width=self.canvas_w,
+                    height=self.canvas_h,
+                )
+                result["ok"] = bool(self._weather_session.start())
+            except Exception:
+                LOG.exception("Weather channel restart failed")
+                result["ok"] = False
+
+        boot = threading.Thread(target=_boot, daemon=True, name="weather-restart")
+        boot.start()
+
+        min_ms = FX_DURATION_MS
+        max_ms = 45_000
+        t0 = pygame.time.get_ticks()
+        while True:
+            pygame.event.pump()
+            elapsed = pygame.time.get_ticks() - t0
+            if self._channel_fx.snow_enabled:
+                self._channel_fx.extend()
+            self._paint_weather_tune_frame()
+            self.present()
+            self.clock.tick(60)
+            if not boot.is_alive() and elapsed >= min_ms:
+                break
+            if elapsed >= max_ms:
+                break
+
+        boot.join(timeout=2.0)
+
+        if not result.get("ok") or (
+            self._weather_session is None or not self._weather_session.is_available()
+        ):
+            self.channel_error = "Weather Unavailable"
+            self.channel_error_time = pygame.time.get_ticks()
+            self._exit_weather_channel()
+
     def _process_weather_action(self, action: str | None) -> bool:
-        """Handle volume / back while weather is on. Returns True if action consumed."""
+        """Handle volume / menu / back while weather is on. Returns True if consumed."""
         if not action:
             return False
+
+        if self._weather_menu.is_open:
+            for cmd in self._weather_menu.handle(action):
+                self._dispatch_weather_menu_command(cmd)
+            return True
+
+        if action == "select":
+            weather = self.config.get("weather") or {}
+            self._weather_menu.open(weather.get("provider"))
+            return True
         if action == "up":
-            if self._weather_channel is not None:
-                self._weather_channel.adjust_volume(10)
+            if self._weather_session is not None:
+                self._weather_session.adjust_volume(10)
                 self.volume_overlay_timer = pygame.time.get_ticks()
             return True
         if action == "down":
-            if self._weather_channel is not None:
-                self._weather_channel.adjust_volume(-10)
+            if self._weather_session is not None:
+                self._weather_session.adjust_volume(-10)
                 self.volume_overlay_timer = pygame.time.get_ticks()
             return True
         if action == "back":
             self._exit_weather_channel()
             return True
         return False
+
+    def _dispatch_weather_menu_command(self, cmd: WeatherMenuCommand) -> None:
+        """Apply a :class:`WeatherMenuCommand` from the Weather menu module."""
+        if cmd.kind == "close":
+            return
+        if cmd.kind != "set_provider" or not cmd.provider:
+            return
+        weather = self.config.get("weather") or {}
+        current = normalize_provider(weather.get("provider"))
+        if current == cmd.provider:
+            return
+        self._persist_weather_provider(cmd.provider)
+        self.channel_flash = cmd.provider.upper()[:8]
+        self.channel_flash_time = pygame.time.get_ticks()
+        self._restart_weather_session()
 
     def _secret_dial_allowed(self) -> bool:
         """Easter-egg number codes (parent mode, non-modal screens)."""
@@ -2922,10 +3034,10 @@ class TVTimeCapsule:
         return True
 
     def _enter_weather_channel(self) -> None:
-        """Switch to the Weather Channel (Chrome-embedded weather.com/retro).
+        """Switch to the Weather Channel (provider from config).
 
-        Snow / static starts *immediately* and keeps animating while Chrome
-        boots on a background thread (no main-thread network / CDP wait).
+        Snow / static starts *immediately* and keeps animating while the
+        provider boots on a background thread (no main-thread network wait).
         """
         if not self._feature_enabled("weather"):
             self.channel_error = "Ch 004 Not Found"
@@ -2938,19 +3050,20 @@ class TVTimeCapsule:
 
         self._clear_hidden_channels_guide()
         self._clear_show_list_test_pattern()
+        self._weather_menu.close()
         if self.view != self.WEATHER:
             self._weather_previous_view = self.view
         self.view = self.WEATHER
         self.channel_flash = "004"
         self.channel_flash_time = pygame.time.get_ticks()
 
-        # Instant tuning feedback *before* location resolve / Chrome launch.
+        # Instant tuning feedback *before* location resolve / provider launch.
         if self._channel_fx.snow_enabled:
             self._channel_fx.trigger()
             self._paint_weather_tune_frame()
             self.present()
 
-        if self._weather_channel is not None and self._weather_channel.is_available():
+        if self._weather_session is not None and self._weather_session.is_available():
             self._animate_channel_snow_burst()
             return
 
@@ -2958,16 +3071,13 @@ class TVTimeCapsule:
 
         def _boot() -> None:
             try:
-                if self._weather_channel is None:
-                    weather_cfg = self.config.get("weather") or {}
-                    location = resolve_weather_location(weather_cfg)
-                    self._weather_channel = WeatherChannel(
-                        self.canvas_w,
-                        self.canvas_h,
-                        location=location,
-                        screencast=weather_cfg.get("screencast"),
+                if self._weather_session is None:
+                    self._weather_session = WeatherSession.from_config(
+                        self.config,
+                        width=self.canvas_w,
+                        height=self.canvas_h,
                     )
-                result["ok"] = bool(self._weather_channel.start())
+                result["ok"] = bool(self._weather_session.start())
             except Exception:
                 LOG.exception("Weather channel start failed")
                 result["ok"] = False
@@ -2998,7 +3108,7 @@ class TVTimeCapsule:
         boot.join(timeout=2.0)
 
         if not result.get("ok") or (
-            self._weather_channel is None or not self._weather_channel.is_available()
+            self._weather_session is None or not self._weather_session.is_available()
         ):
             self.channel_error = "Weather Unavailable"
             self.channel_error_time = pygame.time.get_ticks()
@@ -3017,12 +3127,15 @@ class TVTimeCapsule:
                 self._draw_rescan_banner()
         if self._channel_fx.snow_enabled:
             self._channel_fx.draw(self.screen)
+        # On top of static while Weather boots / restarts.
+        self._draw_popup_banner("Loading Weather...")
 
     def _exit_weather_channel(self) -> None:
         """Leave the Weather Channel and return to the previous browse view."""
-        if self._weather_channel is not None:
-            self._weather_channel.stop()
-            self._weather_channel = None
+        self._weather_menu.close()
+        if self._weather_session is not None:
+            self._weather_session.stop()
+            self._weather_session = None
         self.view = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
 
     def _draw_retro_tv(self) -> None:
@@ -3230,7 +3343,7 @@ class TVTimeCapsule:
         self._stop_retro_tv_session(keep_view=True)
 
         retro_cfg = self.config.get("retro_tv") or {}
-        mode = str(retro_cfg.get("playback_mode") or "live").strip().lower()
+        mode = str(retro_cfg.get("playback_mode") or "cached").strip().lower()
         self._retro_tv_cached_mode = mode == "cached"
         # Pause forever-cache (idle + priority) so Decades can use yt-dlp/network.
         self._yt_offline.set_suspended(True)
@@ -5537,8 +5650,8 @@ class TVTimeCapsule:
     def draw_volume_overlay(self):
         """Simple retro volume bar — upper-right, below the metadata bar."""
         vol = None
-        if self.view == self.WEATHER and self._weather_channel is not None:
-            vol = min(self._weather_channel.volume, 100)
+        if self.view == self.WEATHER and self._weather_session is not None:
+            vol = min(self._weather_session.volume, 100)
         elif self.view == self.RETRO_TV and self._retro_tv_cached_mode and self._retro_tv_player is not None:
             vol = min(self._retro_tv_player.volume, 100)
         elif self.view == self.RETRO_TV and self._retro_tv_channel is not None:
@@ -8664,7 +8777,7 @@ class TVTimeCapsule:
         prev_yt = getattr(self, "_yt_offline", None)
         if prev_yt is not None:
             prev_yt.shutdown()
-        self._yt_offline = YoutubeOfflineCache(self.config)
+        self._yt_offline = create_episode_offline_cache(self.config)
         self._yt_offline.set_shows_provider(lambda: self.shows)
         self._yt_offline_idle = False
         if self._youtube_feature_enabled():
@@ -8978,9 +9091,9 @@ class TVTimeCapsule:
             self.player.stop()
         self._playback_cache.shutdown()
         self._yt_offline.shutdown()
-        if self._weather_channel is not None:
-            self._weather_channel.stop()
-            self._weather_channel = None
+        if self._weather_session is not None:
+            self._weather_session.stop()
+            self._weather_session = None
         self._stop_retro_tv_session(keep_view=True)
         if shutdown_snapshot is not None:
             self._channel_fx.play_shutdown(
@@ -9174,9 +9287,11 @@ class TVTimeCapsule:
                         if self.view == self.WEATHER:
                             digit = digit_for_key(self.keymap, event.key)
                             if digit is not None:
+                                if self._weather_menu.is_open:
+                                    continue
                                 self._append_dial_digit(digit)
                                 continue
-                            if key_action in ("up", "down", "back"):
+                            if key_action in ("up", "down", "select", "back"):
                                 self._process_weather_action(key_action)
                                 continue
                             if key_action == "quit":
@@ -9494,9 +9609,13 @@ class TVTimeCapsule:
                 else:
                     self.draw()
                     self.present()
-                if self.view == self.WEATHER and self._weather_channel is not None:
+                if (
+                    self.view == self.WEATHER
+                    and self._weather_session is not None
+                    and self._weather_session.needs_screencast_pacing
+                ):
                     try:
-                        fps = float(self._weather_channel.effective_fps)
+                        fps = float(self._weather_session.effective_fps)
                     except Exception:
                         fps = 10.0
                     self.clock.tick(max(1, min(30, int(round(fps)) + 2)))

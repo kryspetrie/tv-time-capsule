@@ -166,6 +166,11 @@ pip install --upgrade pip --quiet
 pip install "$INSTALL_DIR"
 TV_TIME_CAPSULE_VENV="$INSTALL_DIR/.venv" \
     "$SCRIPT_DIR/scripts/ensure-pygame-mixer.sh" || true
+
+echo -e "${CYAN}Downloading weather music assets (ws4kp-music)...${NC}"
+"$SCRIPT_DIR/scripts/fetch-weather-music.sh" --python "$INSTALL_DIR/.venv/bin/python" || \
+    echo -e "${YELLOW}Weather music download failed (native weather will be silent until fixed)${NC}"
+
 deactivate
 
 echo -e "${GREEN}✓${NC} Virtual environment created with tv-time-capsule"

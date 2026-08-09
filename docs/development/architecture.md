@@ -48,6 +48,43 @@ Recommended: Raspberry Pi OS **Desktop** image, operated mostly as **kiosk**:
 
 Switch to desktop mode when configuring Samba/Wi‑Fi UIs; switch back for daily TV use. See usage docs on [kiosk ↔ desktop](../usage/kiosk-desktop.md).
 
+## Ports & adapters
+
+Live Chrome and local/cached backends are swappable behind protocols. **Defaults prefer native weather and cached playback**; live modes remain first-class when enabled. Full operator guide: [Native weather & cached defaults](../usage/native-cached-defaults.md).
+
+```
+WeatherSession.from_config()
+  └─ WeatherPresenter (port)
+       ├─ NativePygamePresenter     ← default (provider=native|auto)
+       ├─ TwcScreencastPresenter    ← live opt-in (provider=twc)
+       └─ Ws4kpScreencastPresenter  ← live opt-in (provider=ws4kp)
+
+NativePygamePresenter
+  ├─ ForecastClient      → CachedForecastClient(ResilientForecastClient)
+  │                         NWS → Open-Meteo → MET Norway + disk last-good
+  ├─ AlertClient         → NwsAlertClient (~90s poll)
+  ├─ RadarLoopSource     → RidgeRadarLoopSource (regional RIDGE loops)
+  ├─ MusicPlayer         → PygameMusicPlayer
+  └─ PageAnnouncer       → AnnouncementPlayer
+
+create_episode_offline_cache()
+  └─ EpisodeOfflineCache → YoutubeOfflineCache
+       └─ resolve_playback_backend(prefer_cache|live|cached_only)
+            ├─ file  → EmbeddedPlayer / ffmpeg
+            └─ live  → youtube_player (Chrome CDP)
+
+retro_tv.playback_mode
+  ├─ cached (default) → RollingClipCache (RetroTvTempCache) + ffmpeg
+  └─ live             → retro_tv_channel Chrome screencast
+```
+
+| Package | Ports | Adapters |
+|---------|-------|----------|
+| `weather/ports.py` | `WeatherPresenter`, `ForecastClient`, `RadarLoopSource`, `MusicPlayer`, `PageAnnouncer`, `LocationResolver` | `weather/adapters/*` |
+| `playback/ports.py` | `EpisodeOfflineCache`, `RollingClipCache` | `youtube_offline_cache`, `retro_tv_cache` |
+
+App code should depend on ports/factories, not scrape adapter internals.
+
 ## Secrets
 
 Mount auth resolution order (simplified):

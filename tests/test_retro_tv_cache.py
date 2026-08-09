@@ -49,9 +49,9 @@ class YoutubeEmbedIdTests(unittest.TestCase):
 
 
 class RetroTvConfigTests(unittest.TestCase):
-    def test_default_live(self):
+    def test_default_cached(self):
         cfg = parse_config({})
-        self.assertEqual(cfg["retro_tv"]["playback_mode"], "live")
+        self.assertEqual(cfg["retro_tv"]["playback_mode"], "cached")
         self.assertIsNone(cfg["retro_tv"]["cache_directory"])
 
     def test_cached_mode(self):
@@ -63,7 +63,7 @@ class RetroTvConfigTests(unittest.TestCase):
 
     def test_invalid_mode_falls_back(self):
         cfg = parse_config({"retro_tv": {"playback_mode": "weird"}})
-        self.assertEqual(cfg["retro_tv"]["playback_mode"], "live")
+        self.assertEqual(cfg["retro_tv"]["playback_mode"], "cached")
 
 
 class RetroTvTempCacheTests(unittest.TestCase):
