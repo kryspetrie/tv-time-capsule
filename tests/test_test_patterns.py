@@ -122,11 +122,119 @@ class AnalogArtifactsTests(unittest.TestCase):
         self.assertEqual(self.screen.get_at((10, 10))[:3], (40, 80, 120))
 
     def test_can_trigger_and_apply(self):
-        fx = AnalogArtifacts(enabled=True, rate_per_minute=999)
-        with patch("pygame.time.get_ticks", side_effect=[0, 500, 1000]):
-            fx.tick()
+        fx = AnalogArtifacts(enabled=True, rate_per_minute=60)
+        with patch("pygame.time.get_ticks", side_effect=[0, 0, 10, 10, 500, 500]):
+            fx.tick()  # schedules first
+            fx.tick()  # may trigger
         if fx.is_active():
             fx.apply(self.screen)
+
+    def test_interval_scheduler_triggers_near_rate(self):
+        fx = AnalogArtifacts(enabled=True, rate_per_minute=60)
+        with patch("random.uniform", return_value=0.0):
+            fx._next_at = 0
+            with patch("pygame.time.get_ticks", return_value=0):
+                fx.tick()
+            self.assertGreater(fx._active_until, 0)
+            first_until = fx._active_until
+            fx._active_until = 0  # glitch finished
+            self.assertEqual(fx._next_at, 1000)  # mean 60/min → 1000ms
+            with patch("pygame.time.get_ticks", return_value=1000):
+                fx.tick()
+            self.assertGreater(fx._active_until, first_until)
+
+    def test_clamp_artifact_rate(self):
+        from tv_time_capsule.analog_artifacts import clamp_artifact_rate
+
+        self.assertEqual(clamp_artifact_rate(-1), 0.0)
+        self.assertEqual(clamp_artifact_rate(100), 60.0)
+        self.assertEqual(clamp_artifact_rate(12), 12.0)
+
+
+class AnalogArtifactsSurfaceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+
+    def _app(self):
+        from tv_time_capsule.app import TVTimeCapsule
+
+        return TVTimeCapsule(
+            ["./media"],
+            fullscreen=False,
+            admin=False,
+            analog_artifacts=True,
+            analog_artifact_rate=30,
+        )
+
+    def test_cli_rate_auto_enables(self):
+        from tv_time_capsule.app import TVTimeCapsule
+
+        app = TVTimeCapsule(
+            ["./media"],
+            fullscreen=False,
+            admin=False,
+            analog_artifacts=None,
+            analog_artifact_rate=30,
+        )
+        self.assertTrue(app._analog_artifacts.enabled)
+        self.assertEqual(app._analog_artifacts.rate_per_minute, 30.0)
+
+    def test_cli_no_artifacts_wins_over_rate(self):
+        from tv_time_capsule.app import TVTimeCapsule
+
+        app = TVTimeCapsule(
+            ["./media"],
+            fullscreen=False,
+            admin=False,
+            analog_artifacts=False,
+            analog_artifact_rate=30,
+        )
+        self.assertFalse(app._analog_artifacts.enabled)
+        self.assertEqual(app._analog_artifacts.rate_per_minute, 30.0)
+
+    def test_cli_rate_clamped(self):
+        from tv_time_capsule.app import TVTimeCapsule
+
+        app = TVTimeCapsule(
+            ["./media"],
+            fullscreen=False,
+            admin=False,
+            analog_artifact_rate=999,
+        )
+        self.assertEqual(app._analog_artifacts.rate_per_minute, 60.0)
+
+    def test_allowed_surfaces(self):
+        app = self._app()
+        for view_name in (
+            "SHOW_LIST",
+            "MOVIE_LIST",
+            "EPISODE_SELECT",
+            "SEASON_SELECT",
+            "LIBRARY_SELECT",
+            "WEATHER",
+        ):
+            with self.subTest(view=view_name):
+                app.view = getattr(app, view_name)
+                app._show_list_test_pattern = None
+                app._hidden_channels_guide = False
+                self.assertTrue(app._analog_artifacts_allowed())
+
+    def test_denied_on_playback_retro_and_easter_eggs(self):
+        app = self._app()
+        app.view = app.PLAYING
+        self.assertFalse(app._analog_artifacts_allowed())
+        app.view = app.RETRO_TV
+        self.assertFalse(app._analog_artifacts_allowed())
+        app.view = app.SHOW_LIST
+        app._show_list_test_pattern = "001"
+        self.assertFalse(app._analog_artifacts_allowed())
+        app._show_list_test_pattern = None
+        app._hidden_channels_guide = True
+        self.assertFalse(app._analog_artifacts_allowed())
 
 
 if __name__ == "__main__":

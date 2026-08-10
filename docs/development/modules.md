@@ -32,7 +32,7 @@ Package root: `src/tv_time_capsule/`.
 | `gamepad.py` | USB controller → logical navigation actions |
 | `channels.py` | Custom show order and display channel numbers |
 | `channel_fx.py` | Optional CRT snow burst on channel changes (pre-cached frames); shutdown collapse |
-| `analog_artifacts.py` | Optional random static / tear / roll on the show browser |
+| `analog_artifacts.py` | Optional random static / tear / roll on browse UI and Weather |
 | `safe_zone.py` | CRT overscan safe-zone parsing; extends framebuffer outside fixed 640×480 UI |
 | `dial_nav.py` | Numeric dial classification (`0` / `01`–`02` / `00` / `001`–`003` / channel) + page cursor helper |
 | `movie_nav.py` | Alphabet jump helpers (present letters, digit bands A–C … Y–Z/#) |

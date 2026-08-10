@@ -22,7 +22,7 @@ from .admin_api import (
     verify_media_path,
     verify_mount_entry,
 )
-from .analog_artifacts import AnalogArtifacts
+from .analog_artifacts import AnalogArtifacts, clamp_artifact_rate
 from .channel_fx import FX_DURATION_MS, ChannelChangeFX
 from .channels import build_channel_lineup, show_at_channel
 from .config import (
@@ -357,12 +357,15 @@ class TVTimeCapsule:
         )
         if analog_artifacts is not None:
             artifacts_on = bool(analog_artifacts)
+        elif analog_artifact_rate is not None and float(analog_artifact_rate) > 0:
+            # CLI rate alone turns glitches on (unless --no-analog-artifacts).
+            artifacts_on = True
         else:
             artifacts_on = bool(ui_cfg.get("analog_artifacts", False))
         if analog_artifact_rate is not None:
-            artifact_rate = float(analog_artifact_rate)
+            artifact_rate = clamp_artifact_rate(analog_artifact_rate)
         else:
-            artifact_rate = float(ui_cfg.get("analog_artifact_rate", 12))
+            artifact_rate = clamp_artifact_rate(ui_cfg.get("analog_artifact_rate", 12))
         self._analog_artifacts = AnalogArtifacts(
             enabled=artifacts_on,
             rate_per_minute=artifact_rate,
@@ -2791,10 +2794,19 @@ class TVTimeCapsule:
             return (ui.x, ui.y, ui.w, ui.h)
         return None
 
+    def _analog_artifacts_allowed(self) -> bool:
+        """True when CRT glitches may run (not video / Retro / easter eggs)."""
+        if self.view in (self.PLAYING, self.RETRO_TV):
+            return False
+        if self._show_list_test_pattern or self._hidden_channels_guide:
+            return False
+        return True
+
     def _apply_analog_artifacts(self) -> None:
-        if self.view == self.SHOW_LIST:
-            self._analog_artifacts.tick()
-            self._analog_artifacts.apply(self.screen)
+        if not self._analog_artifacts_allowed():
+            return
+        self._analog_artifacts.tick()
+        self._analog_artifacts.apply(self.screen)
 
     def _clear_show_list_test_pattern(self) -> None:
         self._show_list_test_pattern = None
@@ -2823,12 +2835,10 @@ class TVTimeCapsule:
         title_x = margin_x + dial_col_w + self.font_md.size("  ")[0]
         max_w = max(80, self.sw - title_x - margin_x)
 
-        header = self.font_lg.render("CH 000", True, C.GREEN)
         sub = self.font_md.render("SECRET CHANNELS", True, C.WHITE)
-        self.screen.blit(header, header.get_rect(centerx=self.sw // 2, y=36))
-        self.screen.blit(sub, sub.get_rect(centerx=self.sw // 2, y=96))
+        self.screen.blit(sub, sub.get_rect(centerx=self.sw // 2, y=40))
 
-        y = 168
+        y = 96
         line_gap = 2
         row_gap = 18
         for ch in channels:
@@ -3987,8 +3997,7 @@ class TVTimeCapsule:
             self.draw_gamepad_config(capturing=(self.view == self.GAMEPAD_CAPTURE))
         else:
             self._draw_browse_content()
-            if self.view == self.SHOW_LIST:
-                self._apply_analog_artifacts()
+            self._apply_analog_artifacts()
 
     def _animate_channel_snow_burst(self) -> None:
         """Run a fixed-length static burst so every tune feels the same."""
@@ -4405,8 +4414,7 @@ class TVTimeCapsule:
             self.draw_channel_overlay()
             self._draw_mode_toast()
             self._draw_rescan_banner()
-            if self.view == self.SHOW_LIST:
-                self._apply_analog_artifacts()
+            self._apply_analog_artifacts()
         self._apply_channel_fx()
 
     # ─── Channel overlay ─────────────────────────────────────────────────
@@ -5752,19 +5760,19 @@ class TVTimeCapsule:
         back = bind("back")
         number_section = (
             [
-                ("NUMBER KEYS", None),
-                ("channel / index", "type 1-999  (enters after ~1.5s)"),
-                ("back", "press 0"),
-                ("prev / next page", "press 01 / 02"),
-                ("alphabet jump", "press 00  or  " + bind("letter_menu")),
-                ("secret channels", "press 000  |  see Secrets page"),
+                ("DIAL", None),
+                ("channel / index", "1-999 (~1.5s)"),
+                ("back", "0"),
+                ("prev / next page", "01 / 02"),
+                ("alphabet jump", "00 or " + bind("letter_menu")),
+                ("secrets", "000 — Secrets page"),
             ]
             if device == "keyboard"
             else [
-                ("NUMBER KEYS", None),
-                ("channel / page codes", "use keyboard number keys"),
-                ("alphabet / kids / help", "keyboard only on this pad"),
-                ("secret channels", "use keyboard 000-004 or years  |  see Secrets"),
+                ("DIAL", None),
+                ("channel / page codes", "keyboard digits"),
+                ("alphabet / kids / help", "keyboard only"),
+                ("secrets", "keyboard 000+ — Secrets page"),
             ]
         )
         pages: list[tuple[str, list[tuple[str, str | None]]]] = [
@@ -5772,7 +5780,7 @@ class TVTimeCapsule:
                 "Overview",
                 [
                     ("ABOUT", None),
-                    ("what is this", "Cable-style browser for your show & movie library"),
+                    ("what is this", "Cable-style show & movie browser"),
                     ("open this help", bind("help")),
                     ("hide status bar", bind("footer_hints_toggle")),
                     ("kids / parent mode", bind("kids_mode_toggle")),
@@ -5784,17 +5792,13 @@ class TVTimeCapsule:
                 "Secrets",
                 [
                     *format_hidden_help_rows(),
-                    ("notes", "Works on library / show / movie browse (parent mode)"),
                     *(
-                        [("weather tip", "Set weather zip in config for dial 004")]
+                        [("weather", "zip in config; dial 004")]
                         if self._feature_enabled("weather")
                         else []
                     ),
                     *(
-                        [
-                            ("retro tip", "Dial any year 1950-2009 for MyRetroTVs"),
-                            ("retro menu", "Enter/Space toggles channel types"),
-                        ]
+                        [("retro", "dial 1950-2009; Enter = menu")]
                         if self._feature_enabled("retro_tv")
                         else []
                     ),
@@ -5803,15 +5807,15 @@ class TVTimeCapsule:
             (
                 "Library",
                 [
-                    ("SHOWS / MOVIES PICKER", None),
+                    ("HOME", None),
                     ("move", f"{up} / {down}"),
                     ("open", f"{select} or {right}"),
                     ("quit dialog", back),
                     (
                         "jump",
-                        "press 1 = Shows, 2 = Movies"
+                        "1 = Shows, 2 = Movies"
                         if device == "keyboard"
-                        else "keyboard number keys",
+                        else "keyboard digits",
                     ),
                 ],
             ),
@@ -5820,23 +5824,19 @@ class TVTimeCapsule:
                 [
                     ("SHOW LIST", None),
                     ("move", f"{up} / {down}"),
-                    ("open seasons", f"{select} or {right}"),
+                    ("open", f"{select} or {right}"),
                     (
                         "page",
-                        "01 previous  /  02 next"
-                        if device == "keyboard"
-                        else "keyboard 01 / 02",
+                        "01 / 02" if device == "keyboard" else "keyboard 01 / 02",
                     ),
-                    ("alphabet jump", bind("letter_menu")),
-                    ("tag for kids", bind("kids_tag_toggle")),
-                    ("reset watch / rescan", f"tap {bind('reset')} / hold"),
+                    ("letters", bind("letter_menu")),
+                    ("kids tag", bind("kids_tag_toggle")),
+                    ("reset / rescan", f"tap {bind('reset')} / hold"),
                     ("clear resume", bind("stop_clear")),
-                    ("cache YouTube now", bind("youtube_cache_now")),
+                    ("cache now", bind("youtube_cache_now")),
                     (
-                        "channel jump",
-                        "type the show channel number"
-                        if device == "keyboard"
-                        else "keyboard number keys",
+                        "channel",
+                        "type channel #" if device == "keyboard" else "keyboard digits",
                     ),
                 ],
             ),
@@ -5848,18 +5848,14 @@ class TVTimeCapsule:
                     ("play", f"{select} or {right}"),
                     (
                         "page",
-                        "01 previous  /  02 next"
-                        if device == "keyboard"
-                        else "keyboard 01 / 02",
+                        "01 / 02" if device == "keyboard" else "keyboard 01 / 02",
                     ),
-                    ("alphabet jump", bind("letter_menu")),
-                    ("tag for kids", bind("kids_tag_toggle")),
+                    ("letters", bind("letter_menu")),
+                    ("kids tag", bind("kids_tag_toggle")),
                     ("clear resume", bind("stop_clear")),
                     (
-                        "channel jump",
-                        "type the movie channel number"
-                        if device == "keyboard"
-                        else "keyboard number keys",
+                        "channel",
+                        "type channel #" if device == "keyboard" else "keyboard digits",
                     ),
                 ],
             ),
@@ -5868,23 +5864,21 @@ class TVTimeCapsule:
                 [
                     ("SEASON LIST", None),
                     ("move", f"{up} / {down}"),
-                    ("open episodes", f"{select} or {right}"),
-                    ("back to shows", f"{left} or {back}"),
+                    ("open", f"{select} or {right}"),
+                    ("back", f"{left} or {back}"),
                     (
                         "page",
-                        "01 previous  /  02 next"
-                        if device == "keyboard"
-                        else "keyboard 01 / 02",
+                        "01 / 02" if device == "keyboard" else "keyboard 01 / 02",
                     ),
                     (
                         "jump",
-                        "press season number on this page"
+                        "season # on page"
                         if device == "keyboard"
-                        else "keyboard number keys",
+                        else "keyboard digits",
                     ),
-                    ("reset season", bind("reset")),
+                    ("reset", bind("reset")),
                     ("clear resume", bind("stop_clear")),
-                    ("cache season now", bind("youtube_cache_now")),
+                    ("cache now", bind("youtube_cache_now")),
                 ],
             ),
             (
@@ -5893,45 +5887,40 @@ class TVTimeCapsule:
                     ("EPISODE LIST", None),
                     ("move", f"{up} / {down}"),
                     ("play", f"{select} or {right}"),
-                    ("back to seasons", f"{left} or {back}"),
+                    ("back", f"{left} or {back}"),
                     (
                         "page",
-                        "01 previous  /  02 next"
-                        if device == "keyboard"
-                        else "keyboard 01 / 02",
+                        "01 / 02" if device == "keyboard" else "keyboard 01 / 02",
                     ),
                     (
                         "jump",
-                        "press episode number on this page"
+                        "episode # on page"
                         if device == "keyboard"
-                        else "keyboard number keys",
+                        else "keyboard digits",
                     ),
-                    ("reset episode", bind("reset")),
+                    ("reset", bind("reset")),
                     ("clear resume", bind("stop_clear")),
-                    ("cache episode now", bind("youtube_cache_now")),
+                    ("cache now", bind("youtube_cache_now")),
                 ],
             ),
             (
                 "Playback",
                 [
-                    ("WHILE WATCHING", None),
+                    ("WATCHING", None),
                     ("volume", f"{up} / {down}"),
-                    ("seek +/-10s", f"{left} / {right}"),
+                    ("seek", f"{left} / {right} (±10s)"),
                     (
-                        "next / prev episode",
-                        f"double-tap {right}/{left} or {bind('next_episode')} / {bind('prev_episode')}",
+                        "skip ep",
+                        f"2× {right}/{left} or {bind('next_episode')}/{bind('prev_episode')}",
                     ),
                     ("pause", select),
                     (
-                        "stop (keep resume)",
-                        f"{back} or press 0" if device == "keyboard" else back,
+                        "stop",
+                        f"{back} / 0" if device == "keyboard" else back,
                     ),
-                    (
-                        "stop & clear resume",
-                        bind("stop_clear") + " (also clears resume on menus)",
-                    ),
+                    ("clear resume", bind("stop_clear")),
                     ("cancel cache", bind("cache_cancel")),
-                    ("toggle zoom", bind("zoom_toggle")),
+                    ("zoom", bind("zoom_toggle")),
                 ],
             ),
             (
@@ -5939,11 +5928,11 @@ class TVTimeCapsule:
                 [
                     ("SETUP", None),
                     ("rebind keys", bind("key_config")),
-                    ("gamepad setup", bind("gamepad_config")),
+                    ("gamepad", bind("gamepad_config")),
                     ("safe zone", bind("safe_zone")),
-                    ("status bar on/off", bind("footer_hints_toggle")),
-                    ("kids allowlist", "parent mode: " + bind("kids_tag_toggle")),
-                    ("kids card/full view", bind("kids_view_toggle")),
+                    ("status bar", bind("footer_hints_toggle")),
+                    ("kids tag", bind("kids_tag_toggle")),
+                    ("kids view", bind("kids_view_toggle")),
                 ],
             ),
         ]
@@ -5966,31 +5955,67 @@ class TVTimeCapsule:
         except ValueError:
             return 0
 
+    def _ellipsize_help_text(self, font, text: str, max_w: int) -> str:
+        """Trim ``text`` so its rendered width fits ``max_w``."""
+        text = text or ""
+        if max_w <= 0 or not text:
+            return ""
+        if font.size(text)[0] <= max_w:
+            return text
+        ell = "..."
+        if font.size(ell)[0] > max_w:
+            return ""
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if font.size(text[:mid] + ell)[0] <= max_w:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + ell if lo else ell
+
     def _splash_help_content_height(self, lines, section_gap):
         """Total height of the help menu text block (matches draw layout)."""
         y = 0
         first_section = True
+        left_x = 56
+        right_margin = 40
+        gap = 16
         for label, detail in lines:
             if detail is None:
                 if not first_section:
                     y += section_gap
                 first_section = False
-                y += self.font_sm.render(label, True, C.CYAN).get_height() + 6
+                y += self.font_sm.render(label, True, C.CYAN).get_height() + 4
             else:
                 lt = self.font_sm.render(label, True, C.WHITE)
-                dt = self.font_sm.render(detail, True, C.GREEN)
-                left_x = 70
-                right_x = self.sw - dt.get_width() - 70
-                if right_x < left_x + lt.get_width() + 20:
-                    y += lt.get_height() + 3 + dt.get_height() + 3
+                detail_budget = max(
+                    40, self.sw - left_x - lt.get_width() - gap - right_margin
+                )
+                detail_text = self._ellipsize_help_text(
+                    self.font_sm, detail, detail_budget
+                )
+                dt = self.font_sm.render(detail_text, True, C.GREEN)
+                right_x = self.sw - dt.get_width() - right_margin
+                if right_x < left_x + lt.get_width() + gap:
+                    y += lt.get_height() + 2
+                    full_w = max(40, self.sw - left_x - right_margin)
+                    detail_text = self._ellipsize_help_text(
+                        self.font_sm, detail, full_w
+                    )
+                    dt = self.font_sm.render(detail_text, True, C.GREEN)
+                    y += dt.get_height() + 2
                 else:
-                    y += max(lt.get_height(), dt.get_height()) + 4
+                    y += max(lt.get_height(), dt.get_height()) + 3
         return y
 
-    def _draw_help_lines(self, lines, y_start, content_max_y, section_gap=16) -> None:
+    def _draw_help_lines(self, lines, y_start, content_max_y, section_gap=10) -> None:
         y = y_start
         first_section = True
         hdr_font = self.font_md if self._large_text else self.font_sm
+        left_x = 56
+        right_margin = 40
+        gap = 16
         for label, detail in lines:
             if y >= content_max_y:
                 break
@@ -6001,26 +6026,40 @@ class TVTimeCapsule:
                 hdr = hdr_font.render(label, True, C.CYAN)
                 if y + hdr.get_height() > content_max_y:
                     break
-                self.screen.blit(hdr, (50, y))
-                y += hdr.get_height() + 6
+                self.screen.blit(hdr, (40, y))
+                y += hdr.get_height() + 4
             else:
-                lt = self.font_sm.render(label, True, C.WHITE)
-                dt = self.font_sm.render(detail, True, C.GREEN)
-                row_h = max(lt.get_height(), dt.get_height()) + 4
-                if y + row_h > content_max_y:
-                    break
-                left_x = 70
-                right_x = self.sw - dt.get_width() - 70
-                if right_x < left_x + lt.get_width() + 20:
+                label_text = self._ellipsize_help_text(
+                    self.font_sm, label, max(40, self.sw // 2 - left_x)
+                )
+                lt = self.font_sm.render(label_text, True, C.WHITE)
+                detail_budget = max(
+                    40, self.sw - left_x - lt.get_width() - gap - right_margin
+                )
+                detail_text = self._ellipsize_help_text(
+                    self.font_sm, detail, detail_budget
+                )
+                dt = self.font_sm.render(detail_text, True, C.GREEN)
+                right_x = self.sw - dt.get_width() - right_margin
+                if right_x < left_x + lt.get_width() + gap:
+                    # Stack: label then detail, both left-aligned and clipped.
+                    if y + lt.get_height() > content_max_y:
+                        break
                     self.screen.blit(lt, (left_x, y))
-                    y += lt.get_height() + 3
+                    y += lt.get_height() + 2
+                    full_w = max(40, self.sw - left_x - right_margin)
+                    detail_text = self._ellipsize_help_text(
+                        self.font_sm, detail, full_w
+                    )
+                    dt = self.font_sm.render(detail_text, True, C.GREEN)
                     if y + dt.get_height() > content_max_y:
                         break
-                    self.screen.blit(
-                        dt, (max(20, self.sw - dt.get_width() - 70), y)
-                    )
-                    y += dt.get_height() + 3
+                    self.screen.blit(dt, (left_x, y))
+                    y += dt.get_height() + 2
                 else:
+                    row_h = max(lt.get_height(), dt.get_height()) + 3
+                    if y + row_h > content_max_y:
+                        break
                     self.screen.blit(lt, (left_x, y))
                     self.screen.blit(dt, (right_x, y))
                     y += row_h
@@ -6175,9 +6214,12 @@ class TVTimeCapsule:
                 if can_toggle_gamepad:
                     other = "gamepad" if device == "keyboard" else "keyboard"
                     toggle = self._help_binding("select", device=device)
-                    hint_text = f"{toggle}: view {other}  |  Esc: close"
+                    hint_text = f"{toggle} = {other} bindings  |  Esc"
                 else:
                     hint_text = "Esc: close"
+                hint_text = self._ellipsize_help_text(
+                    self.font_sm, hint_text, max(80, self.sw - 40)
+                )
                 hint = self.font_sm.render(hint_text, True, self._dim_color())
                 self.screen.blit(
                     hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh - 18)
@@ -8956,8 +8998,10 @@ class TVTimeCapsule:
         if self._safe_zone_for_ui():
             with self._ui_layout(letterbox=True):
                 self._screensaver.draw(self.screen)
+                self._apply_analog_artifacts()
         else:
             self._screensaver.draw(self.screen)
+            self._apply_analog_artifacts()
 
     def _apply_runtime_config(self) -> None:
         """Apply reloadable settings from ``self.config`` without restarting."""
@@ -9034,15 +9078,27 @@ class TVTimeCapsule:
         self._apply_channel_lineup()
 
         if self._analog_artifacts_override is None:
+            enabled = bool(ui_cfg.get("analog_artifacts", False))
+            if (
+                self._analog_artifact_rate_override is not None
+                and float(self._analog_artifact_rate_override) > 0
+            ):
+                enabled = True
             self._analog_artifacts.configure(
-                enabled=bool(ui_cfg.get("analog_artifacts", False)),
-                rate_per_minute=float(ui_cfg.get("analog_artifact_rate", 12)),
+                enabled=enabled,
+                rate_per_minute=clamp_artifact_rate(
+                    ui_cfg.get("analog_artifact_rate", 12)
+                ),
             )
         else:
-            self._analog_artifacts.configure(enabled=bool(self._analog_artifacts_override))
+            self._analog_artifacts.configure(
+                enabled=bool(self._analog_artifacts_override)
+            )
         if self._analog_artifact_rate_override is not None:
             self._analog_artifacts.configure(
-                rate_per_minute=float(self._analog_artifact_rate_override)
+                rate_per_minute=clamp_artifact_rate(
+                    self._analog_artifact_rate_override
+                )
             )
 
         self._apply_safe_zone_from_config()
@@ -9167,6 +9223,7 @@ class TVTimeCapsule:
                 "channel_snow": self._channel_snow_override is not None,
                 "shutdown_collapse": self._shutdown_collapse_override is not None,
                 "analog_artifacts": self._analog_artifacts_override is not None,
+                "analog_artifact_rate": self._analog_artifact_rate_override is not None,
                 "safe_zone": self._safe_zone_override is not None,
                 "safe_zone_offset": self._safe_zone_offset_override is not None,
                 "screensaver": self._screensaver_override is not None,
@@ -9192,10 +9249,10 @@ class TVTimeCapsule:
             ui_cfg["analog_artifacts"] = bool(patch["analog_artifacts"])
         if "footer_hints" in patch:
             ui_cfg["footer_hints"] = bool(patch["footer_hints"])
-        if "analog_artifact_rate" in patch:
+        if "analog_artifact_rate" in patch and self._analog_artifact_rate_override is None:
             try:
-                ui_cfg["analog_artifact_rate"] = max(
-                    0.0, min(60.0, float(patch["analog_artifact_rate"]))
+                ui_cfg["analog_artifact_rate"] = clamp_artifact_rate(
+                    patch["analog_artifact_rate"]
                 )
             except (TypeError, ValueError):
                 return False, "invalid analog_artifact_rate"
@@ -9829,6 +9886,7 @@ class TVTimeCapsule:
                     with self._ui_layout(letterbox=True):
                         self._draw_weather_channel()
                         self.draw_channel_overlay()
+                        self._apply_analog_artifacts()
                     self._apply_channel_fx()
                     self.present()
                 elif self.view == self.RETRO_TV:
@@ -9839,16 +9897,20 @@ class TVTimeCapsule:
                     self.present()
                 elif self.view == self.CONFIRM_EXIT:
                     self.draw_confirm_exit()
+                    self._apply_analog_artifacts()
                     self._apply_channel_fx()
                     self.present()
                 elif self.view == self.SAFE_ZONE_EDIT:
                     self.draw_safe_zone_editor()
+                    self._apply_analog_artifacts()
                     self._apply_channel_fx()
                 elif self.view in (self.KEY_CONFIG, self.KEY_CAPTURE):
                     self.draw_key_config(capturing=(self.view == self.KEY_CAPTURE))
+                    self._apply_analog_artifacts()
                     self._apply_channel_fx()
                 elif self.view in (self.GAMEPAD_CONFIG, self.GAMEPAD_CAPTURE):
                     self.draw_gamepad_config(capturing=(self.view == self.GAMEPAD_CAPTURE))
+                    self._apply_analog_artifacts()
                     self._apply_channel_fx()
                 else:
                     self.draw()

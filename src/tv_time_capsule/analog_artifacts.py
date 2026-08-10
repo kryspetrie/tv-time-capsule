@@ -1,6 +1,6 @@
 """Random analog-TV glitches: static, line tear, vertical roll.
 
-Fun tweak for the show browser — see docs/usage/fun-tweaks-and-easter-eggs.md.
+Fun tweak for browse / Weather UI — see docs/usage/fun-tweaks-and-easter-eggs.md.
 """
 
 from __future__ import annotations
@@ -10,7 +10,16 @@ import random
 import pygame
 
 GLITCH_DURATION_MS = 360
-TICK_INTERVAL_MS = 250
+RATE_MIN = 0.0
+RATE_MAX = 60.0
+
+
+def clamp_artifact_rate(rate: float) -> float:
+    try:
+        value = float(rate)
+    except (TypeError, ValueError):
+        return 12.0
+    return max(RATE_MIN, min(RATE_MAX, value))
 
 
 class AnalogArtifacts:
@@ -18,21 +27,25 @@ class AnalogArtifacts:
 
     def __init__(self, *, enabled: bool = False, rate_per_minute: float = 12.0):
         self.enabled = bool(enabled)
-        self._rate = max(0.0, float(rate_per_minute))
+        self._rate = clamp_artifact_rate(rate_per_minute)
         self._active_until = 0
         self._started_at = 0
-        self._last_check = 0
+        self._next_at: int | None = None
         self._static = False
         self._tear = False
         self._roll = False
         self._tear_offset = 0
         self._roll_speed = 0
 
-    def configure(self, *, enabled: bool | None = None, rate_per_minute: float | None = None) -> None:
+    def configure(
+        self, *, enabled: bool | None = None, rate_per_minute: float | None = None
+    ) -> None:
         if enabled is not None:
             self.enabled = bool(enabled)
         if rate_per_minute is not None:
-            self._rate = max(0.0, float(rate_per_minute))
+            self._rate = clamp_artifact_rate(rate_per_minute)
+        # Reschedule so enable/rate changes take effect promptly.
+        self._next_at = None
 
     @property
     def rate_per_minute(self) -> float:
@@ -47,12 +60,23 @@ class AnalogArtifacts:
         now = pygame.time.get_ticks()
         if now < self._active_until:
             return
-        if now - self._last_check < TICK_INTERVAL_MS:
-            return
-        self._last_check = now
-        if random.random() >= self._rate * (TICK_INTERVAL_MS / 60000.0):
+        if self._next_at is None:
+            mean = 60000.0 / self._rate
+            # First glitch soon after enable (not a full mean wait).
+            self._next_at = now + int(random.uniform(0, max(200.0, mean * 0.5)))
+        if now < self._next_at:
             return
         self._trigger(now)
+        self._schedule_next(now)
+
+    def _schedule_next(self, now: int) -> None:
+        if self._rate <= 0:
+            self._next_at = None
+            return
+        mean = 60000.0 / self._rate
+        jitter = mean * 0.25
+        gap = max(float(GLITCH_DURATION_MS), mean + random.uniform(-jitter, jitter))
+        self._next_at = now + int(gap)
 
     def _trigger(self, now: int) -> None:
         self._started_at = now
@@ -113,5 +137,7 @@ class AnalogArtifacts:
         static_band = pygame.Surface((width, bar_h // 2), pygame.SRCALPHA)
         for x in range(0, width, 2):
             if random.random() < 0.5:
-                pygame.draw.line(static_band, (255, 255, 255, 180), (x, 0), (x, bar_h // 2))
+                pygame.draw.line(
+                    static_band, (255, 255, 255, 180), (x, 0), (x, bar_h // 2)
+                )
         screen.blit(static_band, (0, bar_y))

@@ -130,9 +130,35 @@ class MovieNavTests(unittest.TestCase):
         self.assertIn("channel / page codes", pad_overview)
         secret_pages = dict(kb_pages["Secrets"])
         self.assertIn("directory", secret_pages)
-        self.assertEqual(secret_pages["directory"], "press 000")
+        self.assertEqual(secret_pages["directory"], "000")
         self.assertIn("001", secret_pages)
         self.assertIn("004", secret_pages)
+
+    def test_help_details_fit_canvas_width(self):
+        """Help row details must not render wider than the 640 canvas."""
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((640, 480))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app.sw, app.sh = 640, 480
+        margin = 40
+        for _title, lines in app._help_pages(device="keyboard"):
+            for label, detail in lines:
+                if detail is None:
+                    continue
+                label_text = app._ellipsize_help_text(
+                    app.font_sm, label, max(40, app.sw // 2 - 56)
+                )
+                lt_w = app.font_sm.size(label_text)[0]
+                budget = max(40, app.sw - 56 - lt_w - 16 - margin)
+                fitted = app._ellipsize_help_text(app.font_sm, detail, budget)
+                self.assertLessEqual(
+                    app.font_sm.size(fitted)[0],
+                    app.sw - margin,
+                    msg=f"{label!r} / {detail!r}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

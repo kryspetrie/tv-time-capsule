@@ -95,7 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--analog-artifact-rate",
         type=float,
         metavar="N",
-        help="Analog glitches per minute when analog artifacts are on (default: config or 12)",
+        help=(
+            "Analog glitches per minute (0-60). When set without "
+            "--no-analog-artifacts, also enables glitches for this run"
+        ),
     )
     parser.add_argument(
         "--safe-zone",

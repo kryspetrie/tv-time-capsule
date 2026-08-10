@@ -681,8 +681,8 @@
     "channel_snow": "FUN TWEAK \u2014 B&W static burst when committing channel numbers on show/season/episode lists (not arrow keys). Pre-cached 320ms animation. CLI: --channel-snow",
     "shutdown_collapse": "FUN TWEAK \u2014 CRT vertical collapse on quit. CLI: --shutdown-collapse",
     "channel_snow_audio": "FUN TWEAK \u2014 Quiet white-noise with channel snow (defaults on when channel_snow is true; set false to mute)",
-    "analog_artifacts": "FUN TWEAK \u2014 Random brief static, line tear, and vertical roll on the show browser only. CLI: --analog-artifacts",
-    "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches)",
+    "analog_artifacts": "FUN TWEAK \u2014 Random static / tear / roll on browse UI and Weather (not video, Retro, or easter eggs). CLI: --analog-artifacts; --analog-artifact-rate N also enables when N > 0",
+    "analog_artifact_rate": "Glitches per minute when analog_artifacts is on (default 12; 0 = no timed glitches; clamped 0\u201360)",
     "footer_hints": "Bottom status bar (clock + help key) on browse screens in parent mode (toggle with F5 by default; always off in kids mode)",
     "marquee_scroll": "always = scroll overflowing panel titles continuously; selected = only the highlighted row (legacy)"
   },

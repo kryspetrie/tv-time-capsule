@@ -93,8 +93,8 @@ Useful flags override config when set. Boolean options accept `--feature` / `--n
 | `--force-43` | Kept for compatibility; 4:3 letterboxing is always on |
 | `--channel-snow` / `--no-channel-snow` | Static burst when committing channel numbers |
 | `--shutdown-collapse` / `--no-shutdown-collapse` | CRT vertical collapse on quit |
-| `--analog-artifacts` / `--no-analog-artifacts` | Random glitches on the show browser |
-| `--analog-artifact-rate N` | Glitches per minute when analog artifacts are on |
+| `--analog-artifacts` / `--no-analog-artifacts` | Random glitches on browse UI and Weather |
+| `--analog-artifact-rate N` | Glitches per minute (0–60); also enables glitches when `N > 0` unless `--no-analog-artifacts` |
 | `--safe-zone PCT` | CRT overscan safe zone — uniform inset % (use `--safe-zone 0` to disable) |
 | `--skip-mounts` | Do not mount remote shares from config |
 | `--screensaver` / `--no-screensaver` | VHS logo screensaver |

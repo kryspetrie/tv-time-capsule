@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from .safe_zone import parse_safe_zone, parse_safe_zone_offset, safe_zone_to_config
+from .analog_artifacts import clamp_artifact_rate
 from .youtube_titles import (
     DEFAULT_YOUTUBE_TITLE_RULES,
     _parse_title_rules,
@@ -245,7 +246,7 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
         analog_rate = float(ui.get("analog_artifact_rate", 12))
     except (TypeError, ValueError):
         analog_rate = 12.0
-    analog_rate = max(0.0, min(60.0, analog_rate))
+    analog_rate = clamp_artifact_rate(analog_rate)
     safe_zone = parse_safe_zone(ui.get("safe_zone", defaults["safe_zone"]))
     raw_sz = ui.get("safe_zone")
     safe_zone_offset = parse_safe_zone_offset(raw_sz if isinstance(raw_sz, dict) else None)

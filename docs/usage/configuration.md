@@ -214,13 +214,13 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
 | `channel_snow` | `true` | **Fun tweak** — B&W static burst when committing a channel number (show, season, or episode list). Not arrow keys. |
 | `shutdown_collapse` | `true` | **Fun tweak** — CRT vertical collapse animation on quit |
 | `channel_snow_audio` | `true` | Quiet white-noise with channel snow (defaults **on** when `channel_snow` is enabled; set `false` to mute) |
-| `analog_artifacts` | `true` | **Fun tweak** — Random brief static, line tear, and vertical roll on the **show browser** |
-| `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches) |
+| `analog_artifacts` | `true` | **Fun tweak** — Random brief static, line tear, and vertical roll on browse UI and Weather (not video / Retro / easter eggs) |
+| `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches; clamped 0–60) |
 | `footer_hints` | `true` | Bottom status bar (clock + help key) on browse screens in **parent mode** (toggle in-app with **F5**; always hidden in kids mode) |
 | `marquee_scroll` | `"always"` | How overflowing list/header titles scroll: `"always"` (every visible row) or `"selected"` (only the highlighted row) |
 | `safe_zone` | `10` on all sides | CRT overscan inset — see [Safe zone](#safe-zone) |
 
-CLI overrides: `--channel-snow` / `--no-channel-snow`, `--shutdown-collapse` / `--no-shutdown-collapse`, `--analog-artifacts` / `--no-analog-artifacts`, `--analog-artifact-rate N`, `--safe-zone PCT`, `--safe-zone-offset X,Y`. Omit a flag to use config. In **`--windowed`** mode the safe zone defaults to **0%** unless you pass `--safe-zone` explicitly (handy for dev on a monitor).
+CLI overrides: `--channel-snow` / `--no-channel-snow`, `--shutdown-collapse` / `--no-shutdown-collapse`, `--analog-artifacts` / `--no-analog-artifacts`, `--analog-artifact-rate N` (also enables glitches when `N > 0` unless `--no-analog-artifacts`), `--safe-zone PCT`, `--safe-zone-offset X,Y`. Omit a flag to use config. In **`--windowed`** mode the safe zone defaults to **0%** unless you pass `--safe-zone` explicitly (handy for dev on a monitor).
 
 ### Safe zone
 

@@ -33,7 +33,7 @@ HIDDEN_CHANNELS: tuple[HiddenChannel, ...] = (
         "Weather Channel",
         "weather.com/retro",
     ),
-    HiddenChannel("1950-2009", "Retro TV by Decade"),
+    HiddenChannel("1950-2009", "TV by Decade"),
 )
 
 
@@ -45,14 +45,10 @@ def hidden_channels_for_guide() -> tuple[HiddenChannel, ...]:
 def format_hidden_help_rows() -> list[tuple[str, str | None]]:
     """Label/detail rows for the in-app help browser."""
     rows: list[tuple[str, str | None]] = [
-        ("SECRET CHANNELS", None),
-        ("directory", "press 000"),
+        ("SECRETS", None),
+        ("directory", "000"),
     ]
     for ch in hidden_channels_for_guide():
-        if ch.description:
-            rows.append((ch.dial, f"{ch.title} - {ch.description}"))
-        else:
-            rows.append((ch.dial, ch.title))
-    rows.append(("hint", "parent screens + playback | Esc / 0 back"))
-    rows.append(("home menu", "pin weather/decades in home_menu config"))
+        rows.append((ch.dial, ch.title))
+    rows.append(("note", "parent browse + play; Esc/0 back"))
     return rows

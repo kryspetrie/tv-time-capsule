@@ -74,6 +74,11 @@ class CliParserTests(unittest.TestCase):
         self.assertTrue(args.youtube_cache_sync)
         self.assertFalse(self.parser.parse_args([]).youtube_cache_sync)
 
+    def test_analog_artifact_rate_flag(self):
+        self.assertIsNone(self.parser.parse_args([]).analog_artifact_rate)
+        args = self.parser.parse_args(["--analog-artifact-rate", "30"])
+        self.assertEqual(args.analog_artifact_rate, 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()

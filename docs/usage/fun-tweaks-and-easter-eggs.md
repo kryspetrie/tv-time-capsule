@@ -59,7 +59,7 @@ Independent of channel snow — you can enable either or both.
 
 **Label:** fun tweak
 
-Random brief **static flash**, **horizontal line tear**, and **vertical roll** on the **show browser only** (not seasons, episodes, or video). Rate is configurable glitches per minute.
+Random brief **static flash**, **horizontal line tear**, and **vertical roll** on browse UI and Weather (not during video playback, Retro TV, or easter eggs such as test patterns / dial `000`). Rate is configurable glitches per minute.
 
 ```json
 {
@@ -72,10 +72,10 @@ Random brief **static flash**, **horizontal line tear**, and **vertical roll** o
 
 | Field | Default | Notes |
 |-------|---------|-------|
-| `analog_artifacts` | `false` | Master switch |
+| `analog_artifacts` | `true` | Master switch |
 | `analog_artifact_rate` | `12` | Glitches per minute; `0` disables timing |
 
-CLI: `--analog-artifacts` and `--analog-artifact-rate N`
+CLI: `--analog-artifacts` / `--no-analog-artifacts`, and `--analog-artifact-rate N` (0–60). Passing a rate `> 0` without `--no-analog-artifacts` enables glitches for that run.
 
 ### Screensaver
 
@@ -173,7 +173,7 @@ Volume keys adjust gain; left/right change channel (in `cached` mode both direct
 | Channel snow | Fun tweak | `ui.channel_snow`, `--channel-snow` | off |
 | Channel snow audio | Fun tweak | `ui.channel_snow_audio` | off (follows snow when enabled) |
 | Shutdown collapse | Fun tweak | `ui.shutdown_collapse`, `--shutdown-collapse` | off |
-| Analog glitches | Fun tweak | `ui.analog_artifacts`, `--analog-artifacts` | off |
+| Analog glitches | Fun tweak | `ui.analog_artifacts`, `--analog-artifacts`, `--analog-artifact-rate` | on |
 | Screensaver | Fun tweak | `screensaver.enabled`, `--screensaver` | off |
 | Autoplay | QoL | `playback.autoplay` | `next_in_season_only` |
 | Gamepad | Input | `gamepad.enabled` | on |
