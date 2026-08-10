@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
 
 import pygame
 
+
 _LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "retro-weather.png"
+# False = not loaded yet; None = missing file; Surface = ready.
+_logo_cache: pygame.Surface | None | bool = False
 
 
-@lru_cache(maxsize=1)
 def _load_logo() -> pygame.Surface | None:
+    """Load the channel logo; retry convert_alpha until the display is ready."""
+    global _logo_cache
+    if isinstance(_logo_cache, pygame.Surface):
+        return _logo_cache
+    if _logo_cache is None:
+        return None
     if not _LOGO_PATH.is_file():
+        _logo_cache = None
         return None
     try:
-        return pygame.image.load(str(_LOGO_PATH)).convert_alpha()
+        surf = pygame.image.load(str(_LOGO_PATH))
+        if pygame.display.get_init() and pygame.display.get_surface() is not None:
+            try:
+                surf = surf.convert_alpha()
+            except Exception:
+                return surf
+            _logo_cache = surf
+            return surf
+        return surf
     except Exception:
         return None
 

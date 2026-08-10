@@ -55,11 +55,12 @@ class ResilientForecastClient:
                 "All weather providers failed (" + "; ".join(errors) + ")"
             )
 
-        # Enrich + regional from Open-Meteo even when primary was NWS / MET.
-        try:
-            snap = self._om.enrich(location, snap)
-        except Exception:
-            LOG.debug("Open-Meteo enrich failed", exc_info=True)
+        # Enrich + regional from Open-Meteo when primary was not Open-Meteo.
+        if snap.source != "open-meteo":
+            try:
+                snap = self._om.enrich(location, snap)
+            except Exception:
+                LOG.debug("Open-Meteo enrich failed", exc_info=True)
         if not snap.regional:
             try:
                 snap.regional = self._om.fetch_regional(location)

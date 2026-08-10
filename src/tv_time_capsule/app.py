@@ -41,6 +41,7 @@ from .config import (
     OVERLAY_SHOW_MS,
     PLAY_INPUT_GRACE_MS,
     PROGRESS_SEEK_S,
+    EPISODE_SKIP_DOUBLE_TAP_MS,
     SCREEN_H,
     SCREEN_W,
     STACK_VISIBLE,
@@ -140,7 +141,9 @@ from .playback import create_episode_offline_cache
 from .youtube_offline_cache import is_idle_for_youtube_cache
 from .youtube_player import YouTubePlayer
 from .state import (
+    clear_episode_position,
     clear_resume_ep,
+    clear_resume_positions,
     reset_episode_progress,
     get_episode_position,
     get_watched_episodes,
@@ -219,6 +222,7 @@ class TVTimeCapsule:
         analog_artifact_rate=None,
         safe_zone=None,
         safe_zone_offset=None,
+        youtube_idle_cache=None,
     ):
         pygame.init()
 
@@ -243,6 +247,7 @@ class TVTimeCapsule:
         self._analog_artifact_rate_override = analog_artifact_rate
         self._safe_zone_override = safe_zone
         self._safe_zone_offset_override = safe_zone_offset
+        self._youtube_idle_cache_override = youtube_idle_cache
 
         self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
         self.state = load_state()
@@ -302,6 +307,9 @@ class TVTimeCapsule:
         pb_cfg = self.config.get("playback") or {}
         self._autoplay_mode = pb_cfg.get("autoplay", "off")
         self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
+        self._episode_skip_double_tap_ms = int(
+            pb_cfg.get("episode_skip_double_tap_ms", EPISODE_SKIP_DOUBLE_TAP_MS)
+        )
         self._now_playing_splash = bool(pb_cfg.get("now_playing_splash", True))
         try:
             splash_seconds = float(pb_cfg.get("now_playing_splash_seconds", 1.5))
@@ -314,6 +322,10 @@ class TVTimeCapsule:
         self._yt_offline = create_episode_offline_cache(self.config)
         self._yt_offline.set_shows_provider(lambda: self.shows)
         self._yt_offline_idle = False
+        if self._youtube_idle_cache_override is not None:
+            self._apply_youtube_idle_cache_override(
+                bool(self._youtube_idle_cache_override)
+            )
         # Enter on uncached episode: play automatically when that id finishes caching
         # (replaced if Enter is pressed on a different episode first).
         self._pending_cache_play: dict[str, Any] | None = None
@@ -527,6 +539,9 @@ class TVTimeCapsule:
 
         # Ignore play/seek/pause keys briefly after starting an episode
         self._play_input_grace_until = 0
+        # Double-tap ←/→ → episode skip (direction + timestamp of first tap)
+        self._seek_double_tap_dir: str | None = None
+        self._seek_double_tap_at = 0
 
         pygame.key.set_repeat(400, 130)
 
@@ -544,6 +559,19 @@ class TVTimeCapsule:
 
     def _youtube_feature_enabled(self) -> bool:
         return self._feature_enabled("youtube")
+
+    def _apply_youtube_idle_cache_override(self, enabled: bool) -> None:
+        """CLI override for ``youtube.cache.download_when_idle`` (not persisted)."""
+        self._yt_offline.download_when_idle = bool(enabled)
+        yt = dict(self.config.get("youtube") or {})
+        cache = dict(yt.get("cache") or {})
+        cache["download_when_idle"] = bool(enabled)
+        yt["cache"] = cache
+        self.config["youtube"] = yt
+        LOG.info(
+            "YouTube idle/background cache %s (CLI override)",
+            "enabled" if enabled else "disabled",
+        )
 
     def _load_kids_mode_config(self) -> None:
         km_cfg = self.config.get("kids_mode") or {}
@@ -5802,6 +5830,7 @@ class TVTimeCapsule:
                     ("alphabet jump", bind("letter_menu")),
                     ("tag for kids", bind("kids_tag_toggle")),
                     ("reset watch / rescan", f"tap {bind('reset')} / hold"),
+                    ("clear resume", bind("stop_clear")),
                     ("cache YouTube now", bind("youtube_cache_now")),
                     (
                         "channel jump",
@@ -5825,6 +5854,7 @@ class TVTimeCapsule:
                     ),
                     ("alphabet jump", bind("letter_menu")),
                     ("tag for kids", bind("kids_tag_toggle")),
+                    ("clear resume", bind("stop_clear")),
                     (
                         "channel jump",
                         "type the movie channel number"
@@ -5853,6 +5883,7 @@ class TVTimeCapsule:
                         else "keyboard number keys",
                     ),
                     ("reset season", bind("reset")),
+                    ("clear resume", bind("stop_clear")),
                     ("cache season now", bind("youtube_cache_now")),
                 ],
             ),
@@ -5876,6 +5907,7 @@ class TVTimeCapsule:
                         else "keyboard number keys",
                     ),
                     ("reset episode", bind("reset")),
+                    ("clear resume", bind("stop_clear")),
                     ("cache episode now", bind("youtube_cache_now")),
                 ],
             ),
@@ -5885,10 +5917,18 @@ class TVTimeCapsule:
                     ("WHILE WATCHING", None),
                     ("volume", f"{up} / {down}"),
                     ("seek +/-10s", f"{left} / {right}"),
+                    (
+                        "next / prev episode",
+                        f"double-tap {right}/{left} or {bind('next_episode')} / {bind('prev_episode')}",
+                    ),
                     ("pause", select),
                     (
-                        "stop",
+                        "stop (keep resume)",
                         f"{back} or press 0" if device == "keyboard" else back,
+                    ),
+                    (
+                        "stop & clear resume",
+                        bind("stop_clear") + " (also clears resume on menus)",
                     ),
                     ("cancel cache", bind("cache_cancel")),
                     ("toggle zoom", bind("zoom_toggle")),
@@ -6371,6 +6411,9 @@ class TVTimeCapsule:
             "select",
             "back",
             "zoom_toggle",
+            "next_episode",
+            "prev_episode",
+            "stop_clear",
         ):
             return action
         return None
@@ -7118,6 +7161,69 @@ class TVTimeCapsule:
                 self.cursor = self._next_up_index(episodes, watched_eps, pos_ep=pos_ep)
         else:
             self.channel_error = "No progress"
+        self.channel_error_time = pygame.time.get_ticks()
+
+    def clear_resume_status(self):
+        """Clear resume bookmarks only for the current menu context (not watched)."""
+        if self.view == self.EPISODE_SELECT:
+            if not self.cur_show or self.cur_season is None:
+                return
+            episodes = self.current_items()
+            if not episodes or self.cursor >= len(episodes):
+                return
+            ep = episodes[self.cursor]
+            ep_num = ep["number"]
+            changed = clear_episode_position(
+                self.state,
+                self.cur_show,
+                self.cur_season,
+                ep=ep_num,
+                youtube_id=youtube_id_from_episode(ep),
+            )
+            label = f"E-{ep_num:02d} resume cleared"
+        elif self.view == self.SEASON_SELECT:
+            if not self.cur_show:
+                return
+            seasons = self.seasons_for_show(self.cur_show)
+            if not seasons or self.cursor >= len(seasons):
+                return
+            season = seasons[self.cursor]
+            changed = clear_resume_positions(self.state, self.cur_show, season)
+            label = f"{self.season_display_name(self.cur_show, season)} resume cleared"
+        elif self.view == self.SHOW_LIST:
+            if not self.show_names or self.cursor >= len(self.show_names):
+                return
+            show = self.show_names[self.cursor]
+            changed = clear_resume_positions(self.state, show, season=None)
+            label = "Show resume cleared"
+        elif self.view == self.MOVIE_LIST:
+            if not self.movie_names or self.cursor >= len(self.movie_names):
+                return
+            movie_key = self.movie_names[self.cursor]
+            changed = clear_episode_position(self.state, movie_key, 1, ep=1)
+            label = "Movie resume cleared"
+        else:
+            return
+
+        if changed:
+            self.channel_error = label
+            if self.view == self.EPISODE_SELECT:
+                episodes = self.current_items()
+                watched_eps = get_watched_episodes(
+                    self.state,
+                    self.cur_show,
+                    self.cur_season,
+                    episodes=episodes,
+                )
+                pos_ep, _ = get_episode_position(
+                    self.state,
+                    self.cur_show,
+                    self.cur_season,
+                    episodes=episodes,
+                )
+                self.cursor = self._next_up_index(episodes, watched_eps, pos_ep=pos_ep)
+        else:
+            self.channel_error = "No resume"
         self.channel_error_time = pygame.time.get_ticks()
 
     # ─── Navigation ────────────────────────────────────────────────────────
@@ -8252,19 +8358,19 @@ class TVTimeCapsule:
                 return hit[0], hit[1], season
         return None
 
-    def _draw_up_next_splash(self, episode, season, channel, seconds_left):
+    def _draw_up_next_splash(self, episode, season, channel, seconds_left, *, header="UP NEXT"):
         self.screen.fill(C.BLACK)
         self._draw_episode_splash(
             self.playing_show,
             season,
             episode,
             channel,
-            header="UP NEXT",
+            header=header,
             footer=f"Starting in {seconds_left}s  -  {format_action_keys(self.keymap, 'back')} to cancel",
         )
 
-    def _run_up_next_countdown(self, episode, season, channel):
-        """Countdown before autoplay. Returns True to continue, False if cancelled."""
+    def _run_up_next_countdown(self, episode, season, channel, *, header="UP NEXT"):
+        """Countdown before autoplay/skip. Returns True to continue, False if cancelled."""
         # Free the CDP port so YouTube crop-probe can preload during the splash.
         if self.player:
             self.player.stop()
@@ -8309,7 +8415,9 @@ class TVTimeCapsule:
                 return True
 
             remaining = max(1, (duration_ms - elapsed + 999) // 1000)
-            self._draw_up_next_splash(episode, season, channel, remaining)
+            self._draw_up_next_splash(
+                episode, season, channel, remaining, header=header
+            )
             self.present()
             self.clock.tick(30)
 
@@ -8365,15 +8473,107 @@ class TVTimeCapsule:
             pygame.event.clear()
             self._arm_quit_grace()
 
-    def _process_playback_action(self, action):
+    def _resolve_manual_skip_target(self, direction: int):
+        """Return (episodes, index, season) for manual prev/next, or None.
+
+        Stays within the current season / ``playing_episodes`` list.
+        """
+        if direction not in (-1, 1):
+            return None
+        if self._playing_is_movie or not self.playing_episodes:
+            return None
+        start = self.playing_index + direction
+        if direction > 0:
+            indices = range(start, len(self.playing_episodes))
+        else:
+            indices = range(start, -1, -1)
+        for idx in indices:
+            if self._can_start_episode(self.playing_episodes[idx]):
+                return self.playing_episodes, idx, self.playing_season
+        return None
+
+    def _consume_seek_double_tap(self, direction: str) -> bool:
+        """True when this seek press completes a double-tap for episode skip."""
+        window = int(getattr(self, "_episode_skip_double_tap_ms", 0) or 0)
+        if window <= 0:
+            return False
+        now = pygame.time.get_ticks()
+        if (
+            self._seek_double_tap_dir == direction
+            and now - self._seek_double_tap_at <= window
+        ):
+            self._seek_double_tap_dir = None
+            self._seek_double_tap_at = 0
+            return True
+        self._seek_double_tap_dir = direction
+        self._seek_double_tap_at = now
+        return False
+
+    def _toast_playback(self, message: str) -> None:
+        self._mode_toast_message = message
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+
+    def _begin_episode_skip(self, direction: int) -> bool:
+        """Skip to adjacent episode with countdown. False if we left PLAYING."""
+        target = self._resolve_manual_skip_target(direction)
+        if target is None:
+            self._toast_playback(
+                "No next episode" if direction > 0 else "No previous episode"
+            )
+            return True
+
+        ep = self.playing_episode
+        if self.player and ep is not None:
+            self.player.update_time()
+            set_episode_position(
+                self.state,
+                self.playing_show,
+                self.playing_season,
+                ep["number"],
+                self.player.time_pos,
+                duration=self.player.duration,
+                youtube_id=youtube_id_from_episode(ep),
+                episode=ep,
+            )
+
+        episodes, index, season = target
+        episode = episodes[index]
+        header = "UP NEXT" if direction > 0 else "PREVIOUS"
+        if not self._run_up_next_countdown(
+            episode, season, index + 1, header=header
+        ):
+            self.stop_playback(completed=True)
+            return False
+
+        self.playing_episodes = episodes
+        self.playing_index = index
+        self.playing_season = season
+        self.cur_season = season
+
+        pos_ep, pos_secs = get_episode_position(
+            self.state, self.playing_show, season, episodes=episodes
+        )
+        resume_secs = None
+        if pos_ep is not None and episode["number"] == pos_ep:
+            resume_secs = pos_secs
+
+        if not self._start_current_episode(resume_secs=resume_secs, show_splash=False):
+            self.stop_playback(completed=True)
+            return False
+        return True
+
+    def _process_playback_action(self, action, *, key_repeat: bool = False):
         """Handle a logical action during PLAYING. Returns False if playback stopped."""
-        km = self.keymap
         if action == "back":
             self.stop_playback()
             return False
 
+        if action == "stop_clear":
+            self.stop_playback(clear_resume=True)
+            return False
+
         if pygame.time.get_ticks() < self._play_input_grace_until:
-            if action in ("left", "right", "select"):
+            if action in ("left", "right", "select", "next_episode", "prev_episode"):
                 return True
 
         if action == "up":
@@ -8385,13 +8585,21 @@ class TVTimeCapsule:
                 self.player.adjust_volume(-10)
                 self.volume_overlay_timer = pygame.time.get_ticks()
         elif action == "right":
+            if not key_repeat and self._consume_seek_double_tap("right"):
+                return self._begin_episode_skip(+1)
             if self.player:
                 self.player.seek(PROGRESS_SEEK_S)
                 self.progress_overlay_timer = pygame.time.get_ticks()
         elif action == "left":
+            if not key_repeat and self._consume_seek_double_tap("left"):
+                return self._begin_episode_skip(-1)
             if self.player:
                 self.player.seek(-PROGRESS_SEEK_S)
                 self.progress_overlay_timer = pygame.time.get_ticks()
+        elif action == "next_episode":
+            return self._begin_episode_skip(+1)
+        elif action == "prev_episode":
+            return self._begin_episode_skip(-1)
         elif action == "select":
             if self.player:
                 self.player.pause()
@@ -8552,17 +8760,27 @@ class TVTimeCapsule:
         if self.playing_season is not None:
             self.cur_season = self.playing_season
 
-    def stop_playback(self, *, completed=False):
+    def stop_playback(self, *, completed=False, clear_resume=False):
         """Stop playback and return to episode or movie list.
 
         On early stop, bookmark the in-episode position so Play resumes there.
+        With ``clear_resume=True``, discard the bookmark instead (watched flags
+        are left alone — unlike menu **R** reset).
         """
         ep = self.playing_episode
         return_movie = self._playing_is_movie
         movie_key = self.cur_movie if return_movie else None
 
         if self.player:
-            if not completed and ep is not None:
+            if clear_resume and ep is not None:
+                clear_episode_position(
+                    self.state,
+                    self.playing_show,
+                    self.playing_season,
+                    ep=ep["number"],
+                    youtube_id=youtube_id_from_episode(ep),
+                )
+            elif not completed and ep is not None:
                 self.player.update_time()
                 set_episode_position(
                     self.state,
@@ -8576,6 +8794,14 @@ class TVTimeCapsule:
                 )
             self.player.stop()
             self.player = None
+        elif clear_resume and ep is not None:
+            clear_episode_position(
+                self.state,
+                self.playing_show,
+                self.playing_season,
+                ep=ep["number"],
+                youtube_id=youtube_id_from_episode(ep),
+            )
 
         self._cancel_youtube_preload()
 
@@ -8765,6 +8991,9 @@ class TVTimeCapsule:
         pb_cfg = self.config.get("playback") or {}
         self._autoplay_mode = pb_cfg.get("autoplay", "off")
         self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
+        self._episode_skip_double_tap_ms = int(
+            pb_cfg.get("episode_skip_double_tap_ms", EPISODE_SKIP_DOUBLE_TAP_MS)
+        )
         self._now_playing_splash = bool(pb_cfg.get("now_playing_splash", True))
         try:
             splash_seconds = float(pb_cfg.get("now_playing_splash_seconds", 1.5))
@@ -8942,6 +9171,7 @@ class TVTimeCapsule:
                 "safe_zone_offset": self._safe_zone_offset_override is not None,
                 "screensaver": self._screensaver_override is not None,
                 "screensaver_timeout": self._screensaver_timeout_override is not None,
+                "youtube_idle_cache": self._youtube_idle_cache_override is not None,
             },
         }
 
@@ -9141,10 +9371,10 @@ class TVTimeCapsule:
                                 self._handle_quit_event("playback-stall")
                                 break
                             action = None
+                            key_repeat = False
                             if event.type == pygame.KEYDOWN:
-                                self._note_keyboard_input(
-                                    repeat=bool(getattr(event, "repeat", False))
-                                )
+                                key_repeat = bool(getattr(event, "repeat", False))
+                                self._note_keyboard_input(repeat=key_repeat)
                                 digit = digit_for_key(self.keymap, event.key)
                                 if digit is not None:
                                     self._append_dial_digit(digit)
@@ -9158,6 +9388,11 @@ class TVTimeCapsule:
                                 self._playback_stalled = False
                                 self._stall_auto_retry_done = False
                                 self.stop_playback()
+                                break
+                            if action == "stop_clear":
+                                self._playback_stalled = False
+                                self._stall_auto_retry_done = False
+                                self.stop_playback(clear_resume=True)
                                 break
                             if action == "select":
                                 self._stall_auto_retry_done = False
@@ -9195,10 +9430,10 @@ class TVTimeCapsule:
                             self._request_quit(source="playback-quit")
                             break
                         action = None
+                        key_repeat = False
                         if event.type == pygame.KEYDOWN:
-                            self._note_keyboard_input(
-                                repeat=bool(getattr(event, "repeat", False))
-                            )
+                            key_repeat = bool(getattr(event, "repeat", False))
+                            self._note_keyboard_input(repeat=key_repeat)
                             if (
                                 key_matches(self.keymap, event.key, "cache_cancel")
                                 and self._should_show_cache_overlay()
@@ -9214,7 +9449,9 @@ class TVTimeCapsule:
                             action = self._gamepad.event_to_action(event)
                             if action:
                                 self._note_gamepad_input()
-                        if action and not self._process_playback_action(action):
+                        if action and not self._process_playback_action(
+                            action, key_repeat=key_repeat
+                        ):
                             break
 
                     self._tick_dial_timeout()
@@ -9514,6 +9751,10 @@ class TVTimeCapsule:
                             self._reset_rescan_fired = False
                             continue
 
+                        if key_action == "stop_clear":
+                            self.clear_resume_status()
+                            continue
+
                         action = self._key_to_browse_action(event.key)
                         if action:
                             if self._letter_menu_open:
@@ -9568,7 +9809,10 @@ class TVTimeCapsule:
                         if self._letter_menu_open:
                             self._process_letter_menu_action(action)
                         else:
-                            self._process_browse_action(action)
+                            if action == "stop_clear":
+                                self.clear_resume_status()
+                            else:
+                                self._process_browse_action(action)
 
                 # Dial timeout — bare 0 / 00 / normal channels
                 self._tick_dial_timeout()

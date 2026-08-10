@@ -83,6 +83,8 @@ class DayForecast:
     condition_text: str = ""
     precip_pct: float | None = None
     precip_in: float | None = None
+    # Calendar day ``YYYY-MM-DD`` when known (enrich / cache matching).
+    date_iso: str = ""
 
 
 @dataclass(frozen=True)
@@ -103,12 +105,15 @@ class RegionalCity:
 
 @dataclass(frozen=True)
 class Alert:
-    """Weather / emergency alert (NWS, etc.)."""
+    """Weather / school / emergency alert for the lower-thirds marquee."""
 
     severity: str
     headline: str
     description: str = ""
     event: str = ""
+    # weather | emergency | school | other — used for marquee prefixes / ordering.
+    category: str = "weather"
+    source: str = ""
 
 
 @dataclass

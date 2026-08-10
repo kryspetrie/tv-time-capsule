@@ -11,7 +11,7 @@ How to install, configure, and run TV Time Capsule on a desktop or Raspberry Pi.
 4a. [Native weather & cached defaults](native-cached-defaults.md) — default native Weather + YouTube/Decades cache; how to enable live Chrome  
 5. [Remote mounts](remote-mounts.md) — Samba/CIFS, NFS, SSHFS, FTP  
 6. [Secrets & keychain](secrets.md) — credential files and OS keyring  
-7. [Raspberry Pi setup](raspberry-pi.md) — `install-pi.sh`, packages, shortcut  
+7. [Raspberry Pi setup](raspberry-pi.md) — `install-pi.sh`, packages, device readiness & feature completeness  
 8. [Kiosk ↔ desktop](kiosk-desktop.md) — recommended appliance workflow  
 9. [Networking](networking.md) — Wi‑Fi in kiosk, NetworkManager  
 10. [Autostart & login](autostart.md) — systemd, auto-login, desktop icon  

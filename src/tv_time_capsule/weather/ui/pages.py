@@ -393,7 +393,11 @@ def draw_hourly(
         ):
             details.append(f"Feels {_fmt_temp(h.feels_like_f)}")
         if h.wind_mph is not None:
-            details.append(f"Wind {h.wind_mph:.0f} {h.wind_dir}".strip())
+            mph = f"{h.wind_mph:.0f}"
+            if len(mph) >= 2 or not h.wind_dir:
+                details.append(f"Wnd {mph}")
+            else:
+                details.append(f"Wnd {mph} {h.wind_dir}".strip())
         elif h.wind_dir:
             details.append(h.wind_dir)
         if h.humidity_pct is not None:
@@ -555,22 +559,23 @@ def draw_regional(
         # Do not show distance-from-here — not a classic regional page field.
         detail_bits: list[str] = []
         if city.humidity_pct is not None:
-            detail_bits.append(f"Hum {int(round(city.humidity_pct))}%")
+            detail_bits.append(f"Hm {int(round(city.humidity_pct))}%")
         if city.wind_mph is not None:
-            detail_bits.append(f"Wind {city.wind_mph:.0f} {city.wind_dir}".strip())
+            dir_abbr = (city.wind_dir or "").replace(" ", "")
+            detail_bits.append(f"Wnd {city.wind_mph:.0f}{dir_abbr}")
         elif city.wind_dir:
-            detail_bits.append(city.wind_dir)
+            detail_bits.append((city.wind_dir or "").replace(" ", ""))
         if city.feels_like_f is not None:
             detail_bits.append(f"Feels {_fmt_temp(city.feels_like_f)}")
         detail_lines: list[str] = []
         if detail_bits:
-            joined = "  ".join(detail_bits)
+            joined = " ".join(detail_bits)
             if _text_width(fonts["sm"], joined) <= text_w:
                 detail_lines = [joined]
             else:
                 # Two compact rows max: Hum/Wind, then Feels.
-                row1 = "  ".join(detail_bits[:2])
-                row2 = "  ".join(detail_bits[2:])
+                row1 = " ".join(detail_bits[:2])
+                row2 = " ".join(detail_bits[2:])
                 detail_lines = [row1] + ([row2] if row2 else [])
         details_h = len(detail_lines) * sm_h
 
@@ -619,6 +624,21 @@ def draw_regional(
         screen.set_clip(clip)
 
 
+def radar_content_box(
+    screen_w: int,
+    *,
+    title_bottom: int,
+    content_bottom: int,
+) -> pygame.Rect:
+    """Panel rect used by the Radar page (shared with once-scale decode)."""
+    return pygame.Rect(
+        16,
+        title_bottom,
+        max(1, screen_w - 32),
+        max(40, content_bottom - title_bottom - 8),
+    )
+
+
 def draw_radar(
     screen: pygame.Surface,
     fonts: dict[str, pygame.font.Font],
@@ -634,7 +654,7 @@ def draw_radar(
         title = f"Radar - {credit}"
     top = draw_chrome(screen, fonts, page_title=title)
     sw = screen.get_width()
-    box = pygame.Rect(16, top, sw - 32, max(40, content_bottom - top - 8))
+    box = radar_content_box(sw, title_bottom=top, content_bottom=content_bottom)
     pygame.draw.rect(screen, T.BG_PANEL, box, border_radius=6)
     if image is None:
         if loading:
@@ -656,12 +676,14 @@ def draw_radar(
     iw, ih = image.get_size()
     if iw <= 0 or ih <= 0:
         return
+    # Prefer a once-scaled loop from materialize_radar_loop; only re-scale
+    # if the canvas size changed since decode.
     scale = min(box.width / iw, box.height / ih)
     size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
     scaled = (
-        pygame.transform.smoothscale(image, size)
-        if size != (iw, ih)
-        else image
+        image
+        if size == (iw, ih)
+        else pygame.transform.smoothscale(image, size)
     )
     screen.blit(scaled, scaled.get_rect(center=box.center))
 
@@ -678,8 +700,9 @@ def draw_alerts_page(
     sw = screen.get_width()
     y = top - scroll_y
     for a in snap.alerts:
+        cat = (a.category or "weather").strip().upper() or "ALERT"
         head = fonts["md"].render(
-            ascii_safe(f"[{a.severity}] {a.headline}"), True, T.ALERT
+            ascii_safe(f"[{cat}/{a.severity}] {a.headline}"), True, T.ALERT
         )
         screen.blit(head, (24, y))
         y += head.get_height() + 6

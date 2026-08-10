@@ -85,6 +85,7 @@
   "playback": {
     "autoplay": "next_in_season_only",
     "autoplay_countdown_seconds": 5,
+    "episode_skip_double_tap_ms": 450,
     "now_playing_splash": true,
     "now_playing_splash_seconds": 1.5,
     "hw_decode": "auto"
@@ -220,20 +221,32 @@
     "provider": "native",
     "ws4kp_base_url": "https://weatherstar.netbymatt.com/",
     "music": {
+      "_about": "Background jazz (enabled) and page voiceovers (announcements_enabled) are independent. Set either false to mute that part only.",
       "enabled": true,
+      "announcements_enabled": true,
       "directory": null,
       "announcements_directory": null,
       "volume": 70
     },
     "native": {
+      "_about": "page_seconds = carousel dwell. Optional forecast_refresh_seconds (default 90), alert_refresh_seconds (default 90), forecast_loop_min_gap_seconds (default 45) override live re-fetch cadence — omit to keep built-in defaults. alert_style=marquee scrolls NWS alerts between the clock and logo.",
       "page_seconds": 12,
       "alert_style": "marquee"
     },
     "maps": {
-      "_about": "Native Radar page uses free NWS RIDGE regional loops (e.g. NORTHEAST_loop.gif) from radar.weather.gov/ridge/standard — no API key. Region is chosen from lat/lon (nearest mosaic); set region to override (NORTHEAST, CENTGRLAKES, SOUTHEAST, CONUS, …). Prefetched while Current is on screen.",
+      "_about": "Native Radar page uses free NWS RIDGE regional loops (e.g. NORTHEAST_loop.gif) from radar.weather.gov/ridge/standard — no API key. Region is chosen from lat/lon (nearest mosaic); set region to override (NORTHEAST, CENTGRLAKES, SOUTHEAST, CONUS, …). Prefetched while Current is on screen; frames are smooth-scaled once to the panel size.",
       "enabled": true,
       "region": null,
       "ttl_seconds": 300
+    },
+    "alerts": {
+      "_about": "Lower-thirds marquee queue. Feeds are fetched together and merged (emergency → school → weather). type=nws is free api.weather.gov (weather + civil emergency event codes). type=flashalert is TV-station FlashAlert XML (url and/or local path from FTP). type=rss|atom is any school-board / EMA headline feed (set category=school|emergency|other). type=cap follows a CAP Atom/RSS index (e.g. after you register for FEMA IPAWS All-Hazards). Disable a feed with enabled:false.",
+      "feeds": [
+        { "type": "nws", "enabled": true },
+        { "type": "flashalert", "enabled": false, "url": null, "path": null },
+        { "type": "rss", "enabled": false, "url": null, "category": "school" },
+        { "type": "cap", "enabled": false, "url": null, "max_items": 12 }
+      ]
     }
   },
   "retro_tv": {
@@ -637,7 +650,8 @@
   },
   "_playback": {
     "autoplay": "off | next_episode | next_in_season_only \u2014 advance after an episode ends naturally",
-    "autoplay_countdown_seconds": "Seconds before the next episode starts (0 = instant). Esc cancels during countdown.",
+    "autoplay_countdown_seconds": "Seconds before the next episode starts (0 = instant). Esc cancels during countdown. Also used for manual prev/next episode skip.",
+    "episode_skip_double_tap_ms": "Double-tap \u2190/\u2192 within this many ms skips episode (0 = disable double-tap; default 450). Dedicated keys: keymap next_episode / prev_episode (PageDown / PageUp).",
     "now_playing_splash": "Show episode summary before playback starts (default true)",
     "now_playing_splash_seconds": "How long the summary stays on screen (default 1.5; 0 = skip even if enabled)",
     "hw_decode": "auto | on | off \u2014 Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"

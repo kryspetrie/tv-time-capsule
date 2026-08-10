@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 
 import pygame
@@ -13,18 +12,35 @@ from . import theme as T
 from .text import ascii_safe
 
 _LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "retro-weather.png"
+# False = not loaded yet; None = missing file; Surface = ready.
+_logo_cache: pygame.Surface | None | bool = False
 
 
 def bar_height(screen_h: int) -> int:
     return max(52, min(88, screen_h // 9))
 
 
-@lru_cache(maxsize=1)
 def _load_logo() -> pygame.Surface | None:
+    """Load the channel logo; retry convert_alpha until the display is ready."""
+    global _logo_cache
+    if isinstance(_logo_cache, pygame.Surface):
+        return _logo_cache
+    if _logo_cache is None:
+        return None
     if not _LOGO_PATH.is_file():
+        _logo_cache = None
         return None
     try:
-        return pygame.image.load(str(_LOGO_PATH)).convert_alpha()
+        surf = pygame.image.load(str(_LOGO_PATH))
+        if pygame.display.get_init() and pygame.display.get_surface() is not None:
+            try:
+                surf = surf.convert_alpha()
+            except Exception:
+                # Display not fully ready — return unconverted; retry next call.
+                return surf
+            _logo_cache = surf
+            return surf
+        return surf
     except Exception:
         return None
 
@@ -64,16 +80,32 @@ class LowerThirds:
                 self._alert_surf = None
                 self._last_key = ""
             return
-        key = "|".join(f"{a.severity}:{a.headline}" for a in alerts)
+        key = "|".join(
+            f"{a.category}:{a.severity}:{a.headline}" for a in alerts
+        )
         if key == self._last_key and self._alert_surf is not None:
             return
         self._last_key = key
-        self._alert_text = ascii_safe(
-            "   *   ".join(
-                f"ALERT - {a.severity}: {a.headline}" for a in alerts
-            )
-            + "   *   "
-        )
+
+        def _prefix(a: Alert) -> str:
+            cat = (a.category or "weather").strip().lower()
+            if cat == "school":
+                return "SCHOOL"
+            if cat == "emergency":
+                return "EMERGENCY"
+            if cat == "weather":
+                return "WEATHER"
+            return cat.upper() or "ALERT"
+
+        parts: list[str] = []
+        for a in alerts:
+            prefix = _prefix(a)
+            sev = (a.severity or "").strip()
+            if sev and sev.lower() not in ("unknown",):
+                parts.append(f"{prefix} - {sev}: {a.headline}")
+            else:
+                parts.append(f"{prefix}: {a.headline}")
+        self._alert_text = ascii_safe("   *   ".join(parts) + "   *   ")
         self._alert_surf = font.render(self._alert_text, True, T.TEXT)
         self._x = 0.0
 

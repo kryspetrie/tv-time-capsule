@@ -174,31 +174,13 @@ def _fmt_sun(iso: str) -> str:
 
 
 def _parse_nws_alerts(alerts: dict[str, Any]) -> list[Alert]:
-    out: list[Alert] = []
-    for feat in alerts.get("features") or []:
-        p = feat.get("properties") or {}
-        out.append(
-            Alert(
-                severity=str(p.get("severity") or "Unknown"),
-                headline=str(p.get("headline") or p.get("event") or "Alert"),
-                description=str(p.get("description") or "")[:800],
-                event=str(p.get("event") or ""),
-            )
-        )
-    return out
+    from .alert_feeds import parse_nws_alert_features
+
+    return parse_nws_alert_features(alerts)
 
 
-class NwsAlertClient:
-    """Active NWS alerts for a point (AlertClient port)."""
-
-    def fetch_alerts(self, location: Location) -> list[Alert]:
-        alerts = _get_json(
-            "https://api.weather.gov/alerts/active"
-            f"?point={location.latitude:.4f},{location.longitude:.4f}"
-        )
-        if not alerts:
-            raise RuntimeError("NWS alerts fetch failed")
-        return _parse_nws_alerts(alerts)
+# Re-export — preferred construction is ``alert_feeds.build_alert_client``.
+from .alert_feeds import NwsAlertClient as NwsAlertClient  # noqa: E402
 
 
 class NwsForecastClient:
@@ -363,6 +345,8 @@ class NwsForecastClient:
             precip = _precip_pct(p)
             amount = _precip_in(p)
             weekday = _nws_weekday_label(name, is_day=is_day)
+            start = str(p.get("startTime") or "")
+            date_iso = start[:10] if len(start) >= 10 else ""
             if is_day and i + 1 < len(periods) and not periods[i + 1].get("isDaytime", True):
                 night = periods[i + 1]
                 low = _temp_f(night)
@@ -385,6 +369,7 @@ class NwsForecastClient:
                     condition_text=text,
                     precip_pct=precip,
                     precip_in=amount,
+                    date_iso=date_iso,
                 )
             )
         return by_day
@@ -437,22 +422,39 @@ def _hour_label(start_iso: str) -> str:
     return f"{hour12}{suffix}"
 
 
-def _iso_to_epoch(start_iso: str) -> float:
-    """Parse NWS / Open-Meteo ISO timestamps to unix seconds (0 on failure)."""
+def _iso_to_epoch(
+    start_iso: str, *, utc_offset_seconds: int | None = None
+) -> float:
+    """Parse NWS / Open-Meteo ISO timestamps to unix seconds (0 on failure).
+
+    Open-Meteo with ``timezone=auto`` often returns offset-less local wall
+    times plus a top-level ``utc_offset_seconds``. Pass that offset so we do
+    not interpret wall times in the machine's timezone.
+    """
     text = (start_iso or "").strip()
     if not text:
         return 0.0
     try:
-        from datetime import datetime
+        from datetime import datetime, timedelta, timezone
 
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
-        # Open-Meteo local times may omit offset — treat as local.
-        if "T" in text and len(text) >= 16 and text[16:17] not in ("+", "-", "Z"):
+        t_idx = text.find("T")
+        rest = text[t_idx + 1 :] if t_idx >= 0 else ""
+        naive_local = t_idx >= 0 and "+" not in rest and "-" not in rest
+        if naive_local:
             if len(text) == 16:
                 text = text + ":00"
+            if "." in text:
+                text = text.split(".", 1)[0]
             dt = datetime.fromisoformat(text)
-            return dt.timestamp()
+            if utc_offset_seconds is not None:
+                aware = dt.replace(
+                    tzinfo=timezone(timedelta(seconds=int(utc_offset_seconds)))
+                )
+                return aware.timestamp()
+            # Prefer UTC over host-local when the location offset is unknown.
+            return dt.replace(tzinfo=timezone.utc).timestamp()
         return datetime.fromisoformat(text).timestamp()
     except Exception:
         return 0.0
@@ -567,16 +569,23 @@ class OpenMeteoForecastClient:
                 patch["feels_like_f"] = om.feels_like_f
             if patch:
                 snap.hourly[i] = HourlyPeriod(**{**h.__dict__, **patch})
+        om_by_date = {d.date_iso: d for d in daily_om if d.date_iso}
         for i, d in enumerate(snap.daily):
-            if i >= len(daily_om):
-                break
+            om = om_by_date.get(d.date_iso) if d.date_iso else None
+            if om is None and not d.date_iso and i < len(daily_om):
+                # Untimed legacy rows only — index fallback.
+                om = daily_om[i]
+            if om is None:
+                continue
             patch = {}
             if d.precip_pct is None:
-                patch["precip_pct"] = daily_om[i].precip_pct
+                patch["precip_pct"] = om.precip_pct
             if d.precip_in is None:
-                patch["precip_in"] = daily_om[i].precip_in
+                patch["precip_in"] = om.precip_in
             if not d.condition_text:
-                patch["condition_text"] = daily_om[i].condition_text
+                patch["condition_text"] = om.condition_text
+            if not d.date_iso and om.date_iso:
+                patch["date_iso"] = om.date_iso
             if patch:
                 snap.daily[i] = DayForecast(**{**d.__dict__, **patch})
         return snap
@@ -659,6 +668,10 @@ class OpenMeteoForecastClient:
         sunset = _fmt_sun((daily.get("sunset") or [""])[0]) if daily.get("sunset") else ""
         pressure_hpa = _as_float(cur.get("surface_pressure"))
         iid = icon_from_wmo(wmo)
+        utc_offset: int | None = None
+        raw_off = data.get("utc_offset_seconds")
+        if isinstance(raw_off, (int, float)):
+            utc_offset = int(raw_off)
         current = CurrentConditions(
             temperature_f=_as_float(cur.get("temperature_2m")),
             feels_like_f=_as_float(cur.get("apparent_temperature")),
@@ -689,7 +702,7 @@ class OpenMeteoForecastClient:
         now = time.time()
         for i in range(len(times)):
             t = str(times[i])
-            start_epoch = _iso_to_epoch(t)
+            start_epoch = _iso_to_epoch(t, utc_offset_seconds=utc_offset)
             if start_epoch > 0 and start_epoch + 3600 <= now:
                 continue
             try:
@@ -725,10 +738,11 @@ class OpenMeteoForecastClient:
             except (TypeError, ValueError, IndexError):
                 code = 0
             day = str(days[i])
+            date_iso = day[:10] if len(day) >= 10 else ""
             try:
                 from datetime import date
 
-                weekday = date.fromisoformat(day[:10]).strftime("%a")
+                weekday = date.fromisoformat(date_iso).strftime("%a") if date_iso else day
             except Exception:
                 weekday = day[5:10] if len(day) >= 10 else day
             did = icon_from_wmo(code)
@@ -744,6 +758,7 @@ class OpenMeteoForecastClient:
                         (daily.get("precipitation_probability_max") or [None])[i]
                     ),
                     precip_in=_as_float((daily.get("precipitation_sum") or [None])[i]),
+                    date_iso=date_iso,
                 )
             )
         return current, hourly, days_out

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from .alert_feeds import NwsAlertClient, QueuedAlertClient, build_alert_client
 from .forecast_cache import DiskForecastStore
 from .forecast_met_norway import MetNorwayForecastClient
-from .forecast_nws import NwsAlertClient, NwsForecastClient, OpenMeteoForecastClient
+from .forecast_nws import NwsForecastClient, OpenMeteoForecastClient
 from .forecast_resilient import (
     CachedForecastClient,
     CompositeForecastClient,
@@ -21,7 +22,9 @@ __all__ = [
     "NwsAlertClient",
     "NwsForecastClient",
     "OpenMeteoForecastClient",
+    "QueuedAlertClient",
     "ResilientForecastClient",
     "RidgeRadarLoopSource",
+    "build_alert_client",
     "build_forecast_client",
 ]

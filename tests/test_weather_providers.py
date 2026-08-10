@@ -160,6 +160,414 @@ class WeatherForecastCacheTests(unittest.TestCase):
                 self.assertEqual(loaded.location.name, "Boston")
                 self.assertIn("disk", loaded.source)
 
+    def test_disk_ignores_unknown_keys(self):
+        import json
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest import mock
+
+        from tv_time_capsule.weather.adapters import forecast_cache as fc
+        from tv_time_capsule.weather.models import Location
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(fc, "_CACHE_DIR", Path(tmp)):
+                loc = Location(42.36, -71.06, name="Boston", context="MA")
+                path = fc._cache_path(loc)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "location": {
+                                "latitude": 42.36,
+                                "longitude": -71.06,
+                                "name": "Boston",
+                                "context": "MA",
+                                "geocode": "",
+                                "future_field": "x",
+                            },
+                            "current": {
+                                "temperature_f": 70.0,
+                                "unknown_tomorrow": True,
+                            },
+                            "hourly": [
+                                {
+                                    "time_label": "3PM",
+                                    "temperature_f": 71.0,
+                                    "extra": 1,
+                                }
+                            ],
+                            "daily": [],
+                            "regional": [],
+                            "alerts": [],
+                            "radar_station": "",
+                            "fetched_at": time.time(),
+                            "source": "nws",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                loaded = fc.DiskForecastStore().load(loc, max_age_s=3600)
+                self.assertIsNotNone(loaded)
+                assert loaded is not None
+                self.assertEqual(loaded.current.temperature_f, 70.0)
+                self.assertEqual(loaded.hourly[0].time_label, "3PM")
+
+
+class WeatherIsoEpochTests(unittest.TestCase):
+    def test_naive_open_meteo_uses_utc_offset(self):
+        from datetime import datetime, timedelta, timezone
+
+        from tv_time_capsule.weather.adapters.forecast_nws import _iso_to_epoch
+
+        # Eastern Daylight (−4h): 14:00 local → 18:00 UTC
+        epoch = _iso_to_epoch("2024-07-01T14:00", utc_offset_seconds=-4 * 3600)
+        expected = datetime(
+            2024, 7, 1, 14, 0, tzinfo=timezone(timedelta(hours=-4))
+        ).timestamp()
+        self.assertAlmostEqual(epoch, expected, places=0)
+
+    def test_offset_iso_unchanged(self):
+        from datetime import datetime
+
+        from tv_time_capsule.weather.adapters.forecast_nws import _iso_to_epoch
+
+        epoch = _iso_to_epoch("2024-07-01T14:00:00-04:00")
+        expected = datetime.fromisoformat("2024-07-01T14:00:00-04:00").timestamp()
+        self.assertAlmostEqual(epoch, expected, places=0)
+
+
+class WeatherPageSecondsTests(unittest.TestCase):
+    def test_parse_page_seconds(self):
+        from tv_time_capsule.weather.adapters.presenter_native import (
+            _parse_page_seconds,
+        )
+
+        self.assertEqual(_parse_page_seconds(None), 14.0)
+        self.assertEqual(_parse_page_seconds("abc"), 14.0)
+        self.assertEqual(_parse_page_seconds(-5), 3.0)
+        self.assertEqual(_parse_page_seconds(999), 120.0)
+        self.assertEqual(_parse_page_seconds(20), 20.0)
+
+
+class WeatherNativeConfigTests(unittest.TestCase):
+    def test_refresh_overrides_and_announcements(self):
+        from tv_time_capsule.config import parse_config
+
+        cfg = parse_config(
+            {
+                "weather": {
+                    "music": {"announcements_enabled": False},
+                    "native": {
+                        "forecast_refresh_seconds": 240,
+                        "alert_refresh_seconds": 120,
+                        "forecast_loop_min_gap_seconds": 60,
+                    },
+                }
+            }
+        )
+        native = cfg["weather"]["native"]
+        self.assertEqual(native["forecast_refresh_seconds"], 240.0)
+        self.assertEqual(native["alert_refresh_seconds"], 120.0)
+        self.assertEqual(native["forecast_loop_min_gap_seconds"], 60.0)
+        self.assertFalse(cfg["weather"]["music"]["announcements_enabled"])
+        self.assertTrue(cfg["weather"]["music"]["enabled"])
+
+    def test_refresh_omitted_keeps_defaults_absent(self):
+        from tv_time_capsule.config import parse_config
+
+        native = parse_config({})["weather"]["native"]
+        self.assertNotIn("forecast_refresh_seconds", native)
+        self.assertNotIn("alert_refresh_seconds", native)
+
+    def test_presenter_uses_refresh_overrides(self):
+        from tv_time_capsule.weather.adapters.presenter_native import (
+            NativePygamePresenter,
+        )
+
+        p = NativePygamePresenter(
+            640,
+            480,
+            weather_cfg={
+                "native": {
+                    "forecast_refresh_seconds": 240,
+                    "alert_refresh_seconds": 60,
+                }
+            },
+        )
+        self.assertEqual(p._forecast_refresh_s, 240.0)
+        self.assertEqual(p._alert_refresh_s, 60.0)
+        self.assertEqual(
+            NativePygamePresenter(640, 480)._forecast_refresh_s, 90.0
+        )
+
+
+class WeatherAlertFeedTests(unittest.TestCase):
+    def test_queue_orders_emergency_school_weather(self):
+        from tv_time_capsule.weather.adapters.alert_feeds import queue_alerts
+        from tv_time_capsule.weather.models import Alert
+
+        merged = queue_alerts(
+            [
+                [
+                    Alert(
+                        severity="Moderate",
+                        headline="Winter Weather Advisory",
+                        category="weather",
+                        source="nws",
+                    )
+                ],
+                [
+                    Alert(
+                        severity="Severe",
+                        headline="Lincoln Schools: Closed",
+                        category="school",
+                        source="flashalert",
+                    )
+                ],
+                [
+                    Alert(
+                        severity="Extreme",
+                        headline="Civil Emergency Message",
+                        category="emergency",
+                        source="nws",
+                    )
+                ],
+            ]
+        )
+        self.assertEqual(
+            [a.category for a in merged],
+            ["emergency", "school", "weather"],
+        )
+
+    def test_flashalert_xml_school_and_emergency(self):
+        from tv_time_capsule.weather.adapters.alert_feeds import parse_flashalert_xml
+
+        xml = b"""<?xml version="1.0"?>
+        <flashnews updated="2026-01-01 08:00:00">
+          <emergency>
+            <emergency_category name="Area Schools">
+              <emergency_report schoolrelated="1" operating_code="1" testing="0">
+                <orgname>Lincoln USD</orgname>
+                <detail>Closed</detail>
+              </emergency_report>
+              <emergency_report schoolrelated="1" operating_code="5" testing="0">
+                <orgname>Roosevelt HS</orgname>
+                <detail></detail>
+              </emergency_report>
+            </emergency_category>
+            <emergency_category name="City Offices">
+              <emergency_report schoolrelated="0" operating_code="1" testing="0">
+                <orgname>City Hall</orgname>
+                <detail>Closed to public</detail>
+              </emergency_report>
+            </emergency_category>
+          </emergency>
+        </flashnews>
+        """
+        alerts = parse_flashalert_xml(xml)
+        self.assertEqual(len(alerts), 3)
+        schools = [a for a in alerts if a.category == "school"]
+        emerg = [a for a in alerts if a.category == "emergency"]
+        self.assertEqual(len(schools), 2)
+        self.assertEqual(len(emerg), 1)
+        self.assertIn("Lincoln", schools[0].headline)
+        self.assertIn("City Hall", emerg[0].headline)
+
+    def test_rss_parse_and_build_client(self):
+        from tv_time_capsule.weather.adapters.alert_feeds import (
+            build_alert_client,
+            parse_rss_atom,
+        )
+        from tv_time_capsule.config import parse_config
+
+        rss = b"""<?xml version="1.0"?>
+        <rss version="2.0"><channel>
+          <item><title>District 12 Closed</title><description>Snow day</description></item>
+        </channel></rss>
+        """
+        items = parse_rss_atom(rss, category="school", source="rss")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].category, "school")
+
+        cfg = parse_config(
+            {
+                "weather": {
+                    "alerts": {
+                        "feeds": [
+                            {"type": "nws", "enabled": True},
+                            {
+                                "type": "flashalert",
+                                "enabled": True,
+                                "path": "/tmp/closings.xml",
+                            },
+                        ]
+                    }
+                }
+            }
+        )
+        self.assertEqual(len(cfg["weather"]["alerts"]["feeds"]), 2)
+        client = build_alert_client(cfg["weather"])
+        self.assertEqual(type(client).__name__, "QueuedAlertClient")
+
+    def test_nws_civil_event_categorized_emergency(self):
+        from tv_time_capsule.weather.adapters.alert_feeds import (
+            nws_alert_category,
+            parse_nws_alert_features,
+        )
+
+        self.assertEqual(nws_alert_category("Tornado Warning"), "weather")
+        self.assertEqual(nws_alert_category("Civil Emergency Message"), "emergency")
+        self.assertEqual(nws_alert_category("Child Abduction Emergency"), "emergency")
+        rows = parse_nws_alert_features(
+            {
+                "features": [
+                    {
+                        "properties": {
+                            "severity": "Severe",
+                            "event": "Civil Emergency Message",
+                            "headline": "Local emergency",
+                        }
+                    }
+                ]
+            }
+        )
+        self.assertEqual(rows[0].category, "emergency")
+
+
+class WeatherLowerThirdsTests(unittest.TestCase):
+    def test_alerts_prefer_marquee_over_location(self):
+        """Alerts fill the mid band; location is only a fallback."""
+        import pygame
+
+        from tv_time_capsule.weather.models import Alert
+        from tv_time_capsule.weather.ui.lower_thirds import LowerThirds
+
+        pygame.display.init()
+        pygame.font.init()
+        try:
+            pygame.display.set_mode((640, 480))
+            screen = pygame.Surface((640, 480))
+            fonts = {
+                "sm": pygame.font.Font(None, 28),
+                "md": pygame.font.Font(None, 36),
+            }
+            bar = LowerThirds()
+            bar.set_alerts(
+                [
+                    Alert(
+                        severity="Severe",
+                        headline="Tornado Watch",
+                        event="Tornado Watch",
+                        category="weather",
+                    )
+                ],
+                fonts["sm"],
+            )
+            self.assertIn("WEATHER", bar._alert_text)
+            bar.draw(
+                screen,
+                fonts,
+                dt_ms=16.0,
+                location_line="Boston, MA",
+                show_alerts=True,
+            )
+            # Red alert panel is drawn in the mid band (not cyan location text alone).
+            self.assertTrue(
+                any(
+                    screen.get_at((x, 450))[0] >= 80
+                    and screen.get_at((x, 450))[0] > screen.get_at((x, 450))[1]
+                    for x in range(180, 260, 10)
+                )
+            )
+        finally:
+            pygame.display.quit()
+
+
+class WeatherRadarFitTests(unittest.TestCase):
+    def test_smooth_fit_scales_once(self):
+        import pygame
+
+        from tv_time_capsule.weather.adapters.radar_image import _smooth_fit_frames
+
+        pygame.display.init()
+        try:
+            pygame.display.set_mode((64, 48))
+            src = pygame.Surface((200, 100))
+            frames, durs = _smooth_fit_frames([src], [200], (100, 80))
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0].get_size(), (100, 50))
+            self.assertEqual(durs, [200])
+        finally:
+            pygame.display.quit()
+
+
+class WeatherDailyEnrichTests(unittest.TestCase):
+    def test_enrich_matches_by_date_iso(self):
+        from tv_time_capsule.weather.adapters.forecast_nws import OpenMeteoForecastClient
+        from tv_time_capsule.weather.models import (
+            CurrentConditions,
+            DayForecast,
+            Location,
+            WeatherSnapshot,
+        )
+
+        loc = Location(42.36, -71.06, name="Boston")
+        snap = WeatherSnapshot(
+            location=loc,
+            current=CurrentConditions(temperature_f=70.0),
+            daily=[
+                DayForecast(
+                    weekday="Today",
+                    high_f=80.0,
+                    date_iso="2024-07-02",
+                    precip_pct=None,
+                    precip_in=None,
+                ),
+                DayForecast(
+                    weekday="Wed",
+                    high_f=78.0,
+                    date_iso="2024-07-03",
+                    precip_pct=None,
+                ),
+            ],
+            source="nws",
+        )
+        om_daily = [
+            DayForecast(
+                weekday="Tue",
+                date_iso="2024-07-02",
+                precip_pct=40.0,
+                precip_in=0.17,
+            ),
+            DayForecast(
+                weekday="Wed",
+                date_iso="2024-07-03",
+                precip_pct=10.0,
+                precip_in=0.0,
+            ),
+        ]
+        client = OpenMeteoForecastClient()
+        # Call the merge loop indirectly by patching _forecast_json / _parse_bundle.
+        from unittest import mock
+
+        with mock.patch.object(
+            client,
+            "_forecast_json",
+            return_value={"ok": True},
+        ), mock.patch.object(
+            client,
+            "_parse_bundle",
+            return_value=(
+                CurrentConditions(temperature_f=71.0),
+                [],
+                om_daily,
+            ),
+        ):
+            out = client.enrich(loc, snap)
+        self.assertEqual(out.daily[0].precip_pct, 40.0)
+        self.assertEqual(out.daily[0].precip_in, 0.17)
+        self.assertEqual(out.daily[1].precip_pct, 10.0)
+
 
 class WeatherIconTests(unittest.TestCase):
     def test_wmo(self):

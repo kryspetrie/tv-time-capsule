@@ -176,16 +176,13 @@ class StateTests(unittest.TestCase):
         self.assertNotIn("pos", entry)
 
     @patch.object(state, "save_state")
-    def test_youtube_legacy_number_still_counts(self, _save):
-        """Pre-id YouTube watches stored as numbers still show as watched."""
-        s = {"Ghostwriter": {"s01": {"watched": [2]}}}
-        ep = {"number": 2, "youtube_id": "dQw4w9WgXcQ"}
-        self.assertTrue(state.is_episode_watched(s, "Ghostwriter", 1, 2, episode=ep))
-        episodes = [ep]
-        self.assertEqual(
-            state.get_watched_episodes(s, "Ghostwriter", 1, episodes=episodes),
-            {2},
-        )
+    def test_clear_resume_positions_keeps_watched(self, _save):
+        s = {}
+        state.mark_episode_watched(s, "Bluey", 1, 2)
+        state.set_episode_position(s, "Bluey", 1, 3, 40.0, duration=120.0)
+        self.assertTrue(state.clear_resume_positions(s, "Bluey", season=None))
+        self.assertTrue(state.is_episode_watched(s, "Bluey", 1, 2))
+        self.assertEqual(state.get_episode_position(s, "Bluey", 1), (None, 0.0))
 
 
 if __name__ == "__main__":

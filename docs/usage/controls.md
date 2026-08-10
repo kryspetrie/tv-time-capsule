@@ -88,6 +88,11 @@ In **parent** mode on the show or movie list, press **K** to tag/untag the curre
 - Season list → highlighted season  
 - Episode list → highlighted episode only (any episode, not just the latest)
 
+**Clear resume only** (tap **Backspace** / `stop_clear`): clears the mid-episode resume bookmark without changing watched flags.
+
+- On **menus**: clears resume for the highlighted show / season / episode / movie  
+- During **playback** (or pause): stops, clears that episode’s resume bookmark, and returns to the episode list  
+
 **Rescan library** (hold **R** ~0.8s on menus): re-reads media folders without restarting. Use after copying files to USB or NAS. See [Configuration → library](configuration.md#library).
 
 ### Kid-friendly mode
@@ -121,11 +126,28 @@ Optional config under [Configuration → kids_mode](configuration.md#kids_mode):
 |-----|--------|
 | ↑ / ↓ | Volume up / down |
 | ← / → | Seek back / forward 10s |
+| Double-tap ← / → | Previous / next episode (cancellable countdown; same wait as autoplay) |
+| Page Up / Page Down | Previous / next episode (dedicated; remappable as `prev_episode` / `next_episode`) |
 | Space / Enter | Pause / resume |
-| Esc | Stop and return to the episode list (or movie list) |
+| Esc | Stop and return to the episode list (bookmarks mid-episode for resume) |
+| Backspace | **Stop & clear resume**: exit to the menu and discard the resume bookmark (watched flags unchanged). On browse menus, clears resume for the highlighted item only |
 | `0` (dial timeout) | Same as Esc — back to episode / movie list |
 | `1`…`N` | Tune to that show/movie channel after a cancellable countdown |
 | C | Cancel background cache (when progress overlay is shown) |
+
+Example keymap overrides:
+
+```json
+{
+  "keymap": {
+    "next_episode": ["page-down", "n"],
+    "prev_episode": ["page-up", "b"],
+    "stop_clear": ["backspace"]
+  }
+}
+```
+
+Set `playback.episode_skip_double_tap_ms` to `0` to disable double-tap skip (dedicated keys still work).
 
 ### Key configuration (F2)
 

@@ -139,6 +139,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--youtube-idle-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable or disable background YouTube yt-dlp fills while idle "
+            "(youtube.cache.download_when_idle). "
+            "Use --no-youtube-idle-cache when YouTube rate-limits / bot-checks. "
+            "Manual cache-now (Y) still works; default: config"
+        ),
+    )
+    parser.add_argument(
         "--admin",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -331,6 +342,7 @@ def main(argv: list[str] | None = None) -> None:
         analog_artifact_rate=args.analog_artifact_rate,
         safe_zone=safe_zone_override,
         safe_zone_offset=safe_zone_offset,
+        youtube_idle_cache=args.youtube_idle_cache,
     )
 
     if not app.player_cmd and not app.player:

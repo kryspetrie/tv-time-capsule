@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ..models import (
     Alert,
@@ -24,6 +25,8 @@ LOG = logging.getLogger(__name__)
 _CACHE_DIR = Path.home() / ".cache" / "tv-time-capsule" / "weather-forecast"
 # Cold-start / total-outage ceiling — presenter still keeps fresher in-memory copies.
 _DEFAULT_MAX_AGE_S = 6 * 3600.0
+
+T = TypeVar("T")
 
 
 def _key(location: Location) -> str:
@@ -49,8 +52,25 @@ def _snap_to_dict(snap: WeatherSnapshot) -> dict[str, Any]:
     }
 
 
+def _from_dict(cls: type[T], raw: Any) -> T | None:
+    """Build a dataclass, ignoring unknown keys and tolerating partial rows."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        field_names = {f.name for f in dataclasses.fields(cls)}  # type: ignore[arg-type]
+    except TypeError:
+        return None
+    filtered = {k: v for k, v in raw.items() if k in field_names}
+    try:
+        return cls(**filtered)  # type: ignore[call-arg]
+    except TypeError:
+        return None
+
+
 def _snap_from_dict(data: dict[str, Any]) -> WeatherSnapshot:
     loc_raw = data.get("location") or {}
+    if not isinstance(loc_raw, dict):
+        loc_raw = {}
     loc = Location(
         latitude=float(loc_raw.get("latitude") or 0.0),
         longitude=float(loc_raw.get("longitude") or 0.0),
@@ -58,18 +78,27 @@ def _snap_from_dict(data: dict[str, Any]) -> WeatherSnapshot:
         context=str(loc_raw.get("context") or ""),
         geocode=str(loc_raw.get("geocode") or ""),
     )
-    cur_raw = data.get("current")
-    current = CurrentConditions(**cur_raw) if isinstance(cur_raw, dict) else None
+    current = _from_dict(CurrentConditions, data.get("current"))
     hourly = [
-        HourlyPeriod(**h) for h in (data.get("hourly") or []) if isinstance(h, dict)
+        h
+        for h in (_from_dict(HourlyPeriod, row) for row in (data.get("hourly") or []))
+        if h is not None
     ]
     daily = [
-        DayForecast(**d) for d in (data.get("daily") or []) if isinstance(d, dict)
+        d
+        for d in (_from_dict(DayForecast, row) for row in (data.get("daily") or []))
+        if d is not None
     ]
     regional = [
-        RegionalCity(**r) for r in (data.get("regional") or []) if isinstance(r, dict)
+        r
+        for r in (_from_dict(RegionalCity, row) for row in (data.get("regional") or []))
+        if r is not None
     ]
-    alerts = [Alert(**a) for a in (data.get("alerts") or []) if isinstance(a, dict)]
+    alerts = [
+        a
+        for a in (_from_dict(Alert, row) for row in (data.get("alerts") or []))
+        if a is not None
+    ]
     return WeatherSnapshot(
         location=loc,
         current=current,

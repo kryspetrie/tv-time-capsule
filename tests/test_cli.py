@@ -18,6 +18,7 @@ class CliParserTests(unittest.TestCase):
         self.assertIsNone(args.analog_artifacts)
         self.assertIsNone(args.screensaver)
         self.assertIsNone(args.admin)
+        self.assertIsNone(args.youtube_idle_cache)
 
     def test_boolean_flags_enable(self):
         args = self.parser.parse_args(
@@ -27,6 +28,7 @@ class CliParserTests(unittest.TestCase):
                 "--analog-artifacts",
                 "--screensaver",
                 "--admin",
+                "--youtube-idle-cache",
             ]
         )
         self.assertTrue(args.channel_snow)
@@ -34,6 +36,7 @@ class CliParserTests(unittest.TestCase):
         self.assertTrue(args.analog_artifacts)
         self.assertTrue(args.screensaver)
         self.assertTrue(args.admin)
+        self.assertTrue(args.youtube_idle_cache)
 
     def test_boolean_flags_disable(self):
         args = self.parser.parse_args(
@@ -43,6 +46,7 @@ class CliParserTests(unittest.TestCase):
                 "--no-analog-artifacts",
                 "--no-screensaver",
                 "--no-admin",
+                "--no-youtube-idle-cache",
             ]
         )
         self.assertFalse(args.channel_snow)
@@ -50,6 +54,7 @@ class CliParserTests(unittest.TestCase):
         self.assertFalse(args.analog_artifacts)
         self.assertFalse(args.screensaver)
         self.assertFalse(args.admin)
+        self.assertFalse(args.youtube_idle_cache)
 
     def test_scale_choices(self):
         self.assertIsNone(self.parser.parse_args([]).scale)

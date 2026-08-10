@@ -114,6 +114,12 @@ class KeymapDisplayTests(unittest.TestCase):
         self.assertIn(pygame.K_l, DEFAULT_KEYMAP["letter_menu"])
         self.assertIn(pygame.K_k, DEFAULT_KEYMAP["kids_tag_toggle"])
 
+    def test_episode_skip_and_stop_clear_defaults(self):
+        km = load_keymap({})
+        self.assertEqual(action_for_key(km, pygame.K_PAGEDOWN), "next_episode")
+        self.assertEqual(action_for_key(km, pygame.K_PAGEUP), "prev_episode")
+        self.assertEqual(action_for_key(km, pygame.K_BACKSPACE), "stop_clear")
+
 
 if __name__ == "__main__":
     unittest.main()

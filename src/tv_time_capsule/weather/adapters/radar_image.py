@@ -48,7 +48,7 @@ _REGION_CENTERS: tuple[tuple[str, float, float], ...] = (
 
 @dataclass
 class RadarLoop:
-    """Decoded RIDGE regional loop ready for playback."""
+    """RIDGE regional loop — GIF on disk; Surfaces filled on the UI thread."""
 
     region: str
     frames: list[pygame.Surface] = field(default_factory=list)
@@ -60,6 +60,73 @@ class RadarLoop:
     @property
     def ready(self) -> bool:
         return bool(self.frames)
+
+    @property
+    def pending_decode(self) -> bool:
+        """True when a GIF file is cached but not yet decoded to Surfaces."""
+        return (
+            not self.frames
+            and self.path is not None
+            and self.path.is_file()
+        )
+
+    @property
+    def has_payload(self) -> bool:
+        return self.ready or self.pending_decode
+
+
+def materialize_radar_loop(
+    loop: RadarLoop,
+    *,
+    fit_size: tuple[int, int] | None = None,
+) -> bool:
+    """Decode ``loop.path`` into pygame Surfaces (call from the UI thread).
+
+    When ``fit_size`` is set ``(max_w, max_h)``, each frame is smooth-scaled
+    once to fit inside that box (aspect preserved) so playback does not
+    re-scale every tick. Re-fitting always reloads from ``path`` when
+    available so scales never compound.
+    """
+    frames: list[pygame.Surface] = []
+    durations: list[int] = []
+
+    if loop.path is not None and loop.path.is_file():
+        frames, durations = _load_loop_file(loop.path)
+        if not frames:
+            loop.path = None
+            loop.frames = []
+            loop.durations_ms = []
+            return False
+    elif loop.frames:
+        frames, durations = list(loop.frames), list(loop.durations_ms)
+    else:
+        return False
+
+    if fit_size is not None:
+        frames, durations = _smooth_fit_frames(frames, durations, fit_size)
+    loop.frames = frames
+    loop.durations_ms = durations
+    return bool(loop.frames)
+
+
+def _smooth_fit_frames(
+    frames: list[pygame.Surface],
+    durations: list[int],
+    fit_size: tuple[int, int],
+) -> tuple[list[pygame.Surface], list[int]]:
+    """Smooth-scale every frame once to fit inside ``fit_size``."""
+    max_w, max_h = int(fit_size[0]), int(fit_size[1])
+    if max_w <= 0 or max_h <= 0 or not frames:
+        return frames, durations
+    iw, ih = frames[0].get_size()
+    if iw <= 0 or ih <= 0:
+        return frames, durations
+    scale = min(max_w / iw, max_h / ih)
+    size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
+    if size == (iw, ih):
+        return frames, durations
+    out = [pygame.transform.smoothscale(frame, size) for frame in frames]
+    return out, list(durations)
 
 
 def cache_dir() -> Path:
@@ -213,7 +280,11 @@ def _load_loop_file(path: Path) -> tuple[list[pygame.Surface], list[int]]:
 
 
 class RidgeRadarLoopSource:
-    """Adapter: NWS RIDGE regional ``{REGION}_loop.gif`` (implements RadarLoopSource)."""
+    """Adapter: NWS RIDGE regional ``{REGION}_loop.gif`` (implements RadarLoopSource).
+
+    Returns an undecoded :class:`RadarLoop` (path only) so Surfaces are created
+    on the UI thread via :func:`materialize_radar_loop`.
+    """
 
     def fetch_loop(
         self,
@@ -228,6 +299,7 @@ class RidgeRadarLoopSource:
             longitude,
             maps_cfg=maps_cfg,
             force_refresh=force_refresh,
+            decode=False,
         )
 
 
@@ -238,11 +310,15 @@ def fetch_radar_loop(
     maps_cfg: dict[str, Any] | None,
     station: str | None = None,
     force_refresh: bool = True,
+    decode: bool = True,
 ) -> RadarLoop | None:
     """Download (prefer fresh) the regional RIDGE loop for this location.
 
     ``station`` is accepted for call-site compatibility but unused — mosaics
     are regional, not single-site.
+
+    When ``decode`` is False, only the GIF file path is returned; call
+    :func:`materialize_radar_loop` on the UI thread before playback.
     """
     del station
     cfg = maps_cfg if isinstance(maps_cfg, dict) else {}
@@ -259,8 +335,31 @@ def fetch_radar_loop(
     region = resolve_radar_region(latitude, longitude, override=override)
     path = cache_dir() / f"{region}_loop.gif"
     url = build_ridge_loop_url(region)
-    cached = False
     data: bytes | None = None
+
+    def _loop_from_path(*, cached: bool, fetched_at: float) -> RadarLoop | None:
+        if not path.is_file():
+            return None
+        if not decode:
+            return RadarLoop(
+                region=region,
+                frames=[],
+                durations_ms=[],
+                cached=cached,
+                fetched_at=fetched_at,
+                path=path,
+            )
+        frames, durations = _load_loop_file(path)
+        if not frames:
+            return None
+        return RadarLoop(
+            region=region,
+            frames=frames,
+            durations_ms=durations,
+            cached=cached,
+            fetched_at=fetched_at,
+            path=path,
+        )
 
     # Fresh download unless caller allows serving a still-fresh cache.
     if (
@@ -268,16 +367,9 @@ def fetch_radar_loop(
         and path.is_file()
         and (time.time() - path.stat().st_mtime) < ttl_s
     ):
-        frames, durations = _load_loop_file(path)
-        if frames:
-            return RadarLoop(
-                region=region,
-                frames=frames,
-                durations_ms=durations,
-                cached=False,
-                fetched_at=path.stat().st_mtime,
-                path=path,
-            )
+        built = _loop_from_path(cached=False, fetched_at=path.stat().st_mtime)
+        if built is not None:
+            return built
 
     req = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Accept": "image/gif,image/*"}
@@ -294,31 +386,17 @@ def fetch_radar_loop(
             path.write_bytes(data)
         except OSError:
             LOG.debug("Could not cache radar loop", exc_info=True)
-        frames, durations = _pil_frames_to_surfaces(data)
-        if frames:
-            return RadarLoop(
-                region=region,
-                frames=frames,
-                durations_ms=durations,
-                cached=False,
-                fetched_at=time.time(),
-                path=path,
-            )
+        built = _loop_from_path(cached=False, fetched_at=time.time())
+        if built is not None:
+            return built
 
     # Fall back to on-disk loop (stale).
     if path.is_file():
-        frames, durations = _load_loop_file(path)
-        if frames:
-            age = time.time() - path.stat().st_mtime
-            cached = age >= ttl_s or data is None
-            return RadarLoop(
-                region=region,
-                frames=frames,
-                durations_ms=durations,
-                cached=cached,
-                fetched_at=path.stat().st_mtime,
-                path=path,
-            )
+        age = time.time() - path.stat().st_mtime
+        cached = age >= ttl_s or data is None
+        built = _loop_from_path(cached=cached, fetched_at=path.stat().st_mtime)
+        if built is not None:
+            return built
     return None
 
 

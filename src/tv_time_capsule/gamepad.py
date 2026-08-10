@@ -16,6 +16,9 @@ GAMEPAD_ACTIONS = [
     ("right", "Right"),
     ("select", "Select / pause"),
     ("back", "Back / stop"),
+    ("next_episode", "Next episode"),
+    ("prev_episode", "Previous episode"),
+    ("stop_clear", "Stop & clear resume"),
 ]
 
 DEFAULT_GAMEPAD_BINDINGS: dict[str, list[str]] = {
@@ -25,6 +28,9 @@ DEFAULT_GAMEPAD_BINDINGS: dict[str, list[str]] = {
     "down": ["hat-down", "stick-down"],
     "left": ["hat-left", "stick-left"],
     "right": ["hat-right", "stick-right"],
+    "next_episode": [],
+    "prev_episode": [],
+    "stop_clear": [],
 }
 
 GAMEPAD_CONFIG_ROWS = 6

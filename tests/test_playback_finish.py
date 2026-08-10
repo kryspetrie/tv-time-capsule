@@ -54,6 +54,8 @@ class PlaybackFinishTests(unittest.TestCase):
     def _playing_app(self) -> TVTimeCapsule:
         app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         app._autoplay_mode = "off"
+        app._autoplay_countdown = 0
+        app._episode_skip_double_tap_ms = 450
         app._kids_mode_active = False
         app.shows = {
             "Reading Rainbow": {
@@ -62,6 +64,8 @@ class PlaybackFinishTests(unittest.TestCase):
                     1: {
                         "episodes": [
                             {"number": 1, "name": "Ep1", "path": "/tmp/e1.mp4"},
+                            {"number": 2, "name": "Ep2", "path": "/tmp/e2.mp4"},
+                            {"number": 3, "name": "Ep3", "path": "/tmp/e3.mp4"},
                         ]
                     }
                 },
@@ -74,10 +78,10 @@ class PlaybackFinishTests(unittest.TestCase):
         app.playing_show = "Reading Rainbow"
         app.playing_season = 1
         app.playing_episodes = app.shows["Reading Rainbow"]["seasons"][1]["episodes"]
-        app.playing_index = 0
-        app.playing_episode = app.playing_episodes[0]
+        app.playing_index = 1
+        app.playing_episode = app.playing_episodes[1]
         app._playback_browse_view = app.EPISODE_SELECT
-        app._playback_browse_cursor = 0
+        app._playback_browse_cursor = 1
         app.player = FakePlayer()
         app._play_input_grace_until = 0
         return app
@@ -128,6 +132,85 @@ class PlaybackFinishTests(unittest.TestCase):
         with patch.object(app, "_exit_playback_display"):
             app._process_playback_action("back")
         self.assertIsNone(app.player)
+
+    def test_resolve_manual_skip_next_and_prev(self):
+        app = self._playing_app()
+        nxt = app._resolve_manual_skip_target(+1)
+        self.assertIsNotNone(nxt)
+        self.assertEqual(nxt[1], 2)
+        prev = app._resolve_manual_skip_target(-1)
+        self.assertIsNotNone(prev)
+        self.assertEqual(prev[1], 0)
+        app.playing_index = 0
+        self.assertIsNone(app._resolve_manual_skip_target(-1))
+        app.playing_index = 2
+        self.assertIsNone(app._resolve_manual_skip_target(+1))
+
+    def test_double_tap_right_skips_next_episode(self):
+        app = self._playing_app()
+        with (
+            patch.object(app, "_begin_episode_skip", return_value=True) as skip,
+            patch.object(app.player, "seek") as seek,
+        ):
+            app._process_playback_action("right", key_repeat=False)
+            seek.assert_called_once()
+            skip.assert_not_called()
+            app._process_playback_action("right", key_repeat=False)
+            skip.assert_called_once_with(+1)
+
+    def test_key_repeat_does_not_count_as_double_tap(self):
+        app = self._playing_app()
+        with (
+            patch.object(app, "_begin_episode_skip", return_value=True) as skip,
+            patch.object(app.player, "seek") as seek,
+        ):
+            app._process_playback_action("right", key_repeat=False)
+            app._process_playback_action("right", key_repeat=True)
+            skip.assert_not_called()
+            self.assertEqual(seek.call_count, 2)
+
+    def test_dedicated_next_episode_action(self):
+        app = self._playing_app()
+        self.assertEqual(
+            app._key_to_playback_action(pygame.K_PAGEDOWN), "next_episode"
+        )
+        with patch.object(app, "_begin_episode_skip", return_value=True) as skip:
+            app._process_playback_action("next_episode")
+            skip.assert_called_once_with(+1)
+
+    def test_stop_clear_clears_resume_bookmark(self):
+        from tv_time_capsule.state import get_episode_position, set_episode_position
+
+        app = self._playing_app()
+        set_episode_position(app.state, "Reading Rainbow", 1, 2, 40.0, duration=120.0)
+        pos_ep, _ = get_episode_position(app.state, "Reading Rainbow", 1)
+        self.assertEqual(pos_ep, 2)
+        with patch.object(app, "_exit_playback_display"):
+            kept = app._process_playback_action("stop_clear")
+        self.assertFalse(kept)
+        pos_ep, _ = get_episode_position(app.state, "Reading Rainbow", 1)
+        self.assertIsNone(pos_ep)
+        self.assertNotEqual(app.view, app.PLAYING)
+
+    def test_menu_stop_clear_clears_resume_only(self):
+        from tv_time_capsule.state import (
+            get_episode_position,
+            is_episode_watched,
+            mark_episode_watched,
+            set_episode_position,
+        )
+
+        app = self._playing_app()
+        with patch.object(app, "_exit_playback_display"):
+            app.stop_playback(completed=True)
+        app.view = app.EPISODE_SELECT
+        app.cursor = 1
+        mark_episode_watched(app.state, "Reading Rainbow", 1, 2)
+        set_episode_position(app.state, "Reading Rainbow", 1, 2, 40.0, duration=120.0)
+        app.clear_resume_status()
+        self.assertTrue(is_episode_watched(app.state, "Reading Rainbow", 1, 2))
+        self.assertEqual(get_episode_position(app.state, "Reading Rainbow", 1), (None, 0.0))
+        self.assertIn("resume cleared", app.channel_error)
 
 
 if __name__ == "__main__":

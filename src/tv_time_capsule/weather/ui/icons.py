@@ -161,8 +161,8 @@ def _download_png(url: str) -> bytes | None:
 
 
 @lru_cache(maxsize=64)
-def _load_png_surface(url: str) -> pygame.Surface | None:
-    """Fetch (or cache) a PNG and return an unscaled Surface."""
+def _load_png_bytes(url: str) -> bytes | None:
+    """Fetch (or disk-cache) PNG bytes. Failures are not memoized as Surfaces."""
     key = "".join(c if c.isalnum() else "_" for c in url)[-120:]
     path = _cache_dir() / f"{key}.png"
     data: bytes | None = None
@@ -176,8 +176,22 @@ def _load_png_surface(url: str) -> pygame.Surface | None:
             path.write_bytes(data)
         except OSError:
             pass
+    return data
+
+
+def _load_png_surface(url: str) -> pygame.Surface | None:
+    """Decode a PNG URL to a Surface (does not permanently cache convert failures)."""
+    data = _load_png_bytes(url)
+    if data is None:
+        return None
     try:
-        return pygame.image.load(BytesIO(data)).convert_alpha()
+        surf = pygame.image.load(BytesIO(data))
+        if pygame.display.get_init() and pygame.display.get_surface() is not None:
+            try:
+                return surf.convert_alpha()
+            except Exception:
+                return surf
+        return surf
     except Exception:
         LOG.debug("Failed to decode icon PNG from %s", url)
         return None

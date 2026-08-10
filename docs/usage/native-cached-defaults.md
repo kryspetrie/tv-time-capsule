@@ -12,7 +12,7 @@ TV Time Capsule **defaults to offline-friendly, local-first modes**:
 
 **Live features are fully supported** — they are just not the out-of-box path. Flip the knobs below (or use the in-app Weather provider menu) when you want Chromium-driven experiences.
 
-Also see [Configuration](configuration.md), [Raspberry Pi profiles](raspberry-pi.md#device-profiles-features--youtube-cache), and the developer [ports & adapters](../development/architecture.md#ports--adapters) notes.
+Also see [Configuration](configuration.md), [Raspberry Pi readiness & feature completeness](raspberry-pi.md#device-readiness--feature-completeness), and the developer [ports & adapters](../development/architecture.md#ports--adapters) notes.
 
 ---
 
@@ -34,7 +34,14 @@ Also see [Configuration](configuration.md), [Raspberry Pi profiles](raspberry-pi
   "weather": {
     "provider": "native",
     "zip": "02108",
-    "native": { "page_seconds": 12, "alert_style": "marquee" },
+    "music": {
+      "enabled": true,
+      "announcements_enabled": true
+    },
+    "native": {
+      "page_seconds": 12,
+      "alert_style": "marquee"
+    },
     "maps": { "enabled": true }
   }
 }
@@ -42,9 +49,10 @@ Also see [Configuration](configuration.md), [Raspberry Pi profiles](raspberry-pi
 
 - Drawn entirely in pygame (NWS / Open-Meteo data, music, announcements, RIDGE radar loop).
 - **No Chromium** required.
-- Forecast re-fetches about every **3 minutes** and again when the page carousel wraps. Live chain: **NWS → Open-Meteo → MET Norway**; successes are written to a disk last-good cache (cold start / total outage). Mid-session failures keep the in-memory snapshot (Current shows `(cached)`). Elapsed hourly slots are dropped immediately.
-- Alerts re-poll about every **90 seconds** (NWS active alerts).
-- Radar re-fetches on Current, every **~5 minutes**, and on carousel wrap; stale loops show `cached` in the lower-thirds bar.
+- Forecast re-fetches about every **90 seconds** (override with `weather.native.forecast_refresh_seconds`) and again when the page carousel wraps (`forecast_loop_min_gap_seconds`). Live chain: **NWS → Open-Meteo → MET Norway**; successes are written to a disk last-good cache (cold start / total outage). Mid-session failures keep the in-memory snapshot (Current shows `(cached)`). Elapsed hourly slots are dropped immediately.
+- Alerts re-poll about every **90 seconds** (override with `weather.native.alert_refresh_seconds`). With default `alert_style: marquee`, active alerts **scroll between the clock and logo** on every page (location / cached label only when there are no alerts). The marquee **queues multiple feeds together** (`weather.alerts.feeds`): NWS weather + civil emergency codes by default; optional FlashAlert XML (school/org closings), RSS/Atom, and CAP indexes. Items are labeled `EMERGENCY` / `SCHOOL` / `WEATHER`.
+- Radar re-fetches on Current, every **~5 minutes**, and on carousel wrap; frames are **smooth-scaled once** to the panel; stale loops show `cached` in the lower-thirds bar.
+- Mute page voiceovers with `weather.music.announcements_enabled: false` (independent of `music.enabled`).
 
 ### Live opt-in
 

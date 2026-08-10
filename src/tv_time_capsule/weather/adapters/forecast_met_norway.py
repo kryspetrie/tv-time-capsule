@@ -225,6 +225,7 @@ class MetNorwayForecastClient:
                     icon_id=did,
                     icon_url=nws_icon_url(did),
                     condition_text=wmo_condition_text(code),
+                    date_iso=day,
                 )
             )
 

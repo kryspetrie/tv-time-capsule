@@ -143,13 +143,14 @@ CLI overrides for one run: `--screensaver` / `--no-screensaver` and `--screensav
 
 ## `playback`
 
-Controls automatic advance to the next episode when one finishes naturally (Esc still stops immediately).
+Controls automatic advance to the next episode when one finishes naturally (Esc still stops immediately). Manual prev/next episode skip (double-tap seek or dedicated keys) uses the same countdown.
 
 ```json
 {
   "playback": {
     "autoplay": "next_in_season_only",
     "autoplay_countdown_seconds": 5,
+    "episode_skip_double_tap_ms": 450,
     "now_playing_splash": true,
     "now_playing_splash_seconds": 1.5
   }
@@ -159,7 +160,8 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `autoplay` | `next_in_season_only` | `off`, `next_episode` (includes next season), or `next_in_season_only` |
-| `autoplay_countdown_seconds` | `5` | “Up next” wait before starting (0 = instant). **Esc** cancels during countdown |
+| `autoplay_countdown_seconds` | `5` | “Up next” / “Previous” wait before starting (0 = instant). **Esc** cancels during countdown |
+| `episode_skip_double_tap_ms` | `450` | Double-tap ←/→ within this window skips episode (0 = disable). Dedicated keys: `next_episode` / `prev_episode` |
 | `now_playing_splash` | `true` | Episode summary (show, season/episode, title) before playback starts |
 | `now_playing_splash_seconds` | `1.5` | How long the summary stays visible (0 = skip). Skipped after autoplay “Up next” — only manual episode select shows it |
 | `hw_decode` | `auto` | Pi hardware H.264 decode: `auto`, `on`, or `off` |
@@ -628,7 +630,7 @@ Dual-backend settings (file cache + live Chrome). Distinct from the remote-mount
 | `cache.enabled` | **`true`** | Download configured channels into a forever tree via yt-dlp. Set `false` to disable fills (live fallback still works under `prefer_cache`) |
 | `cache.directory` | first writable `media_paths` entry | Offline tree root (null → first writable media path, usually `/media/usb`; falls back to `~/.local/share/tv-time-capsule/youtube-offline` if media is missing/unwritable). Layout matches the local library: `Show/s01/S01E01 - Title [id].mp4`. Override to a NAS path to fill once and play everywhere |
 | `cache.max_bytes` | `null` | Soft cap; `null` never deletes completed files. When set, new downloads are skipped once over budget |
-| `cache.download_when_idle` | `true` | Background downloads while browsing/menus/screensaver (paused during PLAYING / Weather / Retro). Priority cache-now (Y / Enter on miss) still runs immediately unless rate-limited |
+| `cache.download_when_idle` | `true` | Background downloads while browsing/menus/screensaver (paused during PLAYING / Weather / Retro). Priority cache-now (Y / Enter on miss) still runs immediately unless rate-limited. Override for one run: `tv-time-capsule --no-youtube-idle-cache` |
 | `cache.idle_seconds` | `30` | Seconds without UI input before background fills start (screensaver uses its own timeout; cache progress does not count as activity) |
 | `cache.idle_gap_seconds` | `60` | Seconds to wait between background idle batches (does not apply to priority Y/Enter) |
 | `cache.rate_limit_cooldown_seconds` | `1800` | After a bot / HTTP 429 style block, pause **all** cache downloads for this long (escalates on repeat hits, capped at 6h). Queued priority jobs resume when the cooldown ends |
@@ -643,9 +645,9 @@ Dual-backend settings (file cache + live Chrome). Distinct from the remote-mount
 
 See also [Pi offline YouTube plan](../development/pi-features-offline-youtube-plan.md).
 
-Weather lives under `weather`: **`provider` defaults to `native`** (custom pygame Retro Weather). Also `auto` (→ native), `twc`, `ws4kp`. Location fields, optional `ws4kp_base_url`, `music`, `native` (`page_seconds`, `alert_style` = `marquee`|`page`), `maps` (Radar page), and screencast knobs for **live** providers only. While watching Weather, **Enter / Space** opens an in-app provider picker that writes `weather.provider` and restarts the channel — choose `twc` / `ws4kp` to enable live Chrome. Native music + RetroCast announcements are fetched on install via `scripts/fetch-weather-music.sh`; override with `weather.music.directory` / `weather.music.announcements_directory`. Full guide: [Native weather & cached defaults](native-cached-defaults.md).
+Weather lives under `weather`: **`provider` defaults to `native`** (custom pygame Retro Weather). Also `auto` (→ native), `twc`, `ws4kp`. Location fields, optional `ws4kp_base_url`, `music` (`enabled`, **`announcements_enabled`**, directories, volume), `native` (`page_seconds`, `alert_style` = `marquee`|`page`, optional **`forecast_refresh_seconds`** / **`alert_refresh_seconds`** / **`forecast_loop_min_gap_seconds`**), `maps` (Radar page), **`alerts.feeds`** (queued marquee sources: NWS, FlashAlert XML, RSS/Atom, CAP), and screencast knobs for **live** providers only. While watching Weather, **Enter / Space** opens an in-app provider picker that writes `weather.provider` and restarts the channel — choose `twc` / `ws4kp` to enable live Chrome. Native music + RetroCast announcements are fetched on install via `scripts/fetch-weather-music.sh`; override with `weather.music.directory` / `weather.music.announcements_directory`. Mute voiceovers with `weather.music.announcements_enabled: false` (independent of background music). Full guide: [Native weather & cached defaults](native-cached-defaults.md).
 
-**Native Radar page** (`weather.maps`): free [NWS RIDGE regional loops](https://radar.weather.gov/) such as `radar.weather.gov/ridge/standard/NORTHEAST_loop.gif` — **no API key**. The mosaic sector is chosen from your lat/lon (nearest region; override with `maps.region`, e.g. `NORTHEAST`, `CENTGRLAKES`, `CONUS`). The loop is prefetched while the Current page is on screen, then animated on Radar. If a stale on-disk loop is shown, the lower-thirds bar shows `cached`. Live screencast providers (`twc` / `ws4kp`) still need Chromium. See `config.example.json` and [Raspberry Pi profiles](raspberry-pi.md#device-profiles-features--youtube-cache).
+**Native Radar page** (`weather.maps`): free [NWS RIDGE regional loops](https://radar.weather.gov/) such as `radar.weather.gov/ridge/standard/NORTHEAST_loop.gif` — **no API key**. The mosaic sector is chosen from your lat/lon (nearest region; override with `maps.region`, e.g. `NORTHEAST`, `CENTGRLAKES`, `CONUS`). The loop is prefetched while the Current page is on screen, **smooth-scaled once** to the panel size, then animated on Radar. If a stale on-disk loop is shown, the lower-thirds bar shows `cached`. Live screencast providers (`twc` / `ws4kp`) still need Chromium. See `config.example.json` and [Raspberry Pi readiness](raspberry-pi.md#device-readiness--feature-completeness).
 
 **Channel numbers** work like local shows: auto 1-based position in the ordered lineup, with optional overrides via `channels.order` / `channels.numbers` or the web admin **Channel lineup** page.
 

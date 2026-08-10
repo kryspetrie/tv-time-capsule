@@ -9,7 +9,7 @@ when ``weather.provider`` is set to ``twc`` or ``ws4kp``.
 |------|-----------------|
 | :class:`WeatherPresenter` | ``presenter_native``, ``presenter_twc``, ``presenter_ws4kp`` |
 | :class:`ForecastClient` | ``forecast_resilient.build_forecast_client`` (NWS → Open-Meteo → MET Norway + disk) |
-| :class:`AlertClient` | ``forecast_nws.NwsAlertClient`` |
+| :class:`AlertClient` | ``alert_feeds.build_alert_client`` (NWS + FlashAlert + RSS/CAP queue) |
 | :class:`ForecastSnapshotStore` | ``forecast_cache.DiskForecastStore`` |
 | :class:`LocationResolver` | ``geocode_twc.resolve_location`` (function adapter) |
 | :class:`RadarLoopSource` | ``radar_image.RidgeRadarLoopSource`` |

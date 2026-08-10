@@ -130,6 +130,8 @@ STACK_VISIBLE = 5
 # Overlay display durations
 OVERLAY_SHOW_MS = 3000
 PROGRESS_SEEK_S = 10
+# Double-tap ←/→ within this window skips episode (0 = disable).
+EPISODE_SKIP_DOUBLE_TAP_MS = 450
 
 # Truncated list titles: pause, then scroll back and forth
 MARQUEE_DELAY_MS = 900
@@ -189,6 +191,13 @@ def _parse_playback(raw: dict | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         countdown = 5
     countdown = max(0, min(30, countdown))
+    try:
+        skip_tap_ms = int(
+            pb.get("episode_skip_double_tap_ms", EPISODE_SKIP_DOUBLE_TAP_MS)
+        )
+    except (TypeError, ValueError):
+        skip_tap_ms = EPISODE_SKIP_DOUBLE_TAP_MS
+    skip_tap_ms = max(0, min(2000, skip_tap_ms))
     now_playing_splash = bool(pb.get("now_playing_splash", True))
     try:
         splash_seconds = float(pb.get("now_playing_splash_seconds", 1.5))
@@ -201,6 +210,7 @@ def _parse_playback(raw: dict | None) -> dict[str, Any]:
     return {
         "autoplay": mode,
         "autoplay_countdown_seconds": countdown,
+        "episode_skip_double_tap_ms": skip_tap_ms,
         "now_playing_splash": now_playing_splash,
         "now_playing_splash_seconds": splash_seconds,
         "hw_decode": hw,
@@ -563,10 +573,30 @@ def _parse_weather_music(raw: dict | None) -> dict[str, Any]:
         announcements_directory = str(announcements_directory).strip() or None
     return {
         "enabled": bool(block.get("enabled", True)),
+        "announcements_enabled": bool(block.get("announcements_enabled", True)),
         "directory": directory,
         "announcements_directory": announcements_directory,
         "volume": volume,
     }
+
+
+def _parse_optional_seconds(
+    raw: Any,
+    *,
+    default: float | None,
+    lo: float,
+    hi: float,
+) -> float | None:
+    """Parse an optional positive seconds override; ``None`` keeps the default."""
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value != value:  # NaN
+        return default
+    return max(lo, min(hi, value))
 
 
 def _parse_weather_native(raw: dict | None) -> dict[str, Any]:
@@ -579,7 +609,36 @@ def _parse_weather_native(raw: dict | None) -> dict[str, Any]:
     style = str(block.get("alert_style") or "marquee").strip().lower()
     if style not in ("marquee", "page"):
         style = "marquee"
-    return {"page_seconds": page_seconds, "alert_style": style}
+    # Optional overrides — omit / null → presenter built-in defaults (90 / 90 / 45).
+    forecast_refresh = _parse_optional_seconds(
+        block.get("forecast_refresh_seconds"),
+        default=None,
+        lo=15.0,
+        hi=86_400.0,
+    )
+    alert_refresh = _parse_optional_seconds(
+        block.get("alert_refresh_seconds"),
+        default=None,
+        lo=30.0,
+        hi=1800.0,
+    )
+    loop_gap = _parse_optional_seconds(
+        block.get("forecast_loop_min_gap_seconds"),
+        default=None,
+        lo=15.0,
+        hi=600.0,
+    )
+    out: dict[str, Any] = {
+        "page_seconds": page_seconds,
+        "alert_style": style,
+    }
+    if forecast_refresh is not None:
+        out["forecast_refresh_seconds"] = forecast_refresh
+    if alert_refresh is not None:
+        out["alert_refresh_seconds"] = alert_refresh
+    if loop_gap is not None:
+        out["forecast_loop_min_gap_seconds"] = loop_gap
+    return out
 
 
 def _parse_weather_maps(raw: dict | None) -> dict[str, Any]:
@@ -604,6 +663,36 @@ def _parse_weather_maps(raw: dict | None) -> dict[str, Any]:
         "station": station_s or None,
         "ttl_seconds": ttl,
     }
+
+
+def _parse_weather_alerts(raw: dict | None) -> dict[str, Any]:
+    """Marquee alert feed queue (NWS + optional school/emergency feeds)."""
+    block = raw if isinstance(raw, dict) else {}
+    feeds_raw = block.get("feeds")
+    feeds: list[dict[str, Any]] = []
+    if isinstance(feeds_raw, list):
+        for item in feeds_raw:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or item.get("kind") or "nws").strip().lower()
+            entry: dict[str, Any] = {
+                "type": kind or "nws",
+                "enabled": item.get("enabled") is not False,
+            }
+            for key in ("url", "path", "file", "category", "source"):
+                if item.get(key) is not None:
+                    text = str(item.get(key)).strip()
+                    if text:
+                        entry[key] = text
+            if item.get("max_items") is not None:
+                try:
+                    entry["max_items"] = int(item.get("max_items"))
+                except (TypeError, ValueError):
+                    pass
+            feeds.append(entry)
+    if not feeds:
+        feeds = [{"type": "nws", "enabled": True}]
+    return {"feeds": feeds}
 
 
 def _parse_weather(raw: dict | None) -> dict[str, Any]:
@@ -650,6 +739,12 @@ def _parse_weather(raw: dict | None) -> dict[str, Any]:
     if not ws4kp_base_url.endswith("/"):
         ws4kp_base_url += "/"
 
+    alerts_raw = (
+        weather.get("alerts")
+        if isinstance(weather.get("alerts"), dict)
+        else defaults.get("alerts")
+    )
+
     return {
         "provider": provider,
         "zip": _opt_str("zip"),
@@ -672,6 +767,9 @@ def _parse_weather(raw: dict | None) -> dict[str, Any]:
             weather.get("maps")
             if isinstance(weather.get("maps"), dict)
             else defaults.get("maps")
+        ),
+        "alerts": _parse_weather_alerts(
+            alerts_raw if isinstance(alerts_raw, dict) else None
         ),
         "screencast": _parse_weather_screencast(weather.get("screencast")),
     }
@@ -1198,6 +1296,7 @@ def _default_config() -> dict[str, Any]:
         "playback": {
             "autoplay": "next_in_season_only",
             "autoplay_countdown_seconds": 5,
+            "episode_skip_double_tap_ms": EPISODE_SKIP_DOUBLE_TAP_MS,
             "now_playing_splash": True,
             "now_playing_splash_seconds": 1.5,
             "hw_decode": "auto",
@@ -1260,6 +1359,7 @@ def _default_config() -> dict[str, Any]:
             "ws4kp_base_url": "https://weatherstar.netbymatt.com/",
             "music": {
                 "enabled": True,
+                "announcements_enabled": True,
                 "directory": None,
                 "announcements_directory": None,
                 "volume": 70,
@@ -1273,6 +1373,9 @@ def _default_config() -> dict[str, Any]:
                 "region": None,
                 "station": None,
                 "ttl_seconds": 300,
+            },
+            "alerts": {
+                "feeds": [{"type": "nws", "enabled": True}],
             },
             "screencast": _parse_weather_screencast(None),
         },

@@ -11,10 +11,11 @@ from typing import Any
 import pygame
 
 from ...fonts import make_font
-from ..adapters.forecast_nws import NwsAlertClient, upcoming_hourly
+from ..adapters.forecast_nws import upcoming_hourly
+from ..adapters.alert_feeds import build_alert_client
 from ..adapters.forecast_resilient import build_forecast_client
 from ..adapters.geocode_twc import resolve_location
-from ..adapters.radar_image import RadarLoop, RidgeRadarLoopSource
+from ..adapters.radar_image import RadarLoop, RidgeRadarLoopSource, materialize_radar_loop
 from ..models import Location, WeatherSnapshot
 from ..ports import AlertClient, ForecastClient, PageAnnouncer, RadarLoopSource
 from ..ui.lower_thirds import LowerThirds, bar_height
@@ -27,18 +28,43 @@ from ..ui.pages import (
     draw_hourly,
     draw_radar,
     draw_regional,
+    radar_content_box,
 )
 from .announcements import AnnouncementPlayer, discover_announcements
 from .music_pygame import PygameMusicPlayer, discover_tracks
 
 LOG = logging.getLogger(__name__)
 
-# Re-fetch forecast on a short cadence; also kick on each full page-loop wrap.
-_FORECAST_REFRESH_S = 180.0
+# Defaults when config omits overrides (see weather.native.*_refresh_seconds).
+_FORECAST_REFRESH_S = 90.0
 _FORECAST_LOOP_MIN_GAP_S = 45.0
+_FORECAST_RETRY_BACKOFF_S = 45.0
 _ALERT_REFRESH_S = 90.0
+_ALERT_RETRY_BACKOFF_S = 45.0
 _RADAR_REFRESH_S = 300.0
 _RADAR_RETRY_S = 60.0
+
+
+def _parse_page_seconds(raw: Any) -> float:
+    try:
+        value = float(14 if raw is None else raw)
+    except (TypeError, ValueError):
+        value = 14.0
+    if value != value:  # NaN
+        value = 14.0
+    return max(3.0, min(120.0, value))
+
+
+def _parse_refresh_seconds(
+    raw: Any, *, default: float, lo: float, hi: float
+) -> float:
+    try:
+        value = float(default if raw is None else raw)
+    except (TypeError, ValueError):
+        value = float(default)
+    if value != value:
+        value = float(default)
+    return max(lo, min(hi, value))
 
 
 class NativePygamePresenter:
@@ -59,7 +85,28 @@ class NativePygamePresenter:
         self._height = max(height, 240)
         self._cfg = dict(weather_cfg or {})
         native = self._cfg.get("native") if isinstance(self._cfg.get("native"), dict) else {}
-        self._page_seconds = float(native.get("page_seconds") or 14)
+        self._page_seconds = _parse_page_seconds(
+            native.get("page_seconds") if "page_seconds" in native else 12
+        )
+        # Config overrides; defaults match module constants above.
+        self._forecast_refresh_s = _parse_refresh_seconds(
+            native.get("forecast_refresh_seconds"),
+            default=_FORECAST_REFRESH_S,
+            lo=15.0,
+            hi=86_400.0,
+        )
+        self._forecast_loop_min_gap_s = _parse_refresh_seconds(
+            native.get("forecast_loop_min_gap_seconds"),
+            default=_FORECAST_LOOP_MIN_GAP_S,
+            lo=15.0,
+            hi=600.0,
+        )
+        self._alert_refresh_s = _parse_refresh_seconds(
+            native.get("alert_refresh_seconds"),
+            default=_ALERT_REFRESH_S,
+            lo=30.0,
+            hi=1800.0,
+        )
         self._alert_style = str(native.get("alert_style") or "marquee").lower()
         if self._alert_style not in ("marquee", "page"):
             self._alert_style = "marquee"
@@ -70,6 +117,10 @@ class NativePygamePresenter:
         )
         music_cfg = self._cfg.get("music") if isinstance(self._cfg.get("music"), dict) else {}
         self._music_enabled = bool(music_cfg.get("enabled", True))
+        # Announcements are independent of background music (config / UI toggle).
+        self._announcements_enabled = bool(
+            music_cfg.get("announcements_enabled", True)
+        )
         try:
             self._volume = int(music_cfg.get("volume", 70))
         except (TypeError, ValueError):
@@ -79,8 +130,9 @@ class NativePygamePresenter:
         self._music = PygameMusicPlayer()
         self._announcements: PageAnnouncer = announcements or AnnouncementPlayer()
         self._forecast: ForecastClient = forecast or build_forecast_client()
-        self._alerts: AlertClient = alerts or NwsAlertClient()
+        self._alerts: AlertClient = alerts or build_alert_client(self._cfg)
         self._radar_source: RadarLoopSource = radar_source or RidgeRadarLoopSource()
+        self._radar_scaled_for: tuple[int, int] | None = None
         self._lock = threading.Lock()
         self._snap: WeatherSnapshot | None = None
         self._radar_loop: RadarLoop | None = None
@@ -91,10 +143,14 @@ class NativePygamePresenter:
         self._last_radar_ok_at = 0.0
         self._last_radar_attempt_at = 0.0
         self._forecast_refreshing = False
+        self._forecast_refresh_gen = 0
         self._last_forecast_ok_at = 0.0
+        self._last_forecast_attempt_at = 0.0
         self._forecast_stale = False
         self._alerts_refreshing = False
+        self._alerts_refresh_gen = 0
         self._last_alerts_ok_at = 0.0
+        self._last_alerts_attempt_at = 0.0
         self._error: str | None = None
         self._available = False
         self._running = False
@@ -123,18 +179,12 @@ class NativePygamePresenter:
     def _maps_enabled(self) -> bool:
         return self._maps_cfg.get("enabled") is not False
 
-    def _prune_hourly(self, snap: WeatherSnapshot) -> WeatherSnapshot:
-        """Drop elapsed hours in-place so the UI advances without a network hit."""
-        pruned = upcoming_hourly(list(snap.hourly))
-        if pruned is snap.hourly or pruned == list(snap.hourly):
-            return snap
-        snap.hourly = pruned
-        return snap
-
     def _start_forecast_refresh(self, *, reason: str, min_gap_s: float) -> None:
         """Background re-fetch; on failure keep the last good snapshot (cached)."""
         now = time.time()
         with self._lock:
+            if not self._running:
+                return
             if self._forecast_refreshing:
                 return
             if (
@@ -142,18 +192,36 @@ class NativePygamePresenter:
                 and now - self._last_forecast_ok_at < min_gap_s
             ):
                 return
+            if (
+                self._last_forecast_attempt_at > 0
+                and now - self._last_forecast_attempt_at < _FORECAST_RETRY_BACKOFF_S
+            ):
+                return
             self._forecast_refreshing = True
+            self._last_forecast_attempt_at = now
+            self._forecast_refresh_gen += 1
+            gen = self._forecast_refresh_gen
 
         def _worker() -> None:
             loc = resolve_location(self._cfg)
             if loc is None:
                 with self._lock:
-                    self._forecast_refreshing = False
+                    if gen == self._forecast_refresh_gen:
+                        self._forecast_refreshing = False
                 return
             try:
                 snap = self._forecast.fetch(loc)
                 stale = "disk" in (snap.source or "")
                 with self._lock:
+                    if gen != self._forecast_refresh_gen or not self._running:
+                        return
+                    # Keep prior alerts when a non-alert provider returns none.
+                    if (
+                        not snap.alerts
+                        and self._snap is not None
+                        and self._snap.alerts
+                    ):
+                        snap.alerts = list(self._snap.alerts)
                     self._snap = snap
                     self._last_forecast_ok_at = time.time()
                     self._forecast_stale = stale
@@ -168,11 +236,12 @@ class NativePygamePresenter:
                     reason,
                 )
                 with self._lock:
-                    if self._snap is not None:
+                    if gen == self._forecast_refresh_gen and self._snap is not None:
                         self._forecast_stale = True
             finally:
                 with self._lock:
-                    self._forecast_refreshing = False
+                    if gen == self._forecast_refresh_gen:
+                        self._forecast_refreshing = False
 
         threading.Thread(
             target=_worker, daemon=True, name="weather-forecast-refresh"
@@ -182,19 +251,31 @@ class NativePygamePresenter:
         """Poll watches/warnings more often than the full forecast bundle."""
         now = time.time()
         with self._lock:
+            if not self._running:
+                return
             if self._alerts_refreshing:
                 return
             if (
                 self._last_alerts_ok_at > 0
-                and now - self._last_alerts_ok_at < _ALERT_REFRESH_S
+                and now - self._last_alerts_ok_at < self._alert_refresh_s
+            ):
+                return
+            if (
+                self._last_alerts_attempt_at > 0
+                and now - self._last_alerts_attempt_at < _ALERT_RETRY_BACKOFF_S
             ):
                 return
             self._alerts_refreshing = True
+            self._last_alerts_attempt_at = now
+            self._alerts_refresh_gen += 1
+            gen = self._alerts_refresh_gen
 
         def _worker() -> None:
             try:
                 alerts = self._alerts.fetch_alerts(location)
                 with self._lock:
+                    if gen != self._alerts_refresh_gen or not self._running:
+                        return
                     if self._snap is not None:
                         self._snap.alerts = alerts
                     self._last_alerts_ok_at = time.time()
@@ -202,17 +283,24 @@ class NativePygamePresenter:
                 LOG.debug("Weather alerts refresh failed", exc_info=True)
             finally:
                 with self._lock:
-                    self._alerts_refreshing = False
+                    if gen == self._alerts_refresh_gen:
+                        self._alerts_refreshing = False
 
         threading.Thread(
             target=_worker, daemon=True, name="weather-alerts-refresh"
         ).start()
 
     def _start_radar_prefetch(self, snap: WeatherSnapshot, *, force_refresh: bool) -> None:
-        """Download the regional RIDGE loop in the background (Current page)."""
+        """Download the regional RIDGE loop in the background (Current page).
+
+        Decode to pygame Surfaces happens on the UI thread via
+        :func:`materialize_radar_loop`.
+        """
         if not self._maps_enabled():
             return
         with self._lock:
+            if not self._running:
+                return
             if self._radar_prefetching:
                 return
             self._radar_prefetching = True
@@ -234,12 +322,14 @@ class NativePygamePresenter:
                 loop = None
             with self._lock:
                 if gen != self._radar_prefetch_gen:
-                    # A newer prefetch superseded this one.
+                    # Superseded (newer prefetch or stop); owner of the flag
+                    # already cleared or owns prefetching.
                     return
-                if loop is not None and loop.ready:
+                if loop is not None and loop.has_payload:
                     self._radar_loop = loop
                     self._radar_frame_idx = 0
                     self._radar_frame_elapsed_ms = 0.0
+                    self._radar_scaled_for = None
                     self._last_radar_ok_at = time.time()
                 self._radar_prefetching = False
 
@@ -261,8 +351,11 @@ class NativePygamePresenter:
             with self._lock:
                 self._snap = snap
                 self._radar_loop = None
-                self._last_forecast_ok_at = time.time()
-                self._last_alerts_ok_at = time.time()
+                now = time.time()
+                self._last_forecast_ok_at = now
+                self._last_forecast_attempt_at = now
+                self._last_alerts_ok_at = now
+                self._last_alerts_attempt_at = now
                 self._forecast_stale = "disk" in (snap.source or "")
             self._available = True
         except Exception as exc:
@@ -282,6 +375,7 @@ class NativePygamePresenter:
                 Path(self._music_dir) if self._music_dir else None
             )
             self._music.start(tracks, self._volume)
+        if self._announcements_enabled:
             clips = discover_announcements(
                 Path(self._announcements_dir)
                 if self._announcements_dir
@@ -298,7 +392,11 @@ class NativePygamePresenter:
         self._announcements.stop()
         self._music.stop()
         with self._lock:
+            self._forecast_refresh_gen += 1
+            self._alerts_refresh_gen += 1
             self._radar_prefetch_gen += 1
+            self._forecast_refreshing = False
+            self._alerts_refreshing = False
             self._radar_prefetching = False
             self._radar_loop = None
         if self._thread is not None:
@@ -331,6 +429,12 @@ class NativePygamePresenter:
         now = time.time()
         dt_ms = (now - self._last_draw) * 1000.0
         self._last_draw = now
+        content_bottom = self._height - bar_height(self._height)
+        title_bottom = 14 + fonts["lg"].get_height() + 12
+        radar_box = radar_content_box(
+            self._width, title_bottom=title_bottom, content_bottom=content_bottom
+        )
+        radar_fit = (radar_box.width, radar_box.height)
         with self._lock:
             snap = self._snap
             radar_loop = self._radar_loop
@@ -340,14 +444,37 @@ class NativePygamePresenter:
             last_radar = self._last_radar_ok_at
             last_radar_attempt = self._last_radar_attempt_at
             last_alerts = self._last_alerts_ok_at
+            if snap is None:
+                pass
+            else:
+                # Drop elapsed hours under the lock so refresh workers see
+                # a consistent hourly list.
+                pruned = upcoming_hourly(list(snap.hourly))
+                if pruned is not snap.hourly and pruned != list(snap.hourly):
+                    snap.hourly = pruned
         if snap is None:
             self._frame.fill((0, 0, 0))
             return self._frame.copy()
 
-        # Drop elapsed hours immediately (no network) so 2PM vanishes after 3:00.
-        snap = self._prune_hourly(snap)
+        # Decode GIF → Surfaces on the UI thread; smooth-scale once to the panel.
+        if radar_loop is not None and (
+            radar_loop.pending_decode
+            or (
+                radar_loop.ready
+                and self._radar_scaled_for != radar_fit
+            )
+        ):
+            materialize_radar_loop(radar_loop, fit_size=radar_fit)
+            if radar_loop.ready:
+                self._radar_scaled_for = radar_fit
+                self._radar_frame_idx = 0
+                self._radar_frame_elapsed_ms = 0.0
 
-        pages = self._page_names(snap, has_radar=self._maps_enabled())
+        include_radar = self._maps_enabled() and (
+            (radar_loop is not None and (radar_loop.ready or radar_loop.pending_decode))
+            or radar_prefetching
+        )
+        pages = self._page_names(snap, include_radar=include_radar)
         if self._page_idx >= len(pages):
             self._page_idx = 0
         wrapped = False
@@ -359,21 +486,24 @@ class NativePygamePresenter:
             if self._page_idx == 0 and prev_idx != 0:
                 wrapped = True
                 self._start_forecast_refresh(
-                    reason="loop", min_gap_s=_FORECAST_LOOP_MIN_GAP_S
+                    reason="loop", min_gap_s=self._forecast_loop_min_gap_s
                 )
         # Periodic refresh even if the user stays on one page a long time.
-        if last_ok <= 0 or now - last_ok >= _FORECAST_REFRESH_S:
+        if last_ok <= 0 or now - last_ok >= self._forecast_refresh_s:
             self._start_forecast_refresh(
-                reason="timer", min_gap_s=_FORECAST_REFRESH_S
+                reason="timer", min_gap_s=self._forecast_refresh_s
             )
-        if last_alerts <= 0 or now - last_alerts >= _ALERT_REFRESH_S:
+        if last_alerts <= 0 or now - last_alerts >= self._alert_refresh_s:
             self._start_alerts_refresh(snap.location)
         page = pages[self._page_idx % len(pages)]
         announce_key = page.split(":", 1)[0]
         entered = page != self._active_page
         if entered:
             self._active_page = page
-            if self._music_enabled and announce_key != self._active_announce:
+            if (
+                self._announcements_enabled
+                and announce_key != self._active_announce
+            ):
                 self._active_announce = announce_key
                 self._announcements.play_for_page(announce_key)
 
@@ -394,7 +524,6 @@ class NativePygamePresenter:
             if need_radar:
                 self._start_radar_prefetch(snap, force_refresh=True)
 
-        content_bottom = self._height - bar_height(self._height)
         radar_image: pygame.Surface | None = None
         radar_cached = False
         if page == "radar" and radar_loop is not None and radar_loop.ready:
@@ -441,15 +570,18 @@ class NativePygamePresenter:
                 fonts,
                 content_bottom=content_bottom,
                 image=radar_image,
-                loading=radar_image is None and radar_prefetching,
+                loading=radar_image is None
+                and (radar_prefetching or (radar_loop is not None and not radar_loop.ready)),
             )
         elif page == "alerts":
             draw_alerts_page(self._frame, snap, fonts, content_bottom=content_bottom)
         else:
             draw_current(self._frame, snap, fonts, content_bottom=content_bottom)
 
+        with self._lock:
+            alert_list = list(snap.alerts) if snap.alerts else []
         if self._alert_style == "marquee":
-            self._lower.set_alerts(snap.alerts, fonts["sm"])
+            self._lower.set_alerts(alert_list, fonts["sm"])
         else:
             self._lower.set_alerts([], fonts["sm"])
         loc_line: str | None = None
@@ -459,12 +591,15 @@ class NativePygamePresenter:
                 loc_line = f"{loc_line} (cached)" if loc_line else "cached"
         elif page == "radar" and radar_cached:
             loc_line = "cached"
+        # Marquee alerts always take the mid band (between clock and logo) when
+        # present; location / "cached" only fills that slot when there are none.
+        show_alert_marquee = self._alert_style == "marquee" and bool(alert_list)
         self._lower.draw(
             self._frame,
             fonts,
             dt_ms=dt_ms,
-            location_line=loc_line,
-            show_alerts=self._alert_style == "marquee" and loc_line is None,
+            location_line=None if show_alert_marquee else loc_line,
+            show_alerts=show_alert_marquee,
         )
         return self._frame.copy()
 
@@ -478,10 +613,10 @@ class NativePygamePresenter:
         return
 
     def _page_names(
-        self, snap: WeatherSnapshot, *, has_radar: bool = False
+        self, snap: WeatherSnapshot, *, include_radar: bool = False
     ) -> list[str]:
         pages = ["current"]
-        if has_radar:
+        if include_radar:
             pages.append("radar")
         n_hours = len(snap.hourly)
         if n_hours:
@@ -496,7 +631,7 @@ class NativePygamePresenter:
                 pages.append(f"regional:{i}")
         if self._alert_style == "page" and snap.alerts:
             # Keep radar immediately after Current; alerts follow that pair.
-            pages.insert(1 + (1 if has_radar else 0), "alerts")
+            pages.insert(1 + (1 if include_radar else 0), "alerts")
         return pages
 
     def _ensure_fonts(self) -> dict[str, pygame.font.Font]:
@@ -513,11 +648,11 @@ class NativePygamePresenter:
         return self._fonts
 
     def _refresh_loop(self) -> None:
-        """Wake often; actual fetches are gated by ``_FORECAST_REFRESH_S``."""
+        """Wake often; actual fetches are gated by ``forecast_refresh_seconds``."""
         while self._running:
             time.sleep(30.0)
             if not self._running:
                 break
             self._start_forecast_refresh(
-                reason="timer", min_gap_s=_FORECAST_REFRESH_S
+                reason="timer", min_gap_s=self._forecast_refresh_s
             )

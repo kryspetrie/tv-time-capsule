@@ -416,6 +416,30 @@ def clear_episode_position(
     return True
 
 
+def clear_resume_positions(state, show, season=None) -> bool:
+    """Clear in-progress bookmarks only (keep watched flags).
+
+    When ``season`` is None, clears resume bookmarks for every season of ``show``.
+    """
+    show_state = state.get(show)
+    if not isinstance(show_state, dict):
+        return False
+
+    changed = False
+    if season is None:
+        seasons = [
+            int(k[1:])
+            for k in show_state
+            if isinstance(k, str) and len(k) >= 2 and k.startswith("s") and k[1:].isdigit()
+        ]
+        for s in seasons:
+            if clear_episode_position(state, show, s):
+                changed = True
+        return changed
+
+    return clear_episode_position(state, show, season)
+
+
 def reset_episode_progress(
     state,
     show,
