@@ -51,6 +51,7 @@ class PlaybackConfigTests(unittest.TestCase):
         pb = _parse_playback({})
         self.assertTrue(pb["now_playing_splash"])
         self.assertEqual(pb["now_playing_splash_seconds"], 1.5)
+        self.assertEqual(pb["hw_decode"], "auto")
 
     def test_now_playing_splash_can_disable(self):
         pb = _parse_playback(
@@ -79,8 +80,10 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertEqual(cfg["weather"]["zip"], "02108")
         self.assertEqual(cfg["weather"]["name"], "Boston")
         self.assertIsNone(cfg["weather"]["latitude"])
-        self.assertEqual(cfg["home_menu"]["parent"], ["shows", "movies", "weather"])
-        self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies", "weather"])
+        self.assertEqual(
+            cfg["home_menu"]["parent"], ["continue", "shows", "movies", "weather"]
+        )
+        self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies"])
         self.assertIsNone(cfg["retro_tv"]["filters"])
         self.assertIsNone(cfg["retro_tv"]["volume"])
         self.assertEqual(cfg["retro_tv"]["playback_mode"], "cached")

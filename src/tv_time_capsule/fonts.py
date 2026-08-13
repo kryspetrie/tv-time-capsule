@@ -14,6 +14,29 @@ USE_FREETYPE = False
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 FONT_FILE = str(_ASSETS_DIR / "vcr_osd_mono.ttf")
 
+# Glyphs missing (or tofu) in VCR OSD Mono → plain ASCII (1:1 only).
+_VCR_SAFE_MAP = str.maketrans(
+    {
+        "\u00b7": "-",  # middle dot
+        "\u2022": "*",  # bullet
+        "\u2014": "-",  # em dash
+        "\u2013": "-",  # en dash
+        "\u00b0": " ",  # degree
+        "\u00d7": "x",
+        "\u00f7": "/",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+    }
+)
+
+
+def vcr_safe_text(text: str) -> str:
+    """Replace characters the bundled VCR font cannot draw."""
+    s = (text or "").replace("\u2026", "...").replace("\u00b1", "+/-")
+    return s.translate(_VCR_SAFE_MAP)
+
 
 class FTFontWrapper:
     """Wraps pygame._freetype.Font to match pygame.font.Font's render() API."""

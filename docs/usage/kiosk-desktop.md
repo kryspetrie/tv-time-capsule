@@ -1,12 +1,16 @@
 # Kiosk ↔ desktop
 
+New Pi installs: flash the OS and run `install-pi.sh` first —
+[Raspberry Pi — from empty board to TV](raspberry-pi.md). This page is only about
+switching between lean TV mode and a full desktop after that.
+
 ## Why Desktop OS + kiosk?
 
 | Approach | Pros | Cons |
 |----------|------|------|
 | **Desktop image, kiosk by default** (recommended) | Easy Samba/Wi‑Fi when needed; normal TV use stays lean | More disk; more packages to update |
-| Lite only | Smallest image | No GUI; configure via SSH only |
-| Always boot desktop + player | Simple mental model | Desktop RAM/CPU always on; player can cover the UI |
+| Lite only | Smallest image | No GUI; configure via SSH only. **Required** for Pi 1 / original Zero as **Legacy Lite 32-bit (Bookworm)** — see [Pi setup §1.2](raspberry-pi.md#12-pi-1--original-zero--use-the-smallest-os) |
+| Always boot desktop + player | Simple mental model | Desktop RAM/CPU always on; player can cover the UI. Avoid on Pi 1 |
 
 **Recommended:** install Desktop, run `set-mode.sh kiosk` for daily use, switch to `desktop` when you need to tinker.
 

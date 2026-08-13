@@ -456,6 +456,7 @@ def discover_library(
     media_paths: list[str] | str,
     *,
     device_name: str = "vintage-tv",
+    read_only: bool = False,
 ) -> dict:
     """Discover shows and movies, inferring split vs legacy layout.
 
@@ -521,7 +522,9 @@ def discover_library(
 
         # Check writability for later
         from .media_catalog import catalog_is_writable
-        catalog_writable[media_root] = catalog_is_writable(root_path, device_name)
+        catalog_writable[media_root] = catalog_is_writable(
+            root_path, device_name, read_only=read_only
+        )
 
         shows_sub = _find_library_subdir(media_root, "shows")
         movies_sub = _find_library_subdir(media_root, "movies")

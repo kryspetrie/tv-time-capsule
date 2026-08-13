@@ -27,7 +27,7 @@ Each phase ends with a **retro** whose outputs adjust the next phase. Each phase
 2. **Feature flags** so disabled Weather / Retro / YouTube never appear in dial/UI and never spawn Chrome for that feature.
 3. **YouTube dual backends** with identical crop/zoom:
    - **Live** — existing Chrome CDP path.
-   - **Cached file** — yt-dlp forever cache → ffmpeg/omx.
+   - **Cached file** — yt-dlp forever cache → ffmpeg.
 4. **Device policy:** weak devices require cache (`cached_only` + not-cached indicator); strong devices optionally cache and may still watch live (`prefer_cache`).
 5. **Documentation:** usage docs, Pi profiles, and `_about` comments in example config explaining *why* defaults differ by hardware.
 
@@ -459,7 +459,7 @@ Phases 1–2 and 3 can overlap. Phase 6 must not ship file playback as “done�
 
 | Case | Hardware | Steps | Pass |
 |------|----------|-------|------|
-| File path | Pi 4 | Cache one ep, `prefer_cache`, play | ffmpeg/omx; no Chrome for play |
+| File path | Pi 4 | Cache one ep, `prefer_cache`, play | ffmpeg; no Chrome for play |
 | Fallback live | Pi 4 | Uncached ep, `prefer_cache` | Live works |
 | Cached only miss | Pi 1 | Uncached ep | Marker + snackbar; no Chrome |
 | Cached only hit | Pi 1 | Pre-filled NAS file | Plays |
@@ -499,7 +499,7 @@ Phases 1–2 and 3 can overlap. Phase 6 must not ship file playback as “done�
 | Question | Why |
 |----------|-----|
 | Probe too slow on Pi 1 first play? | Pre-probe at download time on strong machine |
-| omx vs ffmpeg crop gaps? | Prefer ffmpeg path when crop required |
+| omx vs ffmpeg crop gaps? | N/A — omx removed; ffmpeg crop/zoom only |
 
 **Outputs:** [ ] Pre-probe-at-download decision · [ ] Hardware decode + crop compatibility note |
 
@@ -599,7 +599,7 @@ Do not require live YouTube network in CI for crop detector tests — use RGB fi
 | Crop coords differ live vs file (player chrome vs raw video) | Parity fails | Probe offline from **decoded video** frames, not Chrome UI; compare fixtures |
 | Idle downloads saturate Pi / network | UI jank | One-at-a-time; rate_limit; pause on any input |
 | Partial files played as complete | Glitches | Write to `.part`, rename on success; manifest only after rename |
-| omxplayer cannot apply crop filters | Weak-Pi crop broken | Prefer ffmpeg RGB path when YouTube crop apply is set |
+| File playback on weak Pi | Bookworm has no omx | Use ffmpeg + `hw_decode`; validate on hardware |
 | Disk fill on forever cache | Device full | Docs; optional `max_bytes` later; NAS |
 
 ---

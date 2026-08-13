@@ -33,6 +33,11 @@ HIDDEN_CHANNELS: tuple[HiddenChannel, ...] = (
         "Weather Channel",
         "weather.com/retro",
     ),
+    HiddenChannel(
+        "005",
+        "TV Guide",
+        "Cable lineup of shows",
+    ),
     HiddenChannel("1950-2009", "TV by Decade"),
 )
 

@@ -17,8 +17,11 @@ From a checkout, this installs system prerequisites and the app in one step:
 ./install.sh --venv     # install into ./.venv instead of pipx
 ```
 
-On a Raspberry Pi appliance use [`install-pi.sh`](raspberry-pi.md) instead — it does the same
-plus kiosk, mounts, and autostart wiring.
+**Raspberry Pi (including a blank board with no OS):** follow
+[Raspberry Pi — from empty board to TV](raspberry-pi.md) end-to-end (Imager → SSH →
+`install-pi.sh` → media → kiosk). That path differs by Pi model. **Pi 1 / original
+Zero / Zero W must use Raspberry Pi OS (Legacy) Lite 32-bit (Debian Bookworm)** —
+not Desktop and not the newest/Trixie image — for usable free RAM without OS hacks.
 
 ## System prerequisites only
 

@@ -196,8 +196,12 @@ def main(argv: list[str] | None = None) -> None:
     cfg = load_config()
 
     if not args.skip_mounts:
-        for line in ensure_mounts(cfg.get("mounts") or []):
+        messages, failures = ensure_mounts(cfg.get("mounts") or [])
+        for line in messages:
             print(line)
+        mount_warnings = list(failures)
+    else:
+        mount_warnings = []
 
     # Determine media paths: CLI flags > config (+ mountpoints)
     if args.media_dirs:
@@ -346,6 +350,7 @@ def main(argv: list[str] | None = None) -> None:
         safe_zone=safe_zone_override,
         safe_zone_offset=safe_zone_offset,
         youtube_idle_cache=args.youtube_idle_cache,
+        mount_warnings=mount_warnings,
     )
 
     if not app.player_cmd and not app.player:

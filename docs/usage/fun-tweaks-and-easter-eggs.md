@@ -131,6 +131,19 @@ On any **parent** screen (home, shows, movies, seasons, episodes, playback), pre
 
 Dial **`004`** for the Weather Channel. **Default** is `weather.provider: native` (custom pygame Retro Weather, no Chromium). Live Chrome providers (`twc` / `ws4kp`) are opt-in via config or the in-app picker (**Enter / Space**); they adapt FPS/quality (`weather.screencast.mode: auto`). Configure `weather.zip` / location (default Boston). Volume keys control music/announcements (native) or the embedded player (live); Esc / back exits the menu first, then leaves Weather. Disable with `features.weather: false`. See [Native weather & cached defaults](native-cached-defaults.md).
 
+### TV Guide (`005`)
+
+**Label:** easter egg
+
+Dial **`005`** (or pin `tvguide` on the home menu) for a **TV Guide Channel** styled like the rest of the menus:
+
+- **Bottom:** text-only channel list (taller rows, smaller titles, left-aligned numbers) that **smooth-scrolls** one page at a time after a short dwell
+- **Top third:** equal-time slots — five randomized show previews (4:3 center-cropped thumbs), then local weather, then a **TV GUIDE CHANNEL** bumper, repeating
+- Weather uses the native forecast disk cache and refreshes at most about every 30 minutes (not every frame)
+- **← / →** steps the top panel; **Esc / back** exits (view-only — Enter does not tune)
+
+Kids mode only lists allowlisted titles.
+
 Bare `0` is **Back**; `00` opens the alphabet menu — patterns and weather use the `00x` special family only.
 
 - Full-screen pattern display (no header, footer, or channel chrome).
@@ -180,6 +193,7 @@ Volume keys adjust gain; left/right change channel (in `cached` mode both direct
 | Test patterns `001` / `002` / `003` | Easter egg | *(none)* | always if PNGs exist |
 | Secret directory `000` | Easter egg | *(none)* | always |
 | Weather `004` | Easter egg | `weather.*`, `features.weather` | on (`native` pygame; live `twc`/`ws4kp` opt-in) |
+| TV Guide `005` | Easter egg | `home_menu` token `tvguide` | always |
 | MyRetroTVs `1950`–`2009` | Easter egg | `features.retro_tv`, `retro_tv.playback_mode` | on (`cached` default; `live` screencast opt-in) |
 
 Legacy config `ui.channel_change_effects` (`off` \| `visual` \| `visual+audio`) is still read once and mapped to `channel_snow` / `channel_snow_audio` when the new keys are absent.

@@ -52,7 +52,7 @@ from .config import (
     WINDOW_SCALE_MAX,
     WINDOW_SCALE_MIN,
 )
-from .fonts import enable_freetype_fallback, make_font
+from .fonts import enable_freetype_fallback, make_font, vcr_safe_text
 from .gamepad import (
     GAMEPAD_ACTIONS,
     GAMEPAD_CONFIG_ROWS,
@@ -93,6 +93,8 @@ from .movie_nav import (
 )
 from .dial_nav import DialKind, classify_dial, page_cursor
 from .home_menu import (
+    DEFAULT_HOME_MENU_TOKENS,
+    DEFAULT_KIDS_HOME_MENU_TOKENS,
     decade_slug_for_token,
     label_for_decade_slug,
     year_digits_for_decade_slug,
@@ -102,9 +104,13 @@ from .player import (
     EmbeddedPlayer,
     detect_ffmpeg,
     detect_ffplay,
-    detect_omxplayer,
-    is_pi,
     np_frombuffer,
+)
+from .thumbnails import (
+    ensure_movie_thumbnail,
+    ensure_show_thumbnail,
+    ensure_weather_thumbnail,
+    save_surface_as_thumbnail,
 )
 from .screensaver import VHS_LOGO_PATH, VHSScreensaver
 from .safe_zone import (
@@ -147,6 +153,8 @@ from .state import (
     reset_episode_progress,
     get_episode_position,
     get_watched_episodes,
+    list_continue_watching,
+    list_recently_watched,
     load_state,
     mark_episode_watched,
     save_state,
@@ -155,6 +163,8 @@ from .state import (
     watch_summary,
     youtube_id_from_episode,
 )
+from .qol_features import QolFeaturesMixin
+from .profiles import normalize_profile_id
 from .web_admin import AdminServer, DeferredAdminBridge, start_admin_if_enabled
 
 LOG = logging.getLogger(__name__)
@@ -165,10 +175,12 @@ HEADER_BAR_H = 48
 KIDS_NAV_BAR_H = 44
 KIDS_STACK_VISIBLE = 3
 LIBRARY_THUMB_CYCLE_MS = 1500
-LIBRARY_THUMB_VISIBLE = 2
+LIBRARY_THUMB_VISIBLE = 4
 LIBRARY_THUMB_GAP = 8
 LIBRARY_SIDEBAR_W = 200
 LIBRARY_THUMB_ASPECT = (4, 3)
+LIBRARY_THUMB_GRID_COLS = 2
+LIBRARY_THUMB_GRID_ROWS = 2
 CAROUSEL_TRANSITION_MS = 2000
 CAROUSEL_CENTER_FRAC = 0.55
 CAROUSEL_SIDE_SCALE = 0.5
@@ -187,7 +199,7 @@ _PYGAME_WINDOWEVENT = getattr(pygame, "WINDOWEVENT", None)
 _PYGAME_WINDOWEVENT_CLOSE = getattr(pygame, "WINDOWEVENT_CLOSE", None)
 
 
-class TVTimeCapsule:
+class TVTimeCapsule(QolFeaturesMixin):
     SHOW_LIST = 0
     SEASON_SELECT = 1
     EPISODE_SELECT = 2
@@ -202,6 +214,7 @@ class TVTimeCapsule:
     GAMEPAD_CAPTURE = 12
     WEATHER = 13
     RETRO_TV = 14
+    TV_GUIDE = 15
 
     def __init__(
         self,
@@ -223,6 +236,7 @@ class TVTimeCapsule:
         safe_zone=None,
         safe_zone_offset=None,
         youtube_idle_cache=None,
+        mount_warnings=None,
     ):
         pygame.init()
 
@@ -250,15 +264,15 @@ class TVTimeCapsule:
         self._youtube_idle_cache_override = youtube_idle_cache
 
         self.media_paths = media_paths if isinstance(media_paths, list) else [media_paths]
-        self.state = load_state()
         self.config = load_config()
+        self.state = {}
         self._device_name = self.config.get("network", {}).get("mdns_hostname", "vintage-tv")
+        self._init_qol_features(mount_warnings=mount_warnings)
         self._init_safe_zone_state()
 
         # Logical canvas (safe-zone padded) is drawn offscreen and scaled to the OS window.
         self.sw = SCREEN_W
         self.sh = SCREEN_H
-        self._omx_overlay = False
         self.framebuffer: pygame.Surface | None = None
         self.canvas = None
         self._init_display_window()
@@ -266,26 +280,20 @@ class TVTimeCapsule:
         pygame.display.set_caption("TV Time Capsule")
         pygame.mouse.set_visible(not fullscreen)
 
-        # Detect video player
+        pb_cfg = self.config.get("playback") or {}
+        self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
+
+        # File playback: ffmpeg RGB frames + ffplay audio (hw_decode on Pi).
         ffmpeg_path = detect_ffmpeg()
         ffplay_path = detect_ffplay()
-        omx_cmd = detect_omxplayer() if is_pi() else None
-
         if ffmpeg_path and np_frombuffer is not None:
-            # Embedded FFmpeg playback (video always native 640×480)
             self.player = EmbeddedPlayer(SCREEN_W, SCREEN_H)
             self.player.ffmpeg_path = ffmpeg_path
             self.player.ffplay_path = ffplay_path
+            self.player.hw_decode_mode = self._hw_decode_mode
             self.player_cmd = ffmpeg_path
             self.embedded_player = True
-        elif omx_cmd:
-            # Omxplayer fallback on Pi — transparent overlay canvas
-            self._enable_omx_overlay()
-            self.player = EmbeddedPlayer(SCREEN_W, SCREEN_H)
-            self.player.use_omx = True
-            self.player.omx_cmd = omx_cmd
-            self.player_cmd = omx_cmd
-            self.embedded_player = True
+            self._apply_volume_to_player()
         else:
             self.player = None
             self.player_cmd = None
@@ -304,7 +312,6 @@ class TVTimeCapsule:
         self.keymap = load_keymap(self.config)
         self._key_lookup: dict[int, str] = {}
         self._rebuild_key_lookup()
-        pb_cfg = self.config.get("playback") or {}
         self._autoplay_mode = pb_cfg.get("autoplay", "off")
         self._autoplay_countdown = pb_cfg.get("autoplay_countdown_seconds", 5)
         self._episode_skip_double_tap_ms = int(
@@ -317,7 +324,6 @@ class TVTimeCapsule:
             splash_seconds = 1.5
         splash_seconds = max(0.0, min(30.0, splash_seconds))
         self._now_playing_splash_ms = int(splash_seconds * 1000)
-        self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
         self._playback_cache = PlaybackCache(self.config)
         self._yt_offline = create_episode_offline_cache(self.config)
         self._yt_offline.set_shows_provider(lambda: self.shows)
@@ -446,6 +452,12 @@ class TVTimeCapsule:
         self._mode_toast_until = 0
         self._confirm_exit_yes = False
         self._confirm_exit_return_view = self.SHOW_LIST
+        self._set_thumb_confirm = False
+        self._set_thumb_yes = True
+        self._set_thumb_frame = None
+        self._set_thumb_title = ""
+        self._set_thumb_kind = "show"
+        self._last_displayed_video_frame = None
         self._safe_zone_edit_mode = "zoom"
         self._safe_zone_save_prompt = False
         self._safe_zone_save_yes = True
@@ -492,6 +504,13 @@ class TVTimeCapsule:
             self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
         elif self._kids_mode_active:
             self._apply_kids_startup_view()
+        if getattr(self, "_qol_force_kids_on_ready", False):
+            self._qol_force_kids_on_ready = False
+            if self._kids_has_assigned_titles():
+                self._kids_mode_active = True
+                self._apply_kids_startup_view()
+                self._persist_kids_mode()
+        self._write_session_breadcrumb(action="startup")
         self.cur_show = None
         self.cur_season = None
         self.cur_movie: str | None = None
@@ -578,12 +597,12 @@ class TVTimeCapsule:
 
     def _load_kids_mode_config(self) -> None:
         km_cfg = self.config.get("kids_mode") or {}
-        style = str(km_cfg.get("browse_style", "card"))
+        style = str(km_cfg.get("browse_style", "full"))
         # Legacy alias: "compact" → "card"
         if style == "compact":
             style = "card"
         if style not in ("card", "full"):
-            style = "card"
+            style = "full"
         self._kids_browse_style = style
         # ``enabled`` is always present after parse (None until first toggle).
         # Only a real bool restores last mode; otherwise use default_enabled.
@@ -634,13 +653,17 @@ class TVTimeCapsule:
 
     def _browse_show_names(self) -> list[str]:
         if self._kids_mode_active:
-            return self._kids_filtered_show_names()
-        return list(self.show_names)
+            base = self._kids_filtered_show_names()
+        else:
+            base = list(self.show_names)
+        return self._filtered_show_names(base)
 
     def _browse_movie_names(self) -> list[str]:
         if self._kids_mode_active:
-            return self._kids_filtered_movie_names()
-        return list(self.movie_names)
+            base = self._kids_filtered_movie_names()
+        else:
+            base = list(self.movie_names)
+        return self._filtered_movie_names(base)
 
     def _kids_has_assigned_titles(self) -> bool:
         """True when at least one tagged kids title is present in the library."""
@@ -1032,8 +1055,9 @@ class TVTimeCapsule:
             self.config.get("channels") or {},
             self.shows,
         )
+        fav_shows = getattr(self, "_favorite_shows", None) or []
         ordered, show_to_ch, ch_to_show = build_channel_lineup(
-            self.shows.keys(), channels_cfg
+            self.shows.keys(), channels_cfg, favorite_names=fav_shows
         )
         self.show_names = ordered
         self._show_channel = show_to_ch
@@ -1042,8 +1066,9 @@ class TVTimeCapsule:
     def _apply_movie_lineup(self):
         """Order ``movie_names`` and rebuild movie channel maps."""
         channels_cfg = self.config.get("channels") or {}
+        fav_movies = getattr(self, "_favorite_movies", None) or []
         ordered, movie_to_ch, ch_to_movie = build_channel_lineup(
-            self.movies.keys(), channels_cfg
+            self.movies.keys(), channels_cfg, favorite_names=fav_movies
         )
         self.movie_names = ordered
         self._movie_channel = movie_to_ch
@@ -1054,8 +1079,34 @@ class TVTimeCapsule:
         key = "kids" if self._kids_mode_active else "parent"
         tokens = hm.get(key)
         if not isinstance(tokens, list) or not tokens:
-            return ["shows", "movies", "weather"]
-        return [str(t) for t in tokens]
+            return list(
+                DEFAULT_KIDS_HOME_MENU_TOKENS
+                if self._kids_mode_active
+                else DEFAULT_HOME_MENU_TOKENS
+            )
+        tokens = [str(t) for t in tokens]
+        if not self._kids_mode_active:
+            return tokens
+        # Kids home is the full-bleed Shows/Movies poster tiles. Browse-QoL
+        # tokens (continue/favorites/recent/tvguide) collapse that layout into
+        # the parent text stack — keep them parent-only.
+        library = [t for t in tokens if t in ("shows", "movies")]
+        specials = [
+            t
+            for t in tokens
+            if t
+            not in (
+                "shows",
+                "movies",
+                "continue",
+                "favorites",
+                "recent",
+                "tvguide",
+            )
+        ]
+        if not library:
+            library = list(DEFAULT_KIDS_HOME_MENU_TOKENS)
+        return library + specials
 
     def _resolved_home_rows(self) -> list[dict]:
         """Active home-menu rows after feature / library filters."""
@@ -1064,7 +1115,7 @@ class TVTimeCapsule:
         rows: list[dict] = []
         for tok in self._home_menu_tokens():
             if tok == "shows":
-                if self.library_layout == "movies_only" and show_count == 0:
+                if show_count == 0:
                     continue
                 rows.append(
                     {
@@ -1076,7 +1127,7 @@ class TVTimeCapsule:
                     }
                 )
             elif tok == "movies":
-                if self.library_layout == "legacy" and movie_count == 0:
+                if movie_count == 0:
                     continue
                 rows.append(
                     {
@@ -1129,6 +1180,80 @@ class TVTimeCapsule:
                         "dial": tok,
                     }
                 )
+            elif tok == "continue":
+                base = (
+                    self._kids_filtered_show_names()
+                    if self._kids_mode_active
+                    else list(self.show_names)
+                )
+                items = list_continue_watching(self.state, known_shows=set(base))
+                if not items:
+                    continue
+                n = len(items)
+                rows.append(
+                    {
+                        "kind": "continue",
+                        "token": "continue",
+                        "name": "CONTINUE",
+                        "count": n,
+                        "subtitle": f"{n} in progress",
+                    }
+                )
+            elif tok == "favorites":
+                base_s = (
+                    self._kids_filtered_show_names()
+                    if self._kids_mode_active
+                    else list(self.show_names)
+                )
+                base_m = (
+                    self._kids_filtered_movie_names()
+                    if self._kids_mode_active
+                    else list(self.movie_names)
+                )
+                known_s, known_m = set(base_s), set(base_m)
+                n = len([x for x in self._favorite_shows if x in known_s]) + len(
+                    [x for x in self._favorite_movies if x in known_m]
+                )
+                if n == 0:
+                    continue
+                rows.append(
+                    {
+                        "kind": "favorites",
+                        "token": "favorites",
+                        "name": "FAVORITES",
+                        "count": n,
+                        "subtitle": f"{n} pinned",
+                    }
+                )
+            elif tok == "recent":
+                base = (
+                    self._kids_filtered_show_names()
+                    if self._kids_mode_active
+                    else list(self.show_names)
+                )
+                items = list_recently_watched(self.state, known_shows=set(base))
+                if not items:
+                    continue
+                n = len(items)
+                rows.append(
+                    {
+                        "kind": "recent",
+                        "token": "recent",
+                        "name": "RECENT",
+                        "count": n,
+                        "subtitle": f"{n} recent",
+                    }
+                )
+            elif tok == "tvguide":
+                rows.append(
+                    {
+                        "kind": "tvguide",
+                        "token": "tvguide",
+                        "name": "TV GUIDE",
+                        "count": None,
+                        "subtitle": "Channel 005",
+                    }
+                )
             else:
                 slug = decade_slug_for_token(tok)
                 if slug is None or not self._feature_enabled("retro_tv"):
@@ -1145,6 +1270,20 @@ class TVTimeCapsule:
                     }
                 )
         return rows
+
+    def _toast_empty_library_if_needed(self) -> None:
+        """Snackbar when the library has neither shows nor movies."""
+        if self.show_names or self.movie_names:
+            return
+        msg = "No media found. Configure media sources"
+        now = pygame.time.get_ticks()
+        if (
+            self._mode_toast_message == msg
+            and self._mode_toast_until > now
+        ):
+            return
+        self._mode_toast_message = msg
+        self._mode_toast_until = now + max(CHANNEL_ERROR_MS, 4000)
 
     def _uses_home_menu(self) -> bool:
         """True when the top-level picker should be shown (multiple home rows)."""
@@ -1393,7 +1532,7 @@ class TVTimeCapsule:
         force_youtube_refresh: bool = False,
     ) -> None:
         if discovery is None:
-            discovery = discover_library(self.media_paths, device_name=self._device_name)
+            discovery = discover_library(self.media_paths, device_name=self._device_name, read_only=getattr(self, "_media_read_only", False))
         self.library_layout = discovery.get("layout", "legacy")
         self.shows = dict(discovery.get("shows") or {})
         self.movies = discovery.get("movies") or {}
@@ -1419,6 +1558,7 @@ class TVTimeCapsule:
         if set_initial_view:
             self.view = self._view_for_library_layout()
             self.cursor = 0
+        self._toast_empty_library_if_needed()
 
     def _display_channel(self, show_name: str) -> int:
         return self._show_channel.get(show_name, 0)
@@ -1430,15 +1570,19 @@ class TVTimeCapsule:
         return isinstance(show, dict) and show.get("source") == "youtube"
 
     def _title_badge_text(self, *, show: str | None = None, movie: str | None = None) -> str:
-        """Header badge for kids-tagged titles (parent mode only)."""
+        """Header badge for favorites / kids-tagged titles (parent mode)."""
+        parts: list[str] = []
+        name = show or movie
+        if name and not self._kids_mode_active and self._is_favorite(name, movies=bool(movie)):
+            parts.append("*fav")
         kids = False
         if show:
             kids = self._title_kids_tagged(show=show)
         elif movie:
             kids = self._title_kids_tagged(movie=movie)
         if not self._kids_mode_active and kids:
-            return "[kids]"
-        return ""
+            parts.append("[kids]")
+        return " ".join(parts)
 
     def _show_info_line(self, show_name: str, data: dict | None = None) -> str:
         """Subtitle under a show title (episode count, optional YouTube marker)."""
@@ -1534,8 +1678,10 @@ class TVTimeCapsule:
             prev_movie = self.movie_names[self.cursor]
 
         if any_present and not (all_unchanged and self._media_signatures and has_youtube):
-            discovery = discover_library(self.media_paths, device_name=self._device_name)
+            discovery = discover_library(self.media_paths, device_name=self._device_name, read_only=getattr(self, "_media_read_only", False))
             self._apply_library_discovery(discovery, force_youtube_refresh=True)
+            if discovery.get("shows") or discovery.get("movies"):
+                self._mount_warnings = []
         elif has_youtube:
             # Media unchanged (or absent): refresh YouTube catalog in background.
             disk_shows = {
@@ -1632,6 +1778,11 @@ class TVTimeCapsule:
             LOG.debug("quit ignored in kids mode (source=%s)", source)
             return
         LOG.info("exiting (%s)", source)
+        self._write_session_breadcrumb(action="quit", quit_source=source)
+        try:
+            self._save_watch_state()
+        except Exception:
+            pass
         self.running = False
 
     def _handle_quit_event(self, source: str) -> None:
@@ -1693,10 +1844,10 @@ class TVTimeCapsule:
         if self._kids_mode_active and self.view in (
             self.SHOW_LIST,
             self.MOVIE_LIST,
+            self.LIBRARY_SELECT,
         ):
-            if self._kids_browse_style == "full":
-                return 1
-            return KIDS_STACK_VISIBLE
+            # Kids: one full-screen option / title per page.
+            return 1
         return STACK_VISIBLE
 
     def _page_browse(self, direction: int) -> None:
@@ -1974,6 +2125,10 @@ class TVTimeCapsule:
                 self.channel_error = f"Ch {digits} Not Found"
                 self.channel_error_time = pygame.time.get_ticks()
             return
+        if result.kind == DialKind.TV_GUIDE:
+            self._leave_playback_if_needed()
+            self._enter_tv_guide()
+            return
         if result.kind == DialKind.RETRO_TV and result.decade is not None:
             if not self._feature_enabled("retro_tv"):
                 self.channel_error = f"Ch {digits} Not Found"
@@ -2220,11 +2375,6 @@ class TVTimeCapsule:
 
     # ─── Display setup ───────────────────────────────────────────────────
 
-    def _enable_omx_overlay(self):
-        """Use a transparent framebuffer so omxplayer's layer shows through."""
-        self._omx_overlay = True
-        self._create_framebuffer()
-
     def _marquee_scroll_mode(self) -> str:
         """``always`` (default) or ``selected`` — when overflowing titles scroll."""
         ui = self.config.get("ui") or {}
@@ -2413,8 +2563,7 @@ class TVTimeCapsule:
         dw, dh = dst.get_size()
         sw, sh = src.get_size()
         x, y, w, h = self._fit_rect(sw, sh, dw, dh)
-        if not self._omx_overlay:
-            dst.fill(C.BLACK)
+        dst.fill(C.BLACK)
         if (w, h) == (sw, sh):
             scaled = src
         elif w % sw == 0 and h % sh == 0 and (w // sw) == (h // sh):
@@ -2540,11 +2689,8 @@ class TVTimeCapsule:
 
     def _create_framebuffer(self) -> None:
         """Recreate the offscreen logical canvas (safe-zone size)."""
-        flags = pygame.SRCALPHA if self._omx_overlay else 0
-        self.framebuffer = pygame.Surface((self.canvas_w, self.canvas_h), flags)
+        self.framebuffer = pygame.Surface((self.canvas_w, self.canvas_h))
         self.screen = self.framebuffer
-        if self._omx_overlay:
-            self.canvas = self.framebuffer
 
     def _on_window_resize(self, width: int, height: int) -> None:
         """Handle OS window resize — keep 4:3 aspect."""
@@ -3858,15 +4004,19 @@ class TVTimeCapsule:
         if self.view == self.RETRO_TV:
             self._draw_retro_tv()
             return
+        if self.view == self.TV_GUIDE:
+            self._draw_tv_guide()
+            return
         if self.view == self.LIBRARY_SELECT:
             self.draw_library_selector()
         elif self.view == self.SHOW_LIST:
-            if self._kids_mode_active and self._kids_browse_style == "full":
+            # Kids: always one full-height title per page.
+            if self._kids_mode_active:
                 self.draw_kids_full_card()
             else:
                 self.draw_show_browser()
         elif self.view == self.MOVIE_LIST:
-            if self._kids_mode_active and self._kids_browse_style == "full":
+            if self._kids_mode_active:
                 self.draw_kids_full_card()
             else:
                 self.draw_movie_browser()
@@ -4378,6 +4528,8 @@ class TVTimeCapsule:
         return f"Season {season_num}"
 
     def current_items(self):
+        if self.view == self.TV_GUIDE:
+            return list(self._tv_guide_rows)
         if self.view == self.LIBRARY_SELECT:
             return list(self._resolved_home_rows())
         if self.view == self.SHOW_LIST:
@@ -4414,6 +4566,10 @@ class TVTimeCapsule:
             self.draw_channel_overlay()
             self._draw_mode_toast()
             self._draw_rescan_banner()
+            banner = self._mount_banner_text()
+            if banner:
+                self._draw_popup_banner(banner)
+            self._draw_pin_prompt()
             self._apply_analog_artifacts()
         self._apply_channel_fx()
 
@@ -4602,8 +4758,11 @@ class TVTimeCapsule:
 
     def draw_library_selector(self):
         """Top-level home menu (shows / movies / pinned specials)."""
+        self._toast_empty_library_if_needed()
         items = self.current_items()
-        if self._kids_mode_active and 1 <= len(items) <= 2:
+        # Kids mode always uses the full-bleed Shows/Movies tiles with cycling
+        # posters — never the parent text stack (even when weather/continue are pinned).
+        if self._kids_mode_active:
             self._draw_kids_library_selector()
             return
 
@@ -4646,18 +4805,44 @@ class TVTimeCapsule:
 
         self._draw_footer()
 
+    def _resolve_episode_local_video(self, episode: dict | None) -> str | None:
+        """Map an episode dict to an on-disk file (including YouTube offline cache)."""
+        if not isinstance(episode, dict):
+            return None
+        path = episode.get("path")
+        if path and os.path.isfile(path) and not str(path).startswith("yt:"):
+            return str(path)
+        if is_youtube_episode(episode):
+            cache = getattr(self, "_yt_offline", None)
+            if cache is not None:
+                cached = cache.cached_path(youtube_id_from_episode(episode))
+                if cached is not None and os.path.isfile(cached):
+                    return str(cached)
+        return None
+
+    def _ffmpeg_for_thumbs(self) -> str | None:
+        player = getattr(self, "player", None)
+        path = getattr(player, "ffmpeg_path", None) if player else None
+        return path or detect_ffmpeg()
+
     def _show_thumbnail_paths(self) -> list[str]:
         """Poster/thumbnail paths for the show library only (one per show)."""
         paths: list[str] = []
         movie_keys = set(self.movies.keys())
         names = self._browse_show_names() if self._kids_mode_active else self.show_names
+        ffmpeg = self._ffmpeg_for_thumbs()
         for name in names:
             if name in movie_keys:
                 continue
             show = self.shows.get(name)
             if not show:
                 continue
-            thumb = show.get("thumbnail")
+            thumb = ensure_show_thumbnail(
+                name,
+                show,
+                ffmpeg_path=ffmpeg,
+                resolve_local=self._resolve_episode_local_video,
+            )
             if thumb and os.path.isfile(thumb):
                 paths.append(thumb)
         return paths
@@ -4667,13 +4852,15 @@ class TVTimeCapsule:
         paths: list[str] = []
         show_names = set(self.show_names)
         names = self._browse_movie_names() if self._kids_mode_active else self.movie_names
+        ffmpeg = self._ffmpeg_for_thumbs()
         for key in names:
             if key in show_names:
                 continue
             movie = self.movies.get(key)
             if not movie:
                 continue
-            thumb = movie.get("thumbnail")
+            title = movie.get("title") or key
+            thumb = ensure_movie_thumbnail(title, movie, ffmpeg_path=ffmpeg)
             if thumb and os.path.isfile(thumb):
                 paths.append(thumb)
         return paths
@@ -4684,12 +4871,11 @@ class TVTimeCapsule:
         area_h: int,
         max_visible: int = LIBRARY_THUMB_VISIBLE,
     ) -> tuple[int, int, int]:
-        """Return ``(slot_count, cell_w, cell_h)`` for 4:3 tiles in *area_w* × *area_h*."""
+        """Return ``(slot_count, cell_w, cell_h)`` for a horizontal strip (legacy)."""
         if area_w <= 0 or area_h <= 0 or max_visible <= 0:
             return 0, 0, 0
         aspect_w, aspect_h = LIBRARY_THUMB_ASPECT
         gap = LIBRARY_THUMB_GAP
-        # Try to fit max_visible thumbnails; if too wide, reduce count.
         slots = max_visible
         while slots > 0:
             total_gap = max(0, slots - 1) * gap
@@ -4707,6 +4893,57 @@ class TVTimeCapsule:
                     continue
             break
         return slots, cell_w, cell_h
+
+    @staticmethod
+    def _library_thumb_grid_layout(
+        area_w: int,
+        area_h: int,
+        *,
+        cols: int = LIBRARY_THUMB_GRID_COLS,
+        rows: int = LIBRARY_THUMB_GRID_ROWS,
+        gap: int = LIBRARY_THUMB_GAP,
+    ) -> tuple[int, int, int, int]:
+        """Return ``(cols, rows, cell_w, cell_h)`` filling *area* as much as possible."""
+        cols = max(1, int(cols))
+        rows = max(1, int(rows))
+        if area_w <= 0 or area_h <= 0:
+            return 0, 0, 0, 0
+        cell_w = max(1, (area_w - gap * (cols - 1)) // cols)
+        cell_h = max(1, (area_h - gap * (rows - 1)) // rows)
+        return cols, rows, cell_w, cell_h
+
+    def _draw_library_thumb_grid(
+        self, thumb_area: pygame.Rect, paths: list[str]
+    ) -> None:
+        """Draw up to 4 thumbnails in a 2×2 grid filling *thumb_area*."""
+        if not paths or thumb_area.w <= 0 or thumb_area.h <= 0:
+            return
+        cols, rows, cell_w, cell_h = self._library_thumb_grid_layout(
+            thumb_area.w, thumb_area.h
+        )
+        if cols <= 0 or rows <= 0:
+            return
+        gap = LIBRARY_THUMB_GAP
+        used_w = cols * cell_w + (cols - 1) * gap
+        used_h = rows * cell_h + (rows - 1) * gap
+        x0 = thumb_area.x + max(0, (thumb_area.w - used_w) // 2)
+        y0 = thumb_area.y + max(0, (thumb_area.h - used_h) // 2)
+        slots = cols * rows
+        for i in range(slots):
+            path = paths[i % len(paths)]
+            col = i % cols
+            row = i // cols
+            cell = pygame.Rect(
+                x0 + col * (cell_w + gap),
+                y0 + row * (cell_h + gap),
+                cell_w,
+                cell_h,
+            )
+            pygame.draw.rect(self.screen, (20, 28, 45), cell, border_radius=4)
+            if not self._blit_image_cover(path, cell):
+                if not self._blit_image_fit(path, cell):
+                    ph = self.font_sm.render("?", True, self._dim_color())
+                    self.screen.blit(ph, ph.get_rect(center=cell.center))
 
     @staticmethod
     def _library_thumb_window(
@@ -4755,7 +4992,7 @@ class TVTimeCapsule:
         channel_num: int,
         selected: bool,
     ) -> None:
-        """Large half-screen Shows / Movies tile for kid-friendly mode."""
+        """Full-screen Shows / Movies card: sidebar label + rotating nested thumbs."""
         if rect.w <= 0 or rect.h <= 0:
             return
         radius = min(12, rect.w // 4, rect.h // 4)
@@ -4771,17 +5008,28 @@ class TVTimeCapsule:
         inner.w = max(1, inner.w)
         inner.h = max(1, inner.h)
 
-        ch_surf = self.font_lg.render(str(channel_num), True, C.GREEN if selected else self._dim_color())
+        label_surf = self.font_lg.render(label, True, C.BRIGHT if selected else C.WHITE)
+        ch_surf = self.font_md.render(
+            str(channel_num), True, C.GREEN if selected else self._dim_color()
+        )
         if kind in ("show", "movie"):
             count_text = f"{count} title{'s' if count != 1 else ''}"
         else:
             count_text = ""
-        count_surf = self.font_sm.render(count_text, True, C.BLUE) if count_text else None
+        count_surf = (
+            self.font_sm.render(
+                count_text, True, C.GREEN if selected else self._dim_color()
+            )
+            if count_text
+            else None
+        )
         sidebar_w = max(
+            LIBRARY_SIDEBAR_W,
+            label_surf.get_width() + 20,
             ch_surf.get_width() + 20,
             (count_surf.get_width() + 20) if count_surf else 0,
         )
-        sidebar_w = min(sidebar_w, max(80, inner.w // 3))
+        sidebar_w = min(sidebar_w, max(120, inner.w // 2))
         sidebar_gap = 14
         sidebar = pygame.Rect(inner.x, inner.y, sidebar_w, inner.h)
         thumb_area = pygame.Rect(
@@ -4791,13 +5039,17 @@ class TVTimeCapsule:
             inner.h,
         )
 
-        # Channel number: centered vertically
-        ch_y = sidebar.y + (sidebar.h - ch_surf.get_height()) // 2
-        self.screen.blit(ch_surf, (sidebar.x, ch_y))
-        # Count text: bottom of sidebar
+        text_gap = 8
+        stack_h = ch_surf.get_height() + text_gap + label_surf.get_height()
         if count_surf is not None:
-            count_y = sidebar.bottom - count_surf.get_height() - 8
-            self.screen.blit(count_surf, (sidebar.x, count_y))
+            stack_h += text_gap + count_surf.get_height()
+        text_y = sidebar.y + max(0, (sidebar.h - stack_h) // 2)
+        self.screen.blit(ch_surf, (sidebar.x, text_y))
+        text_y += ch_surf.get_height() + text_gap
+        self.screen.blit(label_surf, (sidebar.x, text_y))
+        text_y += label_surf.get_height() + text_gap
+        if count_surf is not None:
+            self.screen.blit(count_surf, (sidebar.x, text_y))
 
         if kind == "show":
             all_paths = self._show_thumbnail_paths()
@@ -4805,40 +5057,22 @@ class TVTimeCapsule:
         elif kind == "movie":
             all_paths = self._movie_thumbnail_paths()
             start_idx = self._library_movies_thumb_idx
+        elif kind == "weather":
+            path = ensure_weather_thumbnail()
+            if path:
+                # One branded icon filling the usable thumb area.
+                pygame.draw.rect(self.screen, (20, 28, 45), thumb_area, border_radius=4)
+                self._blit_image_cover(path, thumb_area)
+            return
         else:
-            # Weather / decades / specials — label only.
-            label_surf = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
-            self.screen.blit(
-                label_surf,
-                label_surf.get_rect(center=thumb_area.center),
-            )
             return
 
-        slot_count, cell_w, cell_h = self._library_thumb_slot_layout(
-            thumb_area.w,
-            thumb_area.h,
-            LIBRARY_THUMB_VISIBLE,
+        thumb_paths = self._library_thumb_window(
+            all_paths, start_idx, LIBRARY_THUMB_VISIBLE
         )
-        thumb_paths = self._library_thumb_window(all_paths, start_idx, slot_count)
         if not thumb_paths:
-            label_surf = self.font_md.render(label, True, C.BRIGHT if selected else C.WHITE)
-            self.screen.blit(
-                label_surf,
-                label_surf.get_rect(center=thumb_area.center),
-            )
             return
-
-        gap = LIBRARY_THUMB_GAP
-        n = len(thumb_paths)
-        strip_w = n * cell_w + max(0, n - 1) * gap
-        x0 = thumb_area.x + max(0, (thumb_area.w - strip_w) // 2)
-        y0 = thumb_area.y + max(0, (thumb_area.h - cell_h) // 2)
-        for i, path in enumerate(thumb_paths):
-            cell = pygame.Rect(x0 + i * (cell_w + gap), y0, cell_w, cell_h)
-            pygame.draw.rect(self.screen, (20, 28, 45), cell, border_radius=4)
-            if not self._blit_image_fit(path, cell):
-                ph = self.font_sm.render("?", True, self._dim_color())
-                self.screen.blit(ph, ph.get_rect(center=cell.center))
+        self._draw_library_thumb_grid(thumb_area, thumb_paths)
 
     def _draw_kids_carousel_panel(
         self,
@@ -4973,7 +5207,7 @@ class TVTimeCapsule:
             self.screen.blit(ph, ph.get_rect(center=right_rect.center))
 
     def _draw_kids_library_selector(self) -> None:
-        """Kid-friendly Shows / Movies picker — two large tiles with cycling art."""
+        """Kid-friendly home — one full-screen option with 3–4 rotating nested thumbs."""
         self._advance_library_thumbnail_cycle()
         self.screen.fill(C.BG)
         items = self.current_items()
@@ -4982,56 +5216,62 @@ class TVTimeCapsule:
             self.screen.blit(t, t.get_rect(center=(self.sw // 2, self.sh // 2)))
             return
 
-        header_text = items[self.cursor]["name"] if items else "LIBRARY"
-        header_h = self._draw_header(header_text, ch_num="")
-        pad = 14
-        gap = 14
-        content_h = self.sh - header_h
-        panel_h = max(80, (content_h - pad * 2 - gap) // 2)
-        panel_w = max(1, self.sw - pad * 2)
+        total = len(items)
+        self.cursor = min(self.cursor, total - 1)
+        item = items[self.cursor]
+        kind = item.get("kind") or "shows"
+        panel_kind = (
+            "show"
+            if kind == "shows"
+            else "movie"
+            if kind == "movies"
+            else "weather"
+            if kind == "weather"
+            else "special"
+        )
+        count = item.get("count")
+        ch_num = self.cursor + 1
+        label = str(item.get("name") or "LIBRARY")
 
-        if self._kids_carousel_active:
-            for i, item in enumerate(items):
-                y = header_h + pad + i * (panel_h + gap)
-                rect = pygame.Rect(pad, y, panel_w, panel_h)
-                kind = item.get("kind") or "shows"
-                panel_kind = (
-                    "show"
-                    if kind == "shows"
-                    else "movie"
-                    if kind == "movies"
-                    else "special"
-                )
-                count = item.get("count")
-                self._draw_kids_carousel_panel(
-                    rect,
-                    item["name"],
-                    0 if count is None else int(count),
-                    kind=panel_kind,
-                    channel_num=i + 1,
-                    selected=(i == self.cursor),
-                )
-        else:
-            for i, item in enumerate(items):
-                y = header_h + pad + i * (panel_h + gap)
-                rect = pygame.Rect(pad, y, panel_w, panel_h)
-                kind = item.get("kind") or "shows"
-                panel_kind = (
-                    "show"
-                    if kind == "shows"
-                    else "movie"
-                    if kind == "movies"
-                    else "special"
-                )
-                count = item.get("count")
-                self._draw_kids_library_panel(
-                    rect,
-                    item["name"],
-                    0 if count is None else int(count),
-                    kind=panel_kind,
-                    channel_num=i + 1,
-                    selected=(i == self.cursor),
-                )
+        self._draw_header(label.upper(), ch_num=ch_num)
+
+        layout = self._show_browser_layout(self._header_bar_h(), kids=True)
+        nav_h = layout["nav_h"]
+        up_y = layout["up_y"]
+        down_y = layout["down_y"]
+        content_y = layout["content_y"]
+        content_h = max(40, layout["content_bottom"] - content_y)
+
+        self._draw_arrow_nav_bar(up_y, nav_h, "up", self.cursor > 0)
+        self._draw_arrow_nav_bar(down_y, nav_h, "down", self.cursor < total - 1)
+
+        card_pad = 8
+        card_rect = pygame.Rect(
+            card_pad,
+            content_y + 2,
+            self.sw - card_pad * 2,
+            content_h - 4,
+        )
+
+        if self._kids_carousel_active and panel_kind in ("show", "movie"):
+            self._draw_kids_carousel_panel(
+                card_rect,
+                label,
+                0 if count is None else int(count),
+                kind=panel_kind,
+                channel_num=ch_num,
+                selected=True,
+            )
+            return
+
+        self._draw_kids_library_panel(
+            card_rect,
+            label,
+            0 if count is None else int(count),
+            kind=panel_kind,
+            channel_num=ch_num,
+            selected=True,
+        )
 
     def draw_movie_browser(self):
         """Paged movie list (stack of title cards)."""
@@ -5142,13 +5382,27 @@ class TVTimeCapsule:
         if self.view == self.SHOW_LIST:
             names = self._browse_show_names()
             get_title = lambda n: n
-            get_thumb = lambda n: self.shows.get(n, {}).get("thumbnail")
             get_ch = self._display_channel
+
+            def get_thumb(n):
+                show = self.shows.get(n, {})
+                return ensure_show_thumbnail(
+                    n,
+                    show,
+                    ffmpeg_path=self._ffmpeg_for_thumbs(),
+                    resolve_local=self._resolve_episode_local_video,
+                )
         else:
             names = self._browse_movie_names()
             get_title = lambda k: self.movies.get(k, {}).get("title") or k
-            get_thumb = lambda k: self.movies.get(k, {}).get("thumbnail")
             get_ch = self._display_movie_channel
+
+            def get_thumb(k):
+                movie = self.movies.get(k, {})
+                title = movie.get("title") or k
+                return ensure_movie_thumbnail(
+                    title, movie, ffmpeg_path=self._ffmpeg_for_thumbs()
+                )
 
         if not names:
             msg = (
@@ -5164,10 +5418,8 @@ class TVTimeCapsule:
         key = names[self.cursor]
         title = get_title(key)
         ch_num = get_ch(key)
-        if self.view == self.SHOW_LIST:
-            self._draw_header(key.upper(), badge_text=self._title_badge_text(show=key))
-        else:
-            self._draw_header(title.upper())
+        # Minimal header — title only; the poster fills the rest of the screen.
+        self._draw_header(str(title).upper(), ch_num=ch_num)
 
         layout = self._show_browser_layout(self._header_bar_h(), kids=True)
         nav_h = layout["nav_h"]
@@ -5177,44 +5429,36 @@ class TVTimeCapsule:
         content_bottom = layout["content_bottom"]
         content_h = max(40, content_bottom - content_y)
 
-        # Up arrow
         up_active = self.cursor > 0
         self._draw_arrow_nav_bar(up_y, nav_h, "up", up_active)
-
-        # Down arrow
         down_active = self.cursor < total - 1
         self._draw_arrow_nav_bar(down_y, nav_h, "down", down_active)
 
-        # Full-height card
-        card_pad = 12
+        # Full-height poster card (thumbnail dominates; channel overlays corner).
+        card_pad = 8
         card_rect = pygame.Rect(
-            card_pad, content_y + 4,
-            self.sw - card_pad * 2, content_h - 8,
+            card_pad,
+            content_y + 2,
+            self.sw - card_pad * 2,
+            content_h - 4,
         )
         pygame.draw.rect(self.screen, C.BG_CARD, card_rect, border_radius=10)
-        pygame.draw.rect(self.screen, C.CYAN, card_rect.inflate(2, 2), 2, border_radius=10)
+        pygame.draw.rect(self.screen, C.CYAN, card_rect.inflate(2, 2), 3, border_radius=10)
 
-        # Large channel number on the left
-        ch_str = str(ch_num)
-        ch_surf = self.font_lg.render(ch_str, True, C.GREEN)
-        ch_x = card_rect.x + 18
-        ch_y = card_rect.y + (card_rect.height - ch_surf.get_height()) // 2
-        self.screen.blit(ch_surf, (ch_x, ch_y))
-
-        # Thumbnail fills remaining space
-        thumb_x = ch_x + ch_surf.get_width() + 20
-        thumb_w = max(40, card_rect.right - thumb_x - 16)
-        thumb_h = max(40, card_rect.height - 20)
         thumb_path = get_thumb(key)
-        thumb = self.load_image(thumb_path, (thumb_w, thumb_h))
+        # Prefer cover-fit so one show fills the card (letterbox only if needed).
+        thumb = self.load_image(
+            thumb_path,
+            (max(40, card_rect.w - 16), max(40, card_rect.h - 16)),
+            cover=True,
+        )
 
         if thumb:
-            tx = thumb_x + (thumb_w - thumb.get_width()) // 2
-            ty = card_rect.y + (card_rect.height - thumb.get_height()) // 2
+            tx = card_rect.x + (card_rect.w - thumb.get_width()) // 2
+            ty = card_rect.y + (card_rect.h - thumb.get_height()) // 2
             self.screen.blit(thumb, (tx, ty))
         else:
-            # No thumbnail — show title large
-            max_w = thumb_w
+            max_w = card_rect.w - 32
             lines = self._wrap_text(title.upper(), self.font_lg, max_w)
             line_h = self.font_lg.size("Mg")[1] + 6
             total_text_h = len(lines) * line_h
@@ -5223,8 +5467,24 @@ class TVTimeCapsule:
                 surf = self.font_lg.render(line, True, C.WHITE)
                 self.screen.blit(
                     surf,
-                    surf.get_rect(centerx=thumb_x + thumb_w // 2, top=text_start_y + i * line_h),
+                    surf.get_rect(centerx=card_rect.centerx, top=text_start_y + i * line_h),
                 )
+
+        # Channel badge over the poster (bottom-left).
+        ch_surf = self.font_lg.render(str(ch_num), True, C.GREEN)
+        badge_pad = 10
+        badge_bg = pygame.Surface(
+            (ch_surf.get_width() + badge_pad * 2, ch_surf.get_height() + badge_pad),
+            pygame.SRCALPHA,
+        )
+        badge_bg.fill((0, 0, 0, 160))
+        bx = card_rect.x + 12
+        by = card_rect.bottom - badge_bg.get_height() - 12
+        self.screen.blit(badge_bg, (bx, by))
+        self.screen.blit(
+            ch_surf,
+            (bx + badge_pad, by + (badge_bg.get_height() - ch_surf.get_height()) // 2),
+        )
 
     def draw_season_browser(self):
         """Season browser: vertical stack of season cards."""
@@ -5555,28 +5815,24 @@ class TVTimeCapsule:
         """Render video frame with overlays during playback.
 
         Video is full-bleed on the whole canvas; HUD alone respects safe-zone inset.
-        Omxplayer mode: video renders on hardware layer — overlays only on canvas.
         """
         self._draw_playback_content()
 
     def _draw_playback_content(self):
         cw, ch = self.canvas_w, self.canvas_h
-        if self.player and self.player.use_omx:
-            # omxplayer renders on its own hardware layer — don't fill black
-            pass
-        else:
-            self.screen.fill(C.BLACK)
+        self.screen.fill(C.BLACK)
 
         if self.player:
             frame = self.player.get_frame()
             if frame:
-                # FFmpeg scales/pads to the full canvas — blit edge to edge.
-                if frame.get_size() == (cw, ch):
-                    self.screen.blit(frame, (0, 0))
-                else:
-                    scaled = pygame.transform.scale(frame, (cw, ch))
-                    self.screen.blit(scaled, (0, 0))
-            elif not self.player.use_omx:
+                # FFmpeg / YouTube crop+zoom already baked into get_frame —
+                # blit edge to edge so the screen matches the poster capture.
+                if frame.get_size() != (cw, ch):
+                    frame = pygame.transform.scale(frame, (cw, ch))
+                self.screen.blit(frame, (0, 0))
+                self._last_displayed_video_frame = frame
+            else:
+                self._last_displayed_video_frame = None
                 banner = (
                     "Waiting for Ads..."
                     if getattr(self.player, "waiting_for_ad", False)
@@ -5590,6 +5846,8 @@ class TVTimeCapsule:
         self.draw_cache_status_overlay()
         if self._playback_stalled:
             self.draw_stall_overlay()
+        if self._set_thumb_confirm:
+            self.draw_set_thumbnail_confirm()
         self._draw_mode_toast()
 
         self._apply_channel_fx()
@@ -5737,6 +5995,34 @@ class TVTimeCapsule:
             return
 
         rect, scale = self._playback_overlay_layout()
+        if getattr(self, "_pause_cc_osd", False):
+            # Subtle tracking lines + fake closed-caption bar
+            for y in range(rect.y, rect.y + rect.h, 6):
+                pygame.draw.line(
+                    self.screen,
+                    (20, 28, 40),
+                    (rect.x, y),
+                    (rect.x + rect.w, y),
+                    1,
+                )
+            show = vcr_safe_text(str(self.playing_show or self.cur_show or ""))
+            cc = f"♪ {show}" if show else "♪"
+            if len(cc) > 36:
+                cc = cc[:33] + "..."
+            bar_h = max(28, int(36 * scale))
+            bar = pygame.Surface((rect.w, bar_h), pygame.SRCALPHA)
+            bar.fill((0, 0, 0, 160))
+            self.screen.blit(bar, (rect.x, rect.y + rect.h - bar_h - 12))
+            cc_surf = self._scale_overlay_surface(
+                self.font_sm.render(cc, True, C.WHITE), scale
+            )
+            self.screen.blit(
+                cc_surf,
+                (
+                    rect.x + 16,
+                    rect.y + rect.h - bar_h - 12 + (bar_h - cc_surf.get_height()) // 2,
+                ),
+            )
         txt = self._scale_overlay_surface(
             self.font_lg.render("PAUSED", True, C.GREEN), scale
         )
@@ -5761,18 +6047,18 @@ class TVTimeCapsule:
         number_section = (
             [
                 ("DIAL", None),
-                ("channel / index", "1-999 (~1.5s)"),
+                ("channel / index", "1-999 (1.5s)"),
                 ("back", "0"),
                 ("prev / next page", "01 / 02"),
                 ("alphabet jump", "00 or " + bind("letter_menu")),
-                ("secrets", "000 — Secrets page"),
+                ("secrets", "000 - Secrets page"),
             ]
             if device == "keyboard"
             else [
                 ("DIAL", None),
                 ("channel / page codes", "keyboard digits"),
                 ("alphabet / kids / help", "keyboard only"),
-                ("secrets", "keyboard 000+ — Secrets page"),
+                ("secrets", "keyboard 000+ - Secrets page"),
             ]
         )
         pages: list[tuple[str, list[tuple[str, str | None]]]] = [
@@ -5780,7 +6066,7 @@ class TVTimeCapsule:
                 "Overview",
                 [
                     ("ABOUT", None),
-                    ("what is this", "Cable-style show & movie browser"),
+                    ("what is this", "Cable-style show and movie browser"),
                     ("open this help", bind("help")),
                     ("hide status bar", bind("footer_hints_toggle")),
                     ("kids / parent mode", bind("kids_mode_toggle")),
@@ -5908,10 +6194,10 @@ class TVTimeCapsule:
                 [
                     ("WATCHING", None),
                     ("volume", f"{up} / {down}"),
-                    ("seek", f"{left} / {right} (±10s)"),
+                    ("seek", f"{left} / {right} (+/-10s)"),
                     (
                         "skip ep",
-                        f"2× {right}/{left} or {bind('next_episode')}/{bind('prev_episode')}",
+                        f"{bind('next_episode')} / {bind('prev_episode')}",
                     ),
                     ("pause", select),
                     (
@@ -5957,7 +6243,7 @@ class TVTimeCapsule:
 
     def _ellipsize_help_text(self, font, text: str, max_w: int) -> str:
         """Trim ``text`` so its rendered width fits ``max_w``."""
-        text = text or ""
+        text = vcr_safe_text(text or "")
         if max_w <= 0 or not text:
             return ""
         if font.size(text)[0] <= max_w:
@@ -5974,13 +6260,49 @@ class TVTimeCapsule:
                 hi = mid - 1
         return text[:lo] + ell if lo else ell
 
+    def _help_row_layout(self, label: str, detail: str):
+        """Return layout slots for a help label/detail row.
+
+        ``(label, label_x, label_w, detail, detail_x, detail_w, stacked)``
+        """
+        font = self.font_sm
+        label = vcr_safe_text(label or "")
+        detail = vcr_safe_text(detail or "")
+        left_x = 56
+        right_margin = 40
+        gap = 16
+        label_max_w = max(40, self.sw // 2 - left_x)
+        label_nat_w = font.size(label)[0] if label else 0
+        label_w = min(label_nat_w, label_max_w) if label else 0
+        remaining = self.sw - left_x - label_w - gap - right_margin
+        # Stack when the label ate the row and detail needs a full-width pass.
+        stacked = remaining < 40 and bool(detail)
+        if stacked:
+            full_w = max(40, self.sw - left_x - right_margin)
+            return (label, left_x, full_w, detail, left_x, full_w, True)
+        detail_budget = max(40, remaining)
+        detail_nat_w = font.size(detail)[0] if detail else 0
+        if detail_nat_w <= detail_budget:
+            detail_x = self.sw - right_margin - detail_nat_w
+            detail_w = detail_nat_w
+        else:
+            detail_x = self.sw - right_margin - detail_budget
+            detail_w = detail_budget
+        return (
+            label,
+            left_x,
+            label_w or label_max_w,
+            detail,
+            detail_x,
+            detail_w,
+            False,
+        )
+
     def _splash_help_content_height(self, lines, section_gap):
         """Total height of the help menu text block (matches draw layout)."""
         y = 0
         first_section = True
-        left_x = 56
-        right_margin = 40
-        gap = 16
+        row_h = self.font_sm.get_height()
         for label, detail in lines:
             if detail is None:
                 if not first_section:
@@ -5988,81 +6310,86 @@ class TVTimeCapsule:
                 first_section = False
                 y += self.font_sm.render(label, True, C.CYAN).get_height() + 4
             else:
-                lt = self.font_sm.render(label, True, C.WHITE)
-                detail_budget = max(
-                    40, self.sw - left_x - lt.get_width() - gap - right_margin
-                )
-                detail_text = self._ellipsize_help_text(
-                    self.font_sm, detail, detail_budget
-                )
-                dt = self.font_sm.render(detail_text, True, C.GREEN)
-                right_x = self.sw - dt.get_width() - right_margin
-                if right_x < left_x + lt.get_width() + gap:
-                    y += lt.get_height() + 2
-                    full_w = max(40, self.sw - left_x - right_margin)
-                    detail_text = self._ellipsize_help_text(
-                        self.font_sm, detail, full_w
-                    )
-                    dt = self.font_sm.render(detail_text, True, C.GREEN)
-                    y += dt.get_height() + 2
+                *_slots, stacked = self._help_row_layout(label, detail)
+                if stacked:
+                    y += row_h + 2 + row_h + 2
                 else:
-                    y += max(lt.get_height(), dt.get_height()) + 3
+                    y += row_h + 3
         return y
 
     def _draw_help_lines(self, lines, y_start, content_max_y, section_gap=10) -> None:
         y = y_start
         first_section = True
         hdr_font = self.font_md if self._large_text else self.font_sm
-        left_x = 56
-        right_margin = 40
-        gap = 16
-        for label, detail in lines:
+        row_h = self.font_sm.get_height()
+        for row_i, (label, detail) in enumerate(lines):
             if y >= content_max_y:
                 break
             if detail is None:
                 if not first_section:
                     y += section_gap
                 first_section = False
-                hdr = hdr_font.render(label, True, C.CYAN)
+                hdr = hdr_font.render(vcr_safe_text(label), True, C.CYAN)
                 if y + hdr.get_height() > content_max_y:
                     break
                 self.screen.blit(hdr, (40, y))
                 y += hdr.get_height() + 4
+                continue
+
+            lab, lab_x, lab_w, det, det_x, det_w, stacked = self._help_row_layout(
+                label, detail
+            )
+            if stacked:
+                if y + row_h > content_max_y:
+                    break
+                self._blit_marquee_text(
+                    lab,
+                    self.font_sm,
+                    C.WHITE,
+                    lab_x,
+                    y,
+                    lab_w,
+                    key=("help-label", row_i, lab),
+                    active=True,
+                )
+                y += row_h + 2
+                if y + row_h > content_max_y:
+                    break
+                self._blit_marquee_text(
+                    det,
+                    self.font_sm,
+                    C.GREEN,
+                    det_x,
+                    y,
+                    det_w,
+                    key=("help-detail", row_i, det),
+                    active=True,
+                )
+                y += row_h + 2
             else:
-                label_text = self._ellipsize_help_text(
-                    self.font_sm, label, max(40, self.sw // 2 - left_x)
+                if y + row_h + 3 > content_max_y:
+                    break
+                self._blit_marquee_text(
+                    lab,
+                    self.font_sm,
+                    C.WHITE,
+                    lab_x,
+                    y,
+                    lab_w,
+                    key=("help-label", row_i, lab),
+                    active=True,
                 )
-                lt = self.font_sm.render(label_text, True, C.WHITE)
-                detail_budget = max(
-                    40, self.sw - left_x - lt.get_width() - gap - right_margin
+                self._blit_marquee_text(
+                    det,
+                    self.font_sm,
+                    C.GREEN,
+                    det_x,
+                    y,
+                    det_w,
+                    key=("help-detail", row_i, det),
+                    active=True,
                 )
-                detail_text = self._ellipsize_help_text(
-                    self.font_sm, detail, detail_budget
-                )
-                dt = self.font_sm.render(detail_text, True, C.GREEN)
-                right_x = self.sw - dt.get_width() - right_margin
-                if right_x < left_x + lt.get_width() + gap:
-                    # Stack: label then detail, both left-aligned and clipped.
-                    if y + lt.get_height() > content_max_y:
-                        break
-                    self.screen.blit(lt, (left_x, y))
-                    y += lt.get_height() + 2
-                    full_w = max(40, self.sw - left_x - right_margin)
-                    detail_text = self._ellipsize_help_text(
-                        self.font_sm, detail, full_w
-                    )
-                    dt = self.font_sm.render(detail_text, True, C.GREEN)
-                    if y + dt.get_height() > content_max_y:
-                        break
-                    self.screen.blit(dt, (left_x, y))
-                    y += dt.get_height() + 2
-                else:
-                    row_h = max(lt.get_height(), dt.get_height()) + 3
-                    if y + row_h > content_max_y:
-                        break
-                    self.screen.blit(lt, (left_x, y))
-                    self.screen.blit(dt, (right_x, y))
-                    y += row_h
+                y += row_h + 3
 
     def draw_startup_splash(self):
         """Brief brand splash on launch. Dismiss with any key."""
@@ -6148,6 +6475,8 @@ class TVTimeCapsule:
         )
         page = max(0, min(len(pages) - 1, page))
         can_toggle_gamepad = self._gamepad_count > 0
+        self._help_marquee_page = (page, device)
+        self._reset_marquee_timeline()
 
         while self.running:
             for event in pygame.event.get():
@@ -6186,11 +6515,19 @@ class TVTimeCapsule:
                     pages = self._help_pages(device=device)
                     page = min(page, len(pages) - 1)
 
+            help_page_key = (page, device)
+            if help_page_key != getattr(self, "_help_marquee_page", None):
+                self._help_marquee_page = help_page_key
+                self._reset_marquee_timeline()
+
             title, lines = pages[page]
             with self._ui_layout(letterbox=True):
+                self._marquee_begin_frame()
                 self.screen.fill(C.BG)
                 device_label = f" ({device.upper()})"
-                hdr = self.font_md.render(title.upper() + device_label, True, C.BRIGHT)
+                hdr = self.font_md.render(
+                    vcr_safe_text(title.upper() + device_label), True, C.BRIGHT
+                )
                 self.screen.blit(hdr, hdr.get_rect(centerx=self.sw // 2, top=18))
                 page_label = self.font_sm.render(
                     f"{page + 1} / {len(pages)}", True, C.GREEN
@@ -6217,12 +6554,17 @@ class TVTimeCapsule:
                     hint_text = f"{toggle} = {other} bindings  |  Esc"
                 else:
                     hint_text = "Esc: close"
-                hint_text = self._ellipsize_help_text(
-                    self.font_sm, hint_text, max(80, self.sw - 40)
-                )
-                hint = self.font_sm.render(hint_text, True, self._dim_color())
-                self.screen.blit(
-                    hint, hint.get_rect(centerx=self.sw // 2, centery=self.sh - 18)
+                hint_w = max(80, self.sw - 40)
+                hint_x = (self.sw - hint_w) // 2
+                self._blit_marquee_text(
+                    vcr_safe_text(hint_text),
+                    self.font_sm,
+                    self._dim_color(),
+                    hint_x,
+                    self.sh - 18 - self.font_sm.get_height() // 2,
+                    hint_w,
+                    key=("help-hint", hint_text),
+                    active=True,
                 )
 
             self.present()
@@ -6453,6 +6795,7 @@ class TVTimeCapsule:
             "select",
             "back",
             "zoom_toggle",
+            "set_thumbnail",
             "next_episode",
             "prev_episode",
             "stop_clear",
@@ -7283,6 +7626,7 @@ class TVTimeCapsule:
             self.SHOW_LIST,
             self.MOVIE_LIST,
             self.LIBRARY_SELECT,
+            self.TV_GUIDE,
         ):
             self._move_cursor_stack(direction, total)
             return
@@ -7312,12 +7656,19 @@ class TVTimeCapsule:
         if not items or self.cursor >= len(items):
             return
 
+        if self.view == self.TV_GUIDE:
+            self._activate_tv_guide_row()
+            return
+
         if self.view == self.SHOW_LIST:
             names = self._browse_show_names()
             if self.cursor >= len(names):
                 return
             show_name = names[self.cursor]
             if self._kids_mode_active:
+                self._kids_play_show(show_name)
+                return
+            if getattr(self, "_browse_filter", None) in ("continue", "recent"):
                 self._kids_play_show(show_name)
                 return
             self.cur_show = show_name
@@ -7394,6 +7745,13 @@ class TVTimeCapsule:
             year_digits = str(row.get("year_digits") or "")
             if isinstance(decade, str) and decade:
                 self._enter_retro_tv(decade, year_digits=year_digits or "1990")
+            return
+        if kind in ("continue", "favorites", "recent"):
+            self._enter_browse_filter(kind)
+            return
+        if kind == "tvguide":
+            self._enter_tv_guide()
+            return
 
     def go_back(self) -> bool:
         """Move one browse level up. Returns True if the view changed."""
@@ -7422,6 +7780,36 @@ class TVTimeCapsule:
             if self.cur_show in names:
                 self.cursor = names.index(self.cur_show)
             else:
+                self.cursor = 0
+
+        elif self.view == self.TV_GUIDE:
+            self.view = self._view_for_library_layout()
+            self.cursor = 0
+
+        elif self.view == self.SHOW_LIST and getattr(self, "_browse_filter", None):
+            filt = self._browse_filter
+            self._clear_browse_filter()
+            if self._uses_home_menu():
+                self.view = self.LIBRARY_SELECT
+                rows = self._resolved_home_rows()
+                self.cursor = next(
+                    (i for i, r in enumerate(rows) if r.get("kind") == filt), 0
+                )
+            else:
+                self.view = self._view_for_library_layout()
+                self.cursor = 0
+
+        elif self.view == self.MOVIE_LIST and getattr(self, "_browse_filter", None):
+            filt = self._browse_filter
+            self._clear_browse_filter()
+            if self._uses_home_menu():
+                self.view = self.LIBRARY_SELECT
+                rows = self._resolved_home_rows()
+                self.cursor = next(
+                    (i for i, r in enumerate(rows) if r.get("kind") == filt), 0
+                )
+            else:
+                self.view = self._view_for_library_layout()
                 self.cursor = 0
 
         elif self.view == self.SHOW_LIST and self._uses_home_menu():
@@ -7706,25 +8094,16 @@ class TVTimeCapsule:
             y += surf.get_height() + 10
 
     def _create_player(self):
-        """Build an EmbeddedPlayer using the best available backend."""
-        player = EmbeddedPlayer(self.canvas_w, self.canvas_h)
+        """Build an EmbeddedPlayer (ffmpeg RGB + ffplay audio)."""
         ffmpeg_path = detect_ffmpeg()
         ffplay_path = detect_ffplay()
-        omx_cmd = detect_omxplayer() if is_pi() else None
-
-        if ffmpeg_path and np_frombuffer is not None:
-            player.ffmpeg_path = ffmpeg_path
-            player.ffplay_path = ffplay_path
-            self.embedded_player = True
-        elif omx_cmd:
-            if not self._omx_overlay:
-                self._enable_omx_overlay()
-            player.use_omx = True
-            player.omx_cmd = omx_cmd
-            self.embedded_player = True
-        else:
+        if not (ffmpeg_path and np_frombuffer is not None):
             return None
+        player = EmbeddedPlayer(self.canvas_w, self.canvas_h)
+        player.ffmpeg_path = ffmpeg_path
+        player.ffplay_path = ffplay_path
         player.hw_decode_mode = self._hw_decode_mode
+        self.embedded_player = True
         return player
 
     def _create_youtube_player(self) -> YouTubePlayer:
@@ -7857,7 +8236,7 @@ class TVTimeCapsule:
         return None
 
     def _can_start_episode(self, episode: dict | None) -> bool:
-        """True when local ffmpeg/omx or YouTube Chrome/file playback can run."""
+        """True when local ffmpeg or YouTube Chrome/file playback can run."""
         if is_youtube_episode(episode):
             backend = self._yt_offline.backend_for_episode(episode)
             if backend == "blocked":
@@ -7887,7 +8266,7 @@ class TVTimeCapsule:
         return 0.0
 
     def _handle_playback_stall(self):
-        """Detect freeze; auto-retry once, then prompt the user."""
+        """Detect freeze; auto-retry twice, then auto-skip or prompt."""
         if not self.player or self._playback_stalled:
             return
 
@@ -7895,12 +8274,40 @@ class TVTimeCapsule:
         path = self.player.filepath
         LOG.warning("playback stall detected path=%s pos=%.1fs", path, pos)
 
-        if not self._stall_auto_retry_done and path:
+        if self._stall_retry_count < 2 and path:
+            self._stall_retry_count += 1
             self._stall_auto_retry_done = True
-            LOG.info("auto-retry playback path=%s pos=%.1fs", path, pos)
+            LOG.info(
+                "auto-retry playback attempt=%s path=%s pos=%.1fs",
+                self._stall_retry_count,
+                path,
+                pos,
+            )
             if self._retry_playback(resume_secs=pos):
                 return
-            LOG.error("auto-retry failed path=%s", path)
+            LOG.error("auto-retry failed attempt=%s path=%s", self._stall_retry_count, path)
+
+        if (
+            self._stall_auto_skip
+            and self._autoplay_mode != "off"
+            and not self._playing_is_movie
+        ):
+            target = self._resolve_manual_skip_target(+1)
+            if target is None:
+                target = self._resolve_autoplay_target()
+            if target is not None:
+                LOG.info("stall auto-skip to next episode")
+                self._stall_retry_count = 0
+                self._stall_auto_retry_done = False
+                if self.player:
+                    self.player.stop()
+                    self.player = None
+                episodes, index, season = target
+                self.playing_episodes = episodes
+                self.playing_index = index
+                self.playing_season = season
+                if self._start_current_episode(show_splash=False):
+                    return
 
         self._playback_stalled = True
         self._stall_resume_pos = pos
@@ -8311,6 +8718,8 @@ class TVTimeCapsule:
         self.volume_overlay_timer = 0
         self._playback_stalled = False
         self._stall_auto_retry_done = False
+        self._stall_retry_count = 0
+        self._apply_volume_to_player()
         # Any successful play replaces a prior "cache then watch" intent.
         self._clear_pending_cache_play()
         return True
@@ -8518,20 +8927,51 @@ class TVTimeCapsule:
     def _resolve_manual_skip_target(self, direction: int):
         """Return (episodes, index, season) for manual prev/next, or None.
 
-        Stays within the current season / ``playing_episodes`` list.
+        Prefers the current season list, then walks adjacent seasons (same
+        idea as autoplay ``next_episode``) so kids-mode play-from-show can
+        keep advancing past a season boundary.
         """
         if direction not in (-1, 1):
             return None
         if self._playing_is_movie or not self.playing_episodes:
             return None
+
+        def _usable(eps, start_idx, step):
+            if step > 0:
+                indices = range(start_idx, len(eps))
+            else:
+                indices = range(start_idx, -1, -1)
+            for idx in indices:
+                if self._can_start_episode(eps[idx]):
+                    return eps, idx
+            return None
+
         start = self.playing_index + direction
+        hit = _usable(self.playing_episodes, start, direction)
+        if hit is not None:
+            return hit[0], hit[1], self.playing_season
+
+        if not self.playing_show or self.playing_show not in self.shows:
+            return None
+        seasons = self.seasons_for_show(self.playing_show)
+        try:
+            si = seasons.index(self.playing_season)
+        except ValueError:
+            return None
+
         if direction > 0:
-            indices = range(start, len(self.playing_episodes))
+            season_iter = seasons[si + 1 :]
         else:
-            indices = range(start, -1, -1)
-        for idx in indices:
-            if self._can_start_episode(self.playing_episodes[idx]):
-                return self.playing_episodes, idx, self.playing_season
+            season_iter = reversed(seasons[:si])
+
+        for season in season_iter:
+            eps = self._season_episodes(self.playing_show, season)
+            if not eps:
+                continue
+            start_idx = 0 if direction > 0 else len(eps) - 1
+            hit = _usable(eps, start_idx, direction)
+            if hit is not None:
+                return hit[0], hit[1], season
         return None
 
     def _consume_seek_double_tap(self, direction: str) -> bool:
@@ -8606,6 +9046,9 @@ class TVTimeCapsule:
 
     def _process_playback_action(self, action, *, key_repeat: bool = False):
         """Handle a logical action during PLAYING. Returns False if playback stopped."""
+        if self._set_thumb_confirm:
+            return self._process_set_thumb_confirm_action(action)
+
         if action == "back":
             self.stop_playback()
             return False
@@ -8621,20 +9064,20 @@ class TVTimeCapsule:
         if action == "up":
             if self.player:
                 self.player.adjust_volume(10)
+                self._playback_volume = int(self.player.volume)
+                self._persist_volume()
                 self.volume_overlay_timer = pygame.time.get_ticks()
         elif action == "down":
             if self.player:
                 self.player.adjust_volume(-10)
+                self._playback_volume = int(self.player.volume)
+                self._persist_volume()
                 self.volume_overlay_timer = pygame.time.get_ticks()
         elif action == "right":
-            if not key_repeat and self._consume_seek_double_tap("right"):
-                return self._begin_episode_skip(+1)
             if self.player:
                 self.player.seek(PROGRESS_SEEK_S)
                 self.progress_overlay_timer = pygame.time.get_ticks()
         elif action == "left":
-            if not key_repeat and self._consume_seek_double_tap("left"):
-                return self._begin_episode_skip(-1)
             if self.player:
                 self.player.seek(-PROGRESS_SEEK_S)
                 self.progress_overlay_timer = pygame.time.get_ticks()
@@ -8649,7 +9092,162 @@ class TVTimeCapsule:
                     self.progress_overlay_timer = pygame.time.get_ticks()
         elif action == "zoom_toggle":
             self._toggle_youtube_zoom()
+        elif action == "set_thumbnail":
+            self._begin_set_thumbnail_confirm()
         return True
+
+    def _capture_displayed_playback_frame(self) -> pygame.Surface | None:
+        """Return the video frame as last drawn on screen (post crop/zoom)."""
+        shown = getattr(self, "_last_displayed_video_frame", None)
+        if shown is not None:
+            try:
+                return shown.copy()
+            except Exception:
+                return shown
+        if not self.player:
+            return None
+        # Fallback: rebuild the same blit the draw path uses.
+        frame = self.player.get_frame()
+        if frame is None:
+            return None
+        cw, ch = self.canvas_w, self.canvas_h
+        if frame.get_size() == (cw, ch):
+            try:
+                return frame.copy()
+            except Exception:
+                return frame
+        return pygame.transform.scale(frame, (cw, ch))
+
+    def _begin_set_thumbnail_confirm(self) -> None:
+        """Capture current on-screen video (cropped/zoomed) as a poster candidate."""
+        if not self.player:
+            return
+        frame = self._capture_displayed_playback_frame()
+        if frame is None:
+            self._mode_toast_message = "No frame yet"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
+        if self._playing_is_movie:
+            key = self.cur_movie or self.playing_show
+            movie = self.movies.get(key or "", {}) if key else {}
+            title = (movie.get("title") if movie else None) or key
+            kind = "movie"
+        else:
+            title = self.playing_show or self.cur_show
+            kind = "show"
+        if not title:
+            self._mode_toast_message = "No title"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
+        self._set_thumb_frame = frame
+        self._set_thumb_title = str(title)
+        self._set_thumb_kind = kind
+        self._set_thumb_yes = True
+        self._set_thumb_confirm = True
+        if self.player and not self.player.paused:
+            self.player.pause()
+
+    def _cancel_set_thumbnail_confirm(self) -> None:
+        self._set_thumb_confirm = False
+        self._set_thumb_frame = None
+        self._set_thumb_title = ""
+        self._set_thumb_kind = "show"
+
+    def _activate_set_thumbnail_confirm(self) -> None:
+        if not self._set_thumb_yes:
+            self._cancel_set_thumbnail_confirm()
+            return
+        frame = self._set_thumb_frame
+        title = self._set_thumb_title
+        kind = self._set_thumb_kind
+        self._cancel_set_thumbnail_confirm()
+        if frame is None or not title:
+            return
+        path = save_surface_as_thumbnail(frame, title, kind=kind)
+        if not path:
+            self._mode_toast_message = "Thumb save failed"
+            self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+            return
+        if kind == "movie":
+            for key, movie in self.movies.items():
+                mtitle = movie.get("title") or key
+                if mtitle == title or key == title:
+                    movie["thumbnail"] = path
+                    break
+        else:
+            show = self.shows.get(title)
+            if show is not None:
+                show["thumbnail"] = path
+        # Drop cached scaled sizes so the new poster shows immediately.
+        dead = [k for k in self._img_cache if k and k[0] == path]
+        for k in dead:
+            self._img_cache.pop(k, None)
+            if k in self._img_cache_order:
+                self._img_cache_order.remove(k)
+        self._mode_toast_message = "Thumbnail set"
+        self._mode_toast_until = pygame.time.get_ticks() + CHANNEL_ERROR_MS
+
+    def _process_set_thumb_confirm_action(self, action: str) -> bool:
+        if action in ("left", "right", "up", "down"):
+            self._set_thumb_yes = not self._set_thumb_yes
+        elif action == "select":
+            self._activate_set_thumbnail_confirm()
+        elif action == "back":
+            self._cancel_set_thumbnail_confirm()
+        return True
+
+    def draw_set_thumbnail_confirm(self) -> None:
+        """Confirmation overlay: use current frame as show/movie poster?"""
+        overlay = pygame.Surface((self.sw, self.sh), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        box_w = min(480, self.sw - 40)
+        box_h = 200
+        box_x = (self.sw - box_w) // 2
+        box_y = (self.sh - box_h) // 2
+        pygame.draw.rect(self.screen, C.BG_CARD, (box_x, box_y, box_w, box_h), border_radius=10)
+        pygame.draw.rect(self.screen, C.BLUE, (box_x, box_y, box_w, box_h), 2, border_radius=10)
+
+        title = self.font_md.render("Set thumbnail?", True, C.BRIGHT)
+        self.screen.blit(title, title.get_rect(centerx=self.sw // 2, top=box_y + 18))
+        name = self.font_sm.render(str(self._set_thumb_title)[:40], True, C.WHITE)
+        self.screen.blit(name, name.get_rect(centerx=self.sw // 2, top=box_y + 58))
+
+        if self._set_thumb_frame is not None:
+            preview = pygame.transform.scale(self._set_thumb_frame, (96, 72))
+            self.screen.blit(
+                preview,
+                preview.get_rect(centerx=self.sw // 2, top=box_y + 88),
+            )
+
+        btn_w = 100
+        btn_h = 40
+        gap = 36
+        total = btn_w * 2 + gap
+        start_x = box_x + (box_w - total) // 2
+        btn_y = box_y + box_h - btn_h - 16
+        for yes, label, x in (
+            (True, "Yes", start_x),
+            (False, "No", start_x + btn_w + gap),
+        ):
+            sel = self._set_thumb_yes is yes
+            rect = pygame.Rect(x, btn_y, btn_w, btn_h)
+            pygame.draw.rect(
+                self.screen,
+                C.BG_CARD_SEL if sel else C.BG,
+                rect,
+                border_radius=6,
+            )
+            pygame.draw.rect(
+                self.screen,
+                C.CYAN if sel else self._dim_border_color(),
+                rect,
+                2 if sel else 1,
+                border_radius=6,
+            )
+            text = self.font_sm.render(label, True, C.BRIGHT if sel else C.WHITE)
+            self.screen.blit(text, text.get_rect(center=rect.center))
 
     def _toggle_youtube_zoom(self) -> None:
         """Toggle pillarbox zoom for the current YouTube episode."""
@@ -8668,6 +9266,17 @@ class TVTimeCapsule:
     def _process_browse_action(self, action):
         """Handle menu navigation from keyboard or gamepad."""
         km = self.keymap
+        if self.view == self.TV_GUIDE:
+            if action in ("left", "right"):
+                delta = 1 if action == "right" else -1
+                self._cycle_tv_guide_top_mode(delta)
+                return
+            if action in ("up", "down", "select"):
+                # Guide is auto-scrolling / view-only.
+                return
+            if action == "back":
+                self.go_back()
+                return
         if action == "up":
             self.move_cursor(-1)
         elif action == "down":
@@ -8689,12 +9298,16 @@ class TVTimeCapsule:
             if self.view == self.RETRO_TV:
                 self._exit_retro_tv()
                 return
+            if self.view == self.TV_GUIDE:
+                self.go_back()
+                return
             if self._kids_mode_active:
                 if self.view in (
                     self.EPISODE_SELECT,
                     self.SEASON_SELECT,
                     self.SHOW_LIST,
                     self.MOVIE_LIST,
+                    self.TV_GUIDE,
                 ):
                     self.go_back()
                 return
@@ -8814,6 +9427,11 @@ class TVTimeCapsule:
         movie_key = self.cur_movie if return_movie else None
 
         if self.player:
+            try:
+                self._playback_volume = int(self.player.volume)
+                self._persist_volume(force=True)
+            except Exception:
+                pass
             if clear_resume and ep is not None:
                 clear_episode_position(
                     self.state,
@@ -8847,6 +9465,8 @@ class TVTimeCapsule:
 
         self._cancel_youtube_preload()
 
+        self._cancel_set_thumbnail_confirm()
+        self._last_displayed_video_frame = None
         self._playing_source_path = None
         self._playback_cache_suppressed = False
         self._playing_youtube_file = False
@@ -9046,6 +9666,25 @@ class TVTimeCapsule:
         splash_seconds = max(0.0, min(30.0, splash_seconds))
         self._now_playing_splash_ms = int(splash_seconds * 1000)
         self._hw_decode_mode = pb_cfg.get("hw_decode", "auto")
+        try:
+            self._playback_volume = int(pb_cfg.get("volume", getattr(self, "_playback_volume", 100)))
+        except (TypeError, ValueError):
+            pass
+        self._playback_volume = max(0, min(100, getattr(self, "_playback_volume", 100)))
+        self._stall_auto_skip = bool(pb_cfg.get("stall_auto_skip", True))
+        self._media_read_only = bool((self.config.get("media") or {}).get("read_only", False))
+        self._pause_cc_osd = bool(ui_cfg.get("pause_cc_osd", False))
+        fav = self.config.get("favorites") or {}
+        self._favorite_shows = [str(x) for x in (fav.get("shows") or [])]
+        self._favorite_movies = [str(x) for x in (fav.get("movies") or [])]
+        profiles = self.config.get("profiles") or {}
+        new_active = normalize_profile_id(
+            profiles.get("active", getattr(self, "_active_profile", "parent"))
+        )
+        if new_active != getattr(self, "_active_profile", "parent"):
+            self._switch_profile(new_active)
+        else:
+            self._sync_favorites_from_profile()
         self._playback_cache = PlaybackCache(self.config)
         prev_yt = getattr(self, "_yt_offline", None)
         if prev_yt is not None:
@@ -9123,6 +9762,7 @@ class TVTimeCapsule:
             "movies": len(self.movie_names),
             "layout": self.library_layout,
             "kids_mode": self._kids_mode_active,
+            "profile": getattr(self, "_active_profile", "parent"),
             "view": view_names.get(self.view, "other"),
             "playing": self.view == self.PLAYING,
             "current_show": self.cur_show,
@@ -9219,6 +9859,10 @@ class TVTimeCapsule:
             "safe_zone_offset_y": self._safe_zone_offset.y,
             "screensaver": self._screensaver_enabled,
             "screensaver_timeout_seconds": self._screensaver_timeout_ms // 1000,
+            "playback_volume": int(getattr(self, "_playback_volume", 100)),
+            "stall_auto_skip": bool(getattr(self, "_stall_auto_skip", True)),
+            "media_read_only": bool(getattr(self, "_media_read_only", False)),
+            "pause_cc_osd": bool(getattr(self, "_pause_cc_osd", False)),
             "cli_overrides": {
                 "channel_snow": self._channel_snow_override is not None,
                 "shutdown_collapse": self._shutdown_collapse_override is not None,
@@ -9293,8 +9937,30 @@ class TVTimeCapsule:
             except (TypeError, ValueError):
                 return False, "invalid screensaver_timeout_seconds"
 
+        pb = dict(self.config.get("playback") or {})
+        media = dict(self.config.get("media") or {})
+        if "playback_volume" in patch:
+            try:
+                vol = max(0, min(100, int(patch["playback_volume"])))
+            except (TypeError, ValueError):
+                return False, "invalid playback_volume"
+            pb["volume"] = vol
+            self._playback_volume = vol
+            self._apply_volume_to_player()
+        if "stall_auto_skip" in patch:
+            self._stall_auto_skip = bool(patch["stall_auto_skip"])
+            pb["stall_auto_skip"] = self._stall_auto_skip
+        if "media_read_only" in patch:
+            self._media_read_only = bool(patch["media_read_only"])
+            media["read_only"] = self._media_read_only
+        if "pause_cc_osd" in patch:
+            self._pause_cc_osd = bool(patch["pause_cc_osd"])
+            ui_cfg["pause_cc_osd"] = self._pause_cc_osd
+
         self.config["ui"] = ui_cfg
         self.config["screensaver"] = ss_cfg
+        self.config["playback"] = pb
+        self.config["media"] = media
         save_config(self.config)
         self._apply_runtime_config()
         return True, "Settings updated"
@@ -9734,6 +10400,16 @@ class TVTimeCapsule:
                                 self._adjust_safe_zone_edit("right")
                             continue
 
+                        if self._pin_prompt_active:
+                            pin_digit = digit_for_key(self.keymap, event.key)
+                            if pin_digit is not None:
+                                self._handle_pin_digit(pin_digit)
+                            elif key_action == "select":
+                                self._submit_pin()
+                            elif key_action == "back" or event.key == pygame.K_ESCAPE:
+                                self._cancel_pin_prompt()
+                            continue
+
                         digit = digit_for_key(self.keymap, event.key)
                         if digit is not None:
                             self._append_dial_digit(digit)
@@ -9744,7 +10420,19 @@ class TVTimeCapsule:
                             self.channel_timer = 0
 
                         if key_action == "kids_mode_toggle":
-                            self._toggle_kids_mode()
+                            if self._kids_mode_active:
+                                self._request_leave_kids()
+                            else:
+                                self._toggle_kids_mode()
+                            self._write_session_breadcrumb(action="kids_toggle")
+                            continue
+
+                        if key_action == "favorite_toggle" and not self._kids_mode_active:
+                            self._toggle_favorite_current()
+                            continue
+
+                        if key_action == "profile_cycle" and not self._kids_mode_active:
+                            self._cycle_profile()
                             continue
 
                         if key_action == "footer_hints_toggle":

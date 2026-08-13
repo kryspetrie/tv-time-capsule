@@ -143,16 +143,17 @@ CLI overrides for one run: `--screensaver` / `--no-screensaver` and `--screensav
 
 ## `playback`
 
-Controls automatic advance to the next episode when one finishes naturally (Esc still stops immediately). Manual prev/next episode skip (double-tap seek or dedicated keys) uses the same countdown.
+Controls automatic advance to the next episode when one finishes naturally (Esc still stops immediately). Manual prev/next episode skip uses dedicated keys (`prev_episode` / `next_episode`) and the same countdown.
 
 ```json
 {
   "playback": {
     "autoplay": "next_in_season_only",
     "autoplay_countdown_seconds": 5,
-    "episode_skip_double_tap_ms": 450,
+    "episode_skip_double_tap_ms": 0,
     "now_playing_splash": true,
-    "now_playing_splash_seconds": 1.5
+    "now_playing_splash_seconds": 1.5,
+    "hw_decode": "auto"
   }
 }
 ```
@@ -161,10 +162,12 @@ Controls automatic advance to the next episode when one finishes naturally (Esc 
 |-------|---------|-------------|
 | `autoplay` | `next_in_season_only` | `off`, `next_episode` (includes next season), or `next_in_season_only` |
 | `autoplay_countdown_seconds` | `5` | “Up next” / “Previous” wait before starting (0 = instant). **Esc** cancels during countdown |
-| `episode_skip_double_tap_ms` | `450` | Double-tap ←/→ within this window skips episode (0 = disable). Dedicated keys: `next_episode` / `prev_episode` |
+| `episode_skip_double_tap_ms` | `0` | Legacy double-tap ←/→ skip window (0 = off). Prefer `next_episode` / `prev_episode` keys |
 | `now_playing_splash` | `true` | Episode summary (show, season/episode, title) before playback starts |
 | `now_playing_splash_seconds` | `1.5` | How long the summary stays visible (0 = skip). Skipped after autoplay “Up next” — only manual episode select shows it |
-| `hw_decode` | `auto` | Pi hardware H.264 decode: `auto`, `on`, or `off` |
+| `hw_decode` | `auto` | Pi hardware H.264 decode via V4L2 when available: `auto`, `on`, or `off` |
+| `volume` | `100` | Last playback volume 0–100 (also stored per profile). Applied when playback starts |
+| `stall_auto_skip` | `true` | After two failed stall retries, auto-skip to the next episode when `autoplay` is not `off` |
 
 ## `cache`
 
@@ -217,6 +220,7 @@ CRT-style **fun tweaks** when tuning channels or quitting. See [Fun tweaks & eas
 | `analog_artifacts` | `true` | **Fun tweak** — Random brief static, line tear, and vertical roll on browse UI and Weather (not video / Retro / easter eggs) |
 | `analog_artifact_rate` | `12` | Glitches per minute when `analog_artifacts` is on (`0` = no timed glitches; clamped 0–60) |
 | `footer_hints` | `true` | Bottom status bar (clock + help key) on browse screens in **parent mode** (toggle in-app with **F5**; always hidden in kids mode) |
+| `pause_cc_osd` | `false` | When paused, draw subtle tracking lines + a fake closed-caption bar under **PAUSED** |
 | `marquee_scroll` | `"always"` | How overflowing list/header titles scroll: `"always"` (every visible row) or `"selected"` (only the highlighted row) |
 | `safe_zone` | `10` on all sides | CRT overscan inset — see [Safe zone](#safe-zone) |
 
@@ -362,8 +366,10 @@ Simplified browsing for young viewers. Toggle at runtime with **Tab** (default `
   "kids_mode": {
     "default_enabled": false,
     "interleave_shows_movies": false,
+    "browse_style": "full",
     "enabled": false,
-    "allowlist": null
+    "allowlist": null,
+    "pin": null
   }
 }
 ```
@@ -373,29 +379,77 @@ Simplified browsing for young viewers. Toggle at runtime with **Tab** (default `
 | `default_enabled` | `false` | Used on first launch when `enabled` has never been saved |
 | `enabled` | *(from `default_enabled`)* | **Persisted** last parent/kids mode — written when you toggle at runtime; restored on next start |
 | `interleave_shows_movies` | `false` | In kids mode, show one combined alphabetical list of shows and movies instead of separate library screens |
+| `browse_style` | `full` | `full` = one show/movie per screen with a large poster; `card` = multi-row stack (closer to parent). Toggle in-app with the kids view key |
 | `allowlist` | *(absent / `null`)* | Tagged titles for kids mode (`shows` / `movies`). Parent **K** creates and updates it. Kids mode cannot be entered until at least one tagged title is in the library |
+| `pin` | `null` | Optional 4-digit PIN required to leave kids mode / kids profile. Empty or null = no prompt |
 
 Kid mode auto-plays when a show is selected (resume or next-up in the last-watched season). Autoplay after an episode ends follows `playback.autoplay`. Quit (**Esc**, **Q**, window close) is disabled until you toggle back to parent mode. See [Controls → Kid-friendly mode](controls.md#kid-friendly-mode).
 
-## `home_menu`
+## `profiles`
 
-Top-level **LIBRARY** picker rows for parent vs kids. Pin Weather, decades, or other specials next to Shows / Movies.
+Named watch profiles: **parent**, **kids**, **guest**. Each has its own watch-state file (`state-parent.json`, etc.), favorites, and volume. Active profile is stored in config; press **P** in-app or use web admin to switch.
 
 ```json
 {
-  "home_menu": {
-    "parent": ["shows", "movies", "weather"],
-    "kids": ["shows", "movies", "weather"]
+  "profiles": {
+    "active": "parent",
+    "parent": { "label": "Parent", "pin": null },
+    "kids": { "label": "Kids", "pin": null },
+    "guest": { "label": "Guest", "pin": null }
+  }
+}
+```
+
+Legacy `state.json` is copied once to `state-parent.json` on first launch after upgrade.
+
+## `favorites`
+
+Pinned show/movie title keys (library names). Favorites prefer low channel numbers when rebuilding the lineup. Toggle with **F**; home token `favorites` lists them.
+
+```json
+{
+  "favorites": {
+    "shows": ["Bluey"],
+    "movies": []
+  }
+}
+```
+
+## `media`
+
+```json
+{
+  "media": {
+    "read_only": false
   }
 }
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `parent` | `["shows", "movies", "weather"]` | Adult home-menu tokens (order = on-screen order) |
-| `kids` | `["shows", "movies", "weather"]` | Kids home-menu tokens |
+| `read_only` | `false` | When true, skip catalog/cache writes under media paths; YouTube and playback caches use the XDG data directory instead |
 
-**Tokens:** `shows`, `movies`, `weather`, `1950s`…`2000s`, `directory` (`000`), `001` / `002` / `003` (test patterns). Unknown tokens are skipped. Rows for disabled features (`features.weather` / `features.retro_tv`) are omitted. Empty show/movie libraries are omitted when that library type is not present.
+## `home_menu`
+
+Top-level **LIBRARY** picker rows for parent vs kids. Pin Weather, Continue, Favorites, decades, or other specials next to Shows / Movies.
+
+```json
+{
+  "home_menu": {
+    "parent": ["continue", "shows", "movies", "weather"],
+    "kids": ["continue", "shows", "movies", "weather"]
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `parent` | `["continue", "shows", "movies", "weather"]` | Adult home-menu tokens (order = on-screen order) |
+| `kids` | `["shows", "movies"]` | Kids home-menu tokens — **one full-screen option at a time** (Shows / Movies) with cycling posters |
+
+**Tokens:** `continue`, `favorites`, `recent`, `shows`, `movies`, `weather`, `tvguide` (`005`), `1950s`…`2000s`, `directory` (`000`), `001` / `002` / `003` (test patterns). Unknown tokens are skipped. Empty Continue / Favorites / Recent rows are omitted. Rows for disabled features (`features.weather` / `features.retro_tv`) are omitted. Empty show/movie libraries are omitted when that library type is not present.
+
+In **kids mode**, `continue` / `favorites` / `recent` / `tvguide` are ignored on the home screen so the classic dual-tile poster layout stays intact. Pin `weather` or decades on the kids menu if you want extras.
 
 Kids can open pinned specials from the menu; digit easter-egg codes remain parent-only. See [Fun tweaks & easter eggs](fun-tweaks-and-easter-eggs.md).
 

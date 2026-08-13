@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Install OS-level prerequisites for TV Time Capsule.
 #
-# Required: ffmpeg (ffprobe + ffplay). Everything else is best-effort —
-# remote mounts, keyring backends, NetworkManager, etc. The app runs
-# without them and logs a message if a configured feature needs a missing tool.
+# Required: ffmpeg (ffprobe + ffplay). Also installs Chromium for CDP features
+# (YouTube catalog/live, Retro oracle, Weather twc/ws4kp) — same system package
+# path on Pi and desktop; the app does not download browser builds at runtime.
+# Everything else is best-effort — remote mounts, keyring backends,
+# NetworkManager, etc. The app runs without them and logs a message if a
+# configured feature needs a missing tool.
 #
 # Usage:
 #   ./scripts/install-system-deps.sh
@@ -91,6 +94,14 @@ report_optional() {
             echo -e "  ${YELLOW}·${NC} $cmd not installed"
         fi
     done
+    if have_tool chromium || have_tool chromium-browser \
+        || have_tool google-chrome || have_tool google-chrome-stable \
+        || [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]] \
+        || [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+        echo -e "  ${GREEN}✓${NC} chromium/chrome (CDP: YouTube catalog/live, Retro, Weather twc/ws4kp)"
+    else
+        echo -e "  ${YELLOW}·${NC} chromium not installed (needed for YouTube catalog/live, Retro oracle, Weather twc/ws4kp)"
+    fi
 }
 
 apt_try() {
@@ -100,6 +111,13 @@ apt_try() {
             echo -e "  ${YELLOW}skip${NC} $p (unavailable)"
         fi
     done
+}
+
+install_chromium_debian() {
+    # One install path for Pi and desktop Linux — distro Chromium only.
+    echo -e "${CYAN}Installing Chromium (CDP features)...${NC}"
+    apt_try chromium
+    apt_try chromium-browser
 }
 
 install_debian() {
@@ -119,10 +137,7 @@ install_debian() {
         || apt-get install -y -qq exfat-utils >/dev/null 2>&1 \
         || true
 
-    if is_pi; then
-        apt_try mpv
-        apt-get install -y -qq omxplayer >/dev/null 2>&1 || true
-    fi
+    install_chromium_debian
 }
 
 install_fedora() {
@@ -131,7 +146,7 @@ install_fedora() {
         SDL2 SDL2_image SDL2_mixer SDL2_ttf \
         libsecret gnome-keyring \
         cifs-utils nfs-utils fuse-sshfs curlftpfs \
-        exfatprogs NetworkManager || true
+        exfatprogs NetworkManager chromium || true
 }
 
 install_arch() {
@@ -141,7 +156,7 @@ install_arch() {
         sdl2 sdl2_image sdl2_mixer sdl2_ttf \
         libsecret gnome-keyring \
         cifs-utils nfs-utils sshfs curlftpfs \
-        exfatprogs networkmanager || true
+        exfatprogs networkmanager chromium || true
 }
 
 install_macos() {
@@ -156,6 +171,15 @@ install_macos() {
     for pkg in sdl2 sdl2_mixer sdl2_image sdl2_ttf; do
         brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"
     done
+    # Same policy as Linux: system Chromium, no runtime download.
+    if [[ ! -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]] \
+        && [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]] \
+        && ! need_cmd chromium && ! need_cmd google-chrome \
+        && ! need_cmd google-chrome-stable; then
+        echo -e "${CYAN}Installing Chromium (CDP features)...${NC}"
+        brew install --cask chromium || \
+            echo -e "${YELLOW}Chromium cask skipped — install Chrome/Chromium manually if you use YouTube live / Retro / Weather twc${NC}"
+    fi
 }
 
 OS="$(detect_os)"

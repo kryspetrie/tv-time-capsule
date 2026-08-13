@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+from ...fonts import vcr_safe_text
+
 # Long NWS / WMO phrases → compact panel text (longer phrases first).
 _PHRASE_REPLACEMENTS: tuple[tuple[str, str], ...] = (
     ("slight chance of showers and thunderstorms", "Shwrs & ThdSt"),
@@ -50,29 +52,10 @@ _FILLER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Glyphs missing (or tofu) in VCR OSD Mono → plain ASCII (1:1 only).
-_ASCII_MAP = str.maketrans(
-    {
-        "\u00b7": "-",  # middle dot
-        "\u2022": "*",  # bullet
-        "\u2014": "-",  # em dash
-        "\u2013": "-",  # en dash
-        "\u00b0": " ",  # degree
-        "\u00d7": "x",
-        "\u00f7": "/",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2018": "'",
-        "\u2019": "'",
-    }
-)
-
 
 def ascii_safe(text: str) -> str:
     """Replace characters the bundled VCR font cannot draw."""
-    s = (text or "").replace("\u2026", "...")
-    return s.translate(_ASCII_MAP)
-
+    return vcr_safe_text(text)
 
 def _compress_condition(text: str) -> str:
     """Apply phrase / filler compression (always)."""

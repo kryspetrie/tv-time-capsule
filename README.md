@@ -26,14 +26,19 @@ Already have **ffmpeg** (`ffprobe`, `ffplay`) on your `PATH`? Skip straight to p
 pipx install git+ssh://git@github.com/kryspetrie/tv-time-capsule.git
 ```
 
-Or on a Raspberry Pi appliance:
+**Raspberry Pi from scratch** (empty board → flash OS → install → kiosk), including
+differences by Pi model (Pi 1 / Zero: **Legacy Lite 32-bit / Bookworm**):
+
+→ **[Raspberry Pi — from empty board to TV](docs/usage/raspberry-pi.md)**
+
+Short version once the OS is on the card and you have a git checkout on the Pi:
 
 ```bash
 ./install-pi.sh
 ./scripts/set-mode.sh kiosk --reboot
 ```
 
-Config is loaded from the first match in the [search order](docs/usage/configuration.md#where-the-app-looks-for-configjson): `$TV_TIME_CAPSULE_CONFIG`, then `./config.json` in a dev checkout, then `~/.config/tv-time-capsule/config.json` when installed. Start from [`config.example.json`](config.example.json). See [Getting started](docs/usage/getting-started.md) and [Configuration](docs/usage/configuration.md).
+Config is loaded from the first match in the [search order](docs/usage/configuration.md#where-the-app-looks-for-configjson): `$TV_TIME_CAPSULE_CONFIG`, then `./config.json` in a dev checkout, then `~/.config/tv-time-capsule/config.json` when installed. Start from [`config.example.json`](config.example.json). See [Getting started](docs/usage/getting-started.md) (desktop) and [Configuration](docs/usage/configuration.md).
 
 ## License
 

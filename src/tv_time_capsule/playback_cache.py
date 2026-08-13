@@ -61,8 +61,11 @@ class PlaybackCache:
         self.enabled = bool(cache_cfg.get("enabled", True))
         self.prefetch_next = bool(cache_cfg.get("prefetch_next", True))
         self.cache_before_playing = bool(cache_cfg.get("cache_before_playing", False))
+        media_ro = bool((config.get("media") or {}).get("read_only", False))
         raw_dir = cache_cfg.get("directory")
-        if raw_dir:
+        if media_ro:
+            self.cache_dir = os.path.join(STATE_DIR, "playback-cache")
+        elif raw_dir:
             self.cache_dir = os.path.abspath(os.path.expanduser(str(raw_dir)))
         else:
             self.cache_dir = os.path.join(STATE_DIR, "playback-cache")

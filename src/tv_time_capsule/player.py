@@ -1,4 +1,4 @@
-"""Embedded FFmpeg / omxplayer video playback."""
+"""Embedded FFmpeg video playback."""
 
 from __future__ import annotations
 
@@ -35,15 +35,6 @@ def detect_ffmpeg():
 def detect_ffplay():
     """Check for ffplay (for audio during embedded playback)."""
     return shutil.which("ffplay")
-
-
-def detect_omxplayer():
-    """Check for omxplayer (Pi fallback)."""
-    for cmd in ["omxplayer.bin", "omxplayer"]:
-        path = shutil.which(cmd)
-        if path:
-            return path
-    return None
 
 
 def is_pi():
@@ -233,6 +224,7 @@ def get_video_info(filepath):
         return 24.0, 0.0
 
 
+
 class EmbeddedPlayer:
     """Embedded video player using FFmpeg for frame decoding and pygame for rendering.
 
@@ -255,7 +247,6 @@ class EmbeddedPlayer:
         self.canvas_h = canvas_h
         self.ffmpeg_path = detect_ffmpeg()
         self.ffplay_path = detect_ffplay()
-        self.use_omx = False  # Set externally if needed
 
         # Playback state
         self.proc = None  # FFmpeg video process
@@ -289,10 +280,6 @@ class EmbeddedPlayer:
         self._yt_crop_norm: tuple[float, float, float, float] | None = None
         self._yt_crop_apply = False
         self._yt_youtube_id: str | None = None
-
-        # Omxplayer fallback state
-        self.omx_proc = None
-        self.omx_cmd = None
 
     def configure_youtube_crop(
         self,
@@ -362,18 +349,6 @@ class EmbeddedPlayer:
         # Get video info for duration and fps
         self.fps, self.duration = get_video_info(filepath)
         self.frame_time = 1.0 / max(self.fps, 1.0)
-
-        # Omxplayer cannot apply crop filters — prefer ffmpeg when zoom crop needed.
-        if self.use_omx and self._yt_crop_apply and self._yt_crop_norm is not None:
-            if self.ffmpeg_path and np_frombuffer is not None:
-                LOG.info("YouTube crop active — using ffmpeg instead of omxplayer")
-                self.use_omx = False
-            else:
-                LOG.warning("YouTube crop requested but ffmpeg unavailable; playing uncropped via omx")
-
-        # Omxplayer fallback for Pi without X11
-        if self.use_omx:
-            return self._start_omx(filepath, resume_pos)
 
         # Embedded FFmpeg playback
         W, H = self.canvas_w, self.canvas_h
@@ -564,24 +539,6 @@ class EmbeddedPlayer:
         except Exception:
             self.audio_proc = None
 
-    def _start_omx(self, filepath, resume_pos=None):
-        """Start playback via omxplayer (Pi fallback)."""
-        cmd = [self.omx_cmd, "-o", "both", "--no-osd", "--blank"]
-        if resume_pos:
-            cmd.extend(["--pos", str(int(resume_pos))])
-        cmd.append(filepath)
-        try:
-            self.omx_proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self.running = True
-            return True
-        except Exception:
-            self.omx_proc = None
-            return False
 
     def _read_frames(self):
         """Thread: read raw RGB frames from FFmpeg at real-time pace.
@@ -655,7 +612,7 @@ class EmbeddedPlayer:
         # FFmpeg stream ended — the video is done. Wait for audio to
         # finish too (ffplay exits with -autoexit when it's done).
         # Mark finished once audio process ends.
-        if self.running and not self.use_omx:
+        if self.running:
             self._wait_audio_and_finish()
 
     def _wait_audio_and_finish(self):
@@ -710,7 +667,7 @@ class EmbeddedPlayer:
 
     def check_stall(self, threshold: float = STALL_THRESHOLD_S) -> bool:
         """True when playback appears frozen (no frames while not paused)."""
-        if self.use_omx or not self.running or self.finished or self.paused:
+        if not self.running or self.finished or self.paused:
             return False
         now = time.monotonic()
         if self._last_frame_at <= 0:
@@ -724,15 +681,10 @@ class EmbeddedPlayer:
 
     def is_playing(self):
         """Is the video still playing?"""
-        if self.use_omx:
-            return self.omx_proc is not None and self.omx_proc.poll() is None
         return self.running and not self.finished
 
     def is_finished(self):
         """Did the video reach the end naturally?"""
-        if self.use_omx:
-            # omxplayer exits when the video ends
-            return self.omx_proc is not None and self.omx_proc.poll() is not None
         return self.finished
 
     def stop(self):
@@ -756,20 +708,6 @@ class EmbeddedPlayer:
 
         self._stop_audio()
 
-        # Kill omxplayer
-        if self.omx_proc:
-            try:
-                self.omx_proc.stdin.write(b"q")
-                self.omx_proc.stdin.flush()
-            except Exception:
-                pass
-            try:
-                self.omx_proc.terminate()
-                self.omx_proc.wait(timeout=2)
-            except Exception:
-                self.omx_proc.kill()
-            self.omx_proc = None
-
         # Wait for frame thread
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2)
@@ -780,16 +718,6 @@ class EmbeddedPlayer:
 
     def pause(self):
         """Toggle pause state. Blocks frame-reading thread via Event."""
-        if self.use_omx:
-            if self.omx_proc and self.omx_proc.poll() is None:
-                try:
-                    self.omx_proc.stdin.write(b"p")
-                    self.omx_proc.stdin.flush()
-                except Exception:
-                    pass
-            self.paused = not self.paused
-            return
-
         self.paused = not self.paused
         if self.paused:
             self.pause_start = time.monotonic()
@@ -821,7 +749,7 @@ class EmbeddedPlayer:
 
     def _apply_volume_live(self):
         """Relaunch audio at the current position so a new volume applies now."""
-        if self.use_omx or self.paused or not self.running:
+        if self.paused or not self.running:
             return
         if not self.ffplay_path or not self.filepath:
             return
@@ -830,18 +758,6 @@ class EmbeddedPlayer:
 
     def seek(self, seconds):
         """Seek forward/backward by seconds. Restarts FFmpeg from new position."""
-        if self.use_omx:
-            if self.omx_proc and self.omx_proc.poll() is None:
-                try:
-                    if seconds > 0:
-                        self.omx_proc.stdin.write(b"\x1b[C")
-                    else:
-                        self.omx_proc.stdin.write(b"\x1b[D")
-                    self.omx_proc.stdin.flush()
-                except Exception:
-                    pass
-            return
-
         if not self.filepath or not self.ffmpeg_path:
             return
 

@@ -131,8 +131,8 @@ STACK_VISIBLE = 5
 # Overlay display durations
 OVERLAY_SHOW_MS = 3000
 PROGRESS_SEEK_S = 10
-# Double-tap ←/→ within this window skips episode (0 = disable).
-EPISODE_SKIP_DOUBLE_TAP_MS = 450
+# Legacy: double-tap ←/→ episode skip (0 = off). Prefer dedicated keys.
+EPISODE_SKIP_DOUBLE_TAP_MS = 0
 
 # Truncated list titles: pause, then scroll back and forth
 MARQUEE_DELAY_MS = 900
@@ -208,6 +208,12 @@ def _parse_playback(raw: dict | None) -> dict[str, Any]:
     hw = str(pb.get("hw_decode", "auto")).lower()
     if hw not in HW_DECODE_MODES:
         hw = "auto"
+    try:
+        volume = int(pb.get("volume", 100))
+    except (TypeError, ValueError):
+        volume = 100
+    volume = max(0, min(100, volume))
+    stall_auto_skip = bool(pb.get("stall_auto_skip", True))
     return {
         "autoplay": mode,
         "autoplay_countdown_seconds": countdown,
@@ -215,6 +221,8 @@ def _parse_playback(raw: dict | None) -> dict[str, Any]:
         "now_playing_splash": now_playing_splash,
         "now_playing_splash_seconds": splash_seconds,
         "hw_decode": hw,
+        "volume": volume,
+        "stall_auto_skip": stall_auto_skip,
     }
 
 
@@ -259,6 +267,7 @@ def _parse_ui(raw: dict | None) -> dict[str, Any]:
         "footer_hints": footer_hints,
         "marquee_scroll": marquee_scroll,
         "safe_zone": safe_zone_to_config(safe_zone, safe_zone_offset),
+        "pause_cc_osd": bool(ui.get("pause_cc_osd", defaults.get("pause_cc_osd", False))),
     }
 
 
@@ -292,11 +301,23 @@ def _parse_kids_mode(raw: dict | None) -> dict[str, Any]:
     km = raw or {}
     if not isinstance(km, dict):
         km = {}
+    pin_raw = km.get("pin")
+    if pin_raw is None or pin_raw == "":
+        pin = None
+    else:
+        digits = "".join(ch for ch in str(pin_raw) if ch.isdigit())
+        pin = digits[:4] if digits else None
+    browse_style = str(km.get("browse_style", "full"))
+    if browse_style == "compact":
+        browse_style = "card"
+    if browse_style not in ("card", "full"):
+        browse_style = "full"
     out: dict[str, Any] = {
         "default_enabled": bool(km.get("default_enabled", False)),
         "interleave_shows_movies": bool(km.get("interleave_shows_movies", False)),
-        "browse_style": str(km.get("browse_style", "card")),
+        "browse_style": browse_style,
         "enabled": km.get("enabled"),
+        "pin": pin,
     }
     if "allowlist" in km:
         al = km.get("allowlist")
@@ -314,6 +335,30 @@ def _parse_kids_mode(raw: dict | None) -> dict[str, Any]:
         }
     return out
 
+
+def _parse_favorites(raw: dict | None) -> dict[str, list[str]]:
+    fav = raw if isinstance(raw, dict) else {}
+    shows = fav.get("shows") or []
+    movies = fav.get("movies") or []
+    if not isinstance(shows, list):
+        shows = []
+    if not isinstance(movies, list):
+        movies = []
+    return {
+        "shows": [str(s) for s in shows if str(s).strip()],
+        "movies": [str(m) for m in movies if str(m).strip()],
+    }
+
+
+def _parse_media(raw: dict | None) -> dict[str, Any]:
+    media = raw if isinstance(raw, dict) else {}
+    return {"read_only": bool(media.get("read_only", False))}
+
+
+def _parse_profiles(raw: dict | None) -> dict[str, Any]:
+    from .profiles import parse_profiles
+
+    return parse_profiles(raw if isinstance(raw, dict) else {})
 
 def _parse_home_menu(raw: dict | None) -> dict[str, list[str]]:
     from .home_menu import parse_home_menu
@@ -1301,6 +1346,8 @@ def _default_config() -> dict[str, Any]:
             "now_playing_splash": True,
             "now_playing_splash_seconds": 1.5,
             "hw_decode": "auto",
+            "volume": 100,
+            "stall_auto_skip": True,
         },
         "ui": {
             "channel_snow": True,
@@ -1311,7 +1358,16 @@ def _default_config() -> dict[str, Any]:
             "footer_hints": True,
             "marquee_scroll": "always",
             "safe_zone": {"top": 10, "bottom": 10, "left": 10, "right": 10},
+            "pause_cc_osd": False,
         },
+        "media": {
+            "read_only": False,
+        },
+        "favorites": {
+            "shows": [],
+            "movies": [],
+        },
+        "profiles": _parse_profiles(None),
         "gamepad": {
             "enabled": True,
         },
@@ -1326,6 +1382,8 @@ def _default_config() -> dict[str, Any]:
         "kids_mode": {
             "default_enabled": False,
             "interleave_shows_movies": False,
+            "browse_style": "full",
+            "pin": None,
         },
         "home_menu": _parse_home_menu(None),
         "network": {
@@ -1423,6 +1481,9 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         },
         "playback": _parse_playback(raw.get("playback")),
         "ui": _parse_ui(raw.get("ui")),
+        "media": _parse_media(raw.get("media")),
+        "favorites": _parse_favorites(raw.get("favorites")),
+        "profiles": _parse_profiles(raw.get("profiles")),
         "gamepad": _parse_gamepad(raw.get("gamepad")),
         "channels": _parse_channels(raw.get("channels")),
         "library": _parse_library(raw.get("library")),

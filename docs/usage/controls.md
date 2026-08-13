@@ -14,9 +14,11 @@ Defaults below; yours may differ after rebinding.
 | 0–9 (and keypad) | Type a number (auto-commits after ~1.5s) — see [Channel numbers](#channel-numbers) |
 | R | Reset watch status (tap) / rescan library (hold) |
 | H | Context help (page for current screen; ←/→ for other topics) |
-| Tab | Toggle kid / parent mode |
+| Tab | Toggle kid / parent mode (PIN prompt if kids PIN is set) |
 | L | Alphabet jump menu (parent show/movie list) |
 | K | Tag / untag current title for kids mode |
+| F | Favorite / unfavorite current title (parent mode) |
+| P | Cycle user profile (parent → kids → guest) |
 | F5 | Toggle bottom status bar (clock + help) |
 | F2 | Key configuration |
 | F4 | Gamepad configuration |
@@ -38,6 +40,8 @@ Same numeric entry on every browse screen; meaning depends on where you are. Dig
 | `02` | Short delay (~0.5s) | **Next page** |
 | `00` | Timeout | Alphabet jump menu (parent show/movie only) |
 | `001` / `002` / `003` | Short hold on 3rd digit | Secret test patterns (parent screens + playback) |
+| `004` | Short hold | Weather Channel |
+| `005` | Short hold | TV Guide Channel (classic blue lineup) |
 | Other leading-zero codes | — | Invalid |
 
 Shows, movies, seasons, and episodes use a **paged stack**: several titles visible at once. `01`/`02` move the window by one full page (e.g. items 1–5 → 6–10). ↑/↓ still move one row.
@@ -62,7 +66,9 @@ On the **parent** show or movie list, press **`00`** (or press **L**) to open th
 
 ### Kids allowlist
 
-In **parent** mode on the show or movie list, press **K** to tag/untag the current title for kids mode (a small blue `[kids]` stays at the right of the title bar, immediately before the channel number). Kids mode only shows tagged titles; **Tab** into kids mode is blocked with **Assign kids shows first** until at least one tagged title is in the library.
+In **parent** mode on the show or movie list, press **K** to tag/untag the current title for kids mode (a small blue `[kids]` stays at the right of the title bar, immediately before the channel number). Press **F** to favorite/unfavorite (`*fav` badge). Kids mode only shows tagged titles; **Tab** into kids mode is blocked with **Assign kids shows first** until at least one tagged title is in the library.
+
+Leaving kids mode (**Tab**) or switching away from the kids profile (**P**) prompts for a **4-digit PIN** when `kids_mode.pin` or `profiles.kids.pin` is set. Wrong PIN stays in kids; empty/null PIN keeps the old one-key toggle.
 
 ### Back / quit
 
@@ -102,10 +108,12 @@ Press **Tab** (or your configured `kids_mode_toggle` key) to switch between **pa
 - **Shows:** selecting a show starts playback immediately — resumes the in-progress episode in the last-watched season, or plays the next unwatched episode in that season.
 - **Movies:** selecting a movie plays it directly.
 - **Stop / Esc** during playback returns to the top-level browse screen (not season/episode menus).
+- **Next / previous episode:** **Page Up / Page Down** (or remapped `prev_episode` / `next_episode`, including gamepad shoulder buttons). Skips can cross season boundaries when another playable episode exists. ←/→ only seek within the episode.
 - **Autoplay:** when an episode finishes, behavior follows `playback.autoplay` in config.
-- **Simpler UI:** no status bar, no **H** help screen, no alphabet menu, and no key remapping (**F2**). Browse lists use taller rows and fewer per page.
-- **No quit:** **Esc**, **Q**, and closing the window do not exit the app while kids mode is on. Switch back to **parent mode** with **Tab** first.
+- **Simpler UI:** no status bar, no **H** help screen, no alphabet menu, and no key remapping (**F2**). Home is **one full-screen option at a time** (Shows / Movies) with a sidebar label and **3–4 rotating nested thumbnails** of titles underneath — ↑/↓ switches options. Show/movie lists are **one title per screen**, full height, with a large poster.
+- **No quit:** **Esc**, **Q**, and closing the window do not exit the app while kids mode is on. Switch back to **parent mode** with **Tab** first (PIN if configured).
 - **Allowlist:** only titles tagged with **K** in parent mode appear. Entering kids mode requires at least one tagged title. Press **`0`** for back; **`01`/`02`** still page.
+- **Profiles:** the **kids** profile forces kids UX; **P** cycles parent / kids / guest with separate watch progress.
 
 ### Status bar & help
 
@@ -126,14 +134,15 @@ Optional config under [Configuration → kids_mode](configuration.md#kids_mode):
 |-----|--------|
 | ↑ / ↓ | Volume up / down |
 | ← / → | Seek back / forward 10s |
-| Double-tap ← / → | Previous / next episode (cancellable countdown; same wait as autoplay) |
-| Page Up / Page Down | Previous / next episode (dedicated; remappable as `prev_episode` / `next_episode`) |
+| Page Up / Page Down | Previous / next episode (remappable as `prev_episode` / `next_episode`) |
 | Space / Enter | Pause / resume |
 | Esc | Stop and return to the episode list (bookmarks mid-episode for resume) |
 | Backspace | **Stop & clear resume**: exit to the menu and discard the resume bookmark (watched flags unchanged). On browse menus, clears resume for the highlighted item only |
 | `0` (dial timeout) | Same as Esc — back to episode / movie list |
 | `1`…`N` | Tune to that show/movie channel after a cancellable countdown |
 | C | Cancel background cache (when progress overlay is shown) |
+| T | Toggle YouTube pillarbox zoom (when applicable) |
+| I | Set show/movie thumbnail from the current frame (Yes/No confirm) |
 
 Example keymap overrides:
 
@@ -147,7 +156,7 @@ Example keymap overrides:
 }
 ```
 
-Set `playback.episode_skip_double_tap_ms` to `0` to disable double-tap skip (dedicated keys still work).
+Set `playback.episode_skip_double_tap_ms` only if you want the old double-tap ←/→ skip back (default **0** = off). Dedicated keys always work.
 
 ### Key configuration (F2)
 
@@ -173,7 +182,7 @@ Custom key maps are stored in the active `config.json` under the `keymap` key us
 
 ## Gamepad
 
-USB controllers use the same logical actions as the keyboard. Defaults: D-pad / left stick to move; **button-0** (A) or **button-7** (Start) to select; **button-1** (B) or **button-6** (Back) to go back. Remap live with **F4**. Disable with `"gamepad": { "enabled": false }` in config.
+USB controllers use the same logical actions as the keyboard. Defaults: D-pad / left stick to move; **button-0** (A) or **button-7** (Start) to select; **button-1** (B) or **button-6** (Back) to go back; **button-4** / **button-5** (bumpers) for previous / next episode. Remap live with **F4**. Disable with `"gamepad": { "enabled": false }` in config.
 
 ## Screensaver
 

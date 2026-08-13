@@ -160,7 +160,7 @@ poetry run tv-time-capsule --rescan-only
 
 ## What WSL2 does not cover
 
-- Raspberry Pi **omxplayer** / V4L2 hardware decode (Linux Pi only; WSL uses software ffmpeg — fine for UI/dev).
+- Raspberry Pi V4L2 hardware decode (Linux Pi only; WSL uses software ffmpeg — fine for UI/dev).
 - **systemd kiosk** / autostart — test on a Pi or Linux VM; see [Raspberry Pi setup](../usage/raspberry-pi.md).
 - **Native Windows** pygame/kiosk — not a supported target; use WSL2 instead.
 

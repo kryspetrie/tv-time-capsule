@@ -163,7 +163,9 @@ class KidsLibrarySelectorTests(unittest.TestCase):
 
         show_paths = app._show_thumbnail_paths()
         movie_paths = app._movie_thumbnail_paths()
-        self.assertEqual(show_paths, [__file__])
+        self.assertEqual(show_paths[0], __file__)
+        self.assertEqual(len(show_paths), 2)
+        self.assertTrue(os.path.isfile(show_paths[1]))
         self.assertEqual(movie_paths, [__file__])
 
     def test_library_thumb_paths_stay_in_catalog(self):
@@ -245,6 +247,57 @@ class KidsLibrarySelectorTests(unittest.TestCase):
             app._library_shows_thumb_idx += 1
             app._library_movies_thumb_idx += 1
 
+    def test_kids_library_selector_used_with_extra_home_rows(self):
+        """Kids home always uses poster tiles, even if config pins weather too."""
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app._kids_mode_active = True
+        app.library_layout = "split"
+        app.view = app.LIBRARY_SELECT
+        app.config["home_menu"] = {
+            "parent": ["continue", "shows", "movies", "weather"],
+            "kids": ["continue", "shows", "movies", "weather"],
+        }
+        app.shows = {"Bluey": {"thumbnail": __file__}}
+        app.show_names = ["Bluey"]
+        app.movies = {"Movie A": {"thumbnail": __file__, "title": "Movie A"}}
+        app.movie_names = ["Movie A"]
+        # Continue/favorites stripped from kids tokens → Shows + Movies (+ weather).
+        tokens = app._home_menu_tokens()
+        self.assertEqual(tokens[0], "shows")
+        self.assertIn("movies", tokens)
+        self.assertNotIn("continue", tokens)
+        with unittest.mock.patch.object(app, "_draw_kids_library_selector") as draw:
+            app.draw_library_selector()
+            draw.assert_called_once()
+
+    def test_kids_library_selector_one_page_at_a_time(self):
+        """Kids home shows a single full-screen option; ↑/↓ moves one step."""
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+        pygame.init()
+        pygame.display.set_mode((800, 600))
+        app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
+        app._kids_mode_active = True
+        app.library_layout = "split"
+        app.view = app.LIBRARY_SELECT
+        app.config["home_menu"] = {"parent": ["shows", "movies"], "kids": ["shows", "movies"]}
+        app.shows = {"Bluey": {"thumbnail": __file__}}
+        app.show_names = ["Bluey"]
+        app.movies = {"Movie A": {"thumbnail": __file__, "title": "Movie A"}}
+        app.movie_names = ["Movie A"]
+        app.cursor = 0
+        self.assertEqual(app._stack_page_size_for_view(), 1)
+        app._draw_kids_library_selector()
+        app._process_browse_action("down")
+        self.assertEqual(app.cursor, 1)
+        app._draw_kids_library_selector()
+        app._process_browse_action("up")
+        self.assertEqual(app.cursor, 0)
+
 
     def test_kids_movie_list_up_down(self):
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -297,7 +350,7 @@ class KidsLibrarySelectorTests(unittest.TestCase):
 
 
 class KidsViewToggleTests(unittest.TestCase):
-    def test_browse_style_defaults_to_card(self):
+    def test_browse_style_defaults_to_full(self):
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
         pygame.init()
@@ -322,7 +375,7 @@ class KidsViewToggleTests(unittest.TestCase):
                 "admin": {"enabled": True, "port": 8765, "bind": "0.0.0.0"},
             }
             app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
-        self.assertEqual(app._kids_browse_style, "card")
+        self.assertEqual(app._kids_browse_style, "full")
 
     def test_browse_style_compact_legacy_alias(self):
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -344,7 +397,7 @@ class KidsViewToggleTests(unittest.TestCase):
         app._load_kids_mode_config()
         self.assertEqual(app._kids_browse_style, "full")
 
-    def test_browse_style_invalid_falls_back_to_card(self):
+    def test_browse_style_invalid_falls_back_to_full(self):
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
         pygame.init()
@@ -352,7 +405,7 @@ class KidsViewToggleTests(unittest.TestCase):
         app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         app.config["kids_mode"] = {"browse_style": "garbage"}
         app._load_kids_mode_config()
-        self.assertEqual(app._kids_browse_style, "card")
+        self.assertEqual(app._kids_browse_style, "full")
 
     def test_toggle_kids_view_cycles_card_to_full(self):
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")

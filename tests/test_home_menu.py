@@ -16,16 +16,21 @@ from tv_time_capsule.home_menu import (
 
 class HomeMenuParseTests(unittest.TestCase):
     def test_defaults_include_weather(self):
+        from tv_time_capsule.home_menu import DEFAULT_KIDS_HOME_MENU_TOKENS
+
         hm = parse_home_menu(None)
         self.assertEqual(hm["parent"], list(DEFAULT_HOME_MENU_TOKENS))
-        self.assertEqual(hm["kids"], list(DEFAULT_HOME_MENU_TOKENS))
+        self.assertEqual(hm["kids"], list(DEFAULT_KIDS_HOME_MENU_TOKENS))
         self.assertIn("weather", hm["parent"])
-        self.assertIn("weather", hm["kids"])
+        self.assertNotIn("weather", hm["kids"])
+        self.assertEqual(hm["kids"], ["shows", "movies"])
 
     def test_parse_config_defaults(self):
         cfg = parse_config({})
-        self.assertEqual(cfg["home_menu"]["parent"], ["shows", "movies", "weather"])
-        self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies", "weather"])
+        self.assertEqual(
+            cfg["home_menu"]["parent"], ["continue", "shows", "movies", "weather"]
+        )
+        self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies"])
 
     def test_custom_lists_and_aliases(self):
         hm = parse_home_menu(

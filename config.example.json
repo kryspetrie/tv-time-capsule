@@ -85,7 +85,7 @@
   "playback": {
     "autoplay": "next_in_season_only",
     "autoplay_countdown_seconds": 5,
-    "episode_skip_double_tap_ms": 450,
+    "episode_skip_double_tap_ms": 0,
     "now_playing_splash": true,
     "now_playing_splash_seconds": 1.5,
     "hw_decode": "auto"
@@ -651,7 +651,7 @@
   "_playback": {
     "autoplay": "off | next_episode | next_in_season_only \u2014 advance after an episode ends naturally",
     "autoplay_countdown_seconds": "Seconds before the next episode starts (0 = instant). Esc cancels during countdown. Also used for manual prev/next episode skip.",
-    "episode_skip_double_tap_ms": "Double-tap \u2190/\u2192 within this many ms skips episode (0 = disable double-tap; default 450). Dedicated keys: keymap next_episode / prev_episode (PageDown / PageUp).",
+    "episode_skip_double_tap_ms": "Legacy double-tap \u2190/\u2192 skip (0 = off, default). Prefer keymap next_episode / prev_episode (PageDown / PageUp).",
     "now_playing_splash": "Show episode summary before playback starts (default true)",
     "now_playing_splash_seconds": "How long the summary stays on screen (default 1.5; 0 = skip even if enabled)",
     "hw_decode": "auto | on | off \u2014 Pi V4L2 hardware H.264 decode (auto = H.264 only on Raspberry Pi)"

@@ -183,8 +183,15 @@ def read_movies_catalog(
 # ── Writable probe ───────────────────────────────────────────────────────────
 
 
-def catalog_is_writable(media_root: pathlib.Path, device_name: str) -> bool:
+def catalog_is_writable(
+    media_root: pathlib.Path,
+    device_name: str,
+    *,
+    read_only: bool = False,
+) -> bool:
     """Check whether the catalog directory is writable without creating it."""
+    if read_only:
+        return False
     device_dir = catalog_device_dir(media_root, device_name)
     if device_dir.exists():
         try:

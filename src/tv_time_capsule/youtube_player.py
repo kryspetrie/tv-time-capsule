@@ -115,7 +115,6 @@ class YouTubePlayer:
         self._cdp_port = cdp_port
 
         # EmbeddedPlayer-compatible public state
-        self.use_omx = False
         self.paused = False
         self.volume = 100
         self.time_pos = 0.0

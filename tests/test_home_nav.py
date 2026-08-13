@@ -99,8 +99,32 @@ class HomeNavTests(unittest.TestCase):
         self.assertIn("shows", kinds)
         self.assertIn("weather", kinds)
         self.assertIn("retro", kinds)
-        self.assertNotIn("movies", kinds)  # empty movie library + legacy layout
+        self.assertNotIn("movies", kinds)  # empty movie library — card omitted
         self.assertTrue(app._uses_home_menu())
+
+    def test_shows_omitted_when_empty(self):
+        app = self._app()
+        app.show_names = []
+        app.shows = {}
+        app.movie_names = ["Film"]
+        app.movies = {"Film": {"title": "Film", "path": "/tmp/f.mp4"}}
+        kinds = [r["kind"] for r in app._resolved_home_rows()]
+        self.assertNotIn("shows", kinds)
+        self.assertIn("movies", kinds)
+
+    def test_empty_library_toast(self):
+        app = self._app()
+        app.show_names = []
+        app.shows = {}
+        app.movie_names = []
+        app.movies = {}
+        app._mode_toast_message = ""
+        app._mode_toast_until = 0
+        app._toast_empty_library_if_needed()
+        self.assertEqual(
+            app._mode_toast_message, "No media found. Configure media sources"
+        )
+        self.assertGreater(app._mode_toast_until, 0)
 
     def test_weather_omitted_when_feature_disabled(self):
         app = self._app()
@@ -113,6 +137,7 @@ class HomeNavTests(unittest.TestCase):
     def test_kids_home_includes_weather_not_decade_unless_pinned(self):
         app = self._app()
         app._kids_mode_active = True
+        app._kids_allowlist = {"shows": ["Alpha", "Bravo"], "movies": []}
         kinds = [r["kind"] for r in app._resolved_home_rows()]
         self.assertIn("shows", kinds)
         self.assertIn("weather", kinds)

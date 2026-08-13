@@ -330,16 +330,18 @@ def ensure_mounts(
     *,
     retries: int = 6,
     delay_s: float = 5.0,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Ensure all configured mounts are active.
 
-    Missing tools and other permanent failures are logged once and skipped;
-    transient network failures are retried. Never aborts the player.
+    Returns ``(all_messages, failure_messages)``. Missing tools and other
+    permanent failures are logged once and skipped; transient network failures
+    are retried. Never aborts the player.
     """
     if not mounts:
-        return []
+        return [], []
 
     messages: list[str] = []
+    failures: list[str] = []
     pending = [dict(m) for m in mounts if isinstance(m, dict)]
 
     for attempt in range(1, retries + 1):
@@ -352,10 +354,12 @@ def ensure_mounts(
                     messages.append(msg)
             elif _is_permanent_failure(msg):
                 messages.append(msg)
+                failures.append(msg)
             else:
                 still.append(entry)
                 if attempt == retries:
                     messages.append(msg)
+                    failures.append(msg)
                 else:
                     print(
                         f"mount retry {attempt}/{retries} for {label}: {msg}",
@@ -366,7 +370,7 @@ def ensure_mounts(
             break
         time.sleep(delay_s)
 
-    return messages
+    return messages, failures
 
 
 def mountpoints_from_config(mounts: list[dict[str, Any]] | None) -> list[str]:

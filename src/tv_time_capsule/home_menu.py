@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-# Default menus include Weather for parent and kids.
-DEFAULT_HOME_MENU_TOKENS: tuple[str, ...] = ("shows", "movies", "weather")
+# Parent default: Continue + library + Weather.
+DEFAULT_HOME_MENU_TOKENS: tuple[str, ...] = (
+    "continue",
+    "shows",
+    "movies",
+    "weather",
+)
+
+# Kids default: Shows / Movies only — drives the full-bleed dual-tile home UI
+# with cycling poster art (not the parent text stack).
+DEFAULT_KIDS_HOME_MENU_TOKENS: tuple[str, ...] = (
+    "shows",
+    "movies",
+)
 
 _DECADE_TOKEN_TO_SLUG: dict[str, str] = {
     "1950s": "50",
@@ -43,6 +55,14 @@ def normalize_home_token(raw: str) -> str | None:
         return "shows"
     if tok in ("movie", "movies"):
         return "movies"
+    if tok in ("continue", "continue_watching", "resume"):
+        return "continue"
+    if tok in ("favorite", "favorites", "favourites", "favs"):
+        return "favorites"
+    if tok in ("recent", "recently", "recently_watched"):
+        return "recent"
+    if tok in ("tvguide", "tv_guide", "005"):
+        return "tvguide"
     if tok in ("weather", "004"):
         return "weather"
     if tok in ("directory", "000", "guide"):
@@ -64,10 +84,15 @@ def normalize_home_token(raw: str) -> str | None:
     return None
 
 
-def parse_home_menu_list(raw: Any) -> list[str]:
+def parse_home_menu_list(raw: Any, *, kids: bool = False) -> list[str]:
     """Parse a parent/kids token list; invalid entries dropped."""
+    defaults = (
+        list(DEFAULT_KIDS_HOME_MENU_TOKENS)
+        if kids
+        else list(DEFAULT_HOME_MENU_TOKENS)
+    )
     if not isinstance(raw, list):
-        return list(DEFAULT_HOME_MENU_TOKENS)
+        return defaults
     out: list[str] = []
     seen: set[str] = set()
     for item in raw:
@@ -76,7 +101,7 @@ def parse_home_menu_list(raw: Any) -> list[str]:
             continue
         seen.add(tok)
         out.append(tok)
-    return out if out else list(DEFAULT_HOME_MENU_TOKENS)
+    return out if out else defaults
 
 
 def parse_home_menu(raw: dict | None) -> dict[str, list[str]]:
@@ -86,10 +111,12 @@ def parse_home_menu(raw: dict | None) -> dict[str, list[str]]:
     kids = block.get("kids")
     return {
         "parent": parse_home_menu_list(
-            parent if parent is not None else list(DEFAULT_HOME_MENU_TOKENS)
+            parent if parent is not None else list(DEFAULT_HOME_MENU_TOKENS),
+            kids=False,
         ),
         "kids": parse_home_menu_list(
-            kids if kids is not None else list(DEFAULT_HOME_MENU_TOKENS)
+            kids if kids is not None else list(DEFAULT_KIDS_HOME_MENU_TOKENS),
+            kids=True,
         ),
     }
 

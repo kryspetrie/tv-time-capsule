@@ -146,19 +146,56 @@ class PlaybackFinishTests(unittest.TestCase):
         app.playing_index = 2
         self.assertIsNone(app._resolve_manual_skip_target(+1))
 
-    def test_double_tap_right_skips_next_episode(self):
+    def test_resolve_manual_skip_crosses_seasons(self):
         app = self._playing_app()
+        app.shows["Reading Rainbow"]["seasons"][2] = {
+            "episodes": [
+                {"number": 1, "name": "S2E1", "path": "/tmp/s2e1.mp4"},
+                {"number": 2, "name": "S2E2", "path": "/tmp/s2e2.mp4"},
+            ]
+        }
+        app.playing_index = 2  # last of season 1
+        nxt = app._resolve_manual_skip_target(+1)
+        self.assertIsNotNone(nxt)
+        eps, idx, season = nxt
+        self.assertEqual(season, 2)
+        self.assertEqual(idx, 0)
+        self.assertEqual(eps[0]["name"], "S2E1")
+
+        app.playing_season = 2
+        app.playing_episodes = eps
+        app.playing_index = 0
+        prev = app._resolve_manual_skip_target(-1)
+        self.assertIsNotNone(prev)
+        p_eps, p_idx, p_season = prev
+        self.assertEqual(p_season, 1)
+        self.assertEqual(p_idx, 2)
+        self.assertEqual(p_eps[p_idx]["name"], "Ep3")
+
+    def test_manual_skip_works_while_kids_mode_active(self):
+        app = self._playing_app()
+        app._kids_mode_active = True
+        with patch.object(app, "_begin_episode_skip", return_value=True) as skip:
+            app._process_playback_action("next_episode")
+            skip.assert_called_once_with(+1)
+            app._process_playback_action("prev_episode")
+            self.assertEqual(skip.call_count, 2)
+
+    def test_left_right_seek_only_no_double_tap_skip(self):
+        """←/→ always scrub; episode skip is dedicated keys only."""
+        app = self._playing_app()
+        app._episode_skip_double_tap_ms = 450  # even if config still has a window
         with (
             patch.object(app, "_begin_episode_skip", return_value=True) as skip,
             patch.object(app.player, "seek") as seek,
         ):
             app._process_playback_action("right", key_repeat=False)
-            seek.assert_called_once()
-            skip.assert_not_called()
             app._process_playback_action("right", key_repeat=False)
-            skip.assert_called_once_with(+1)
+            app._process_playback_action("left", key_repeat=False)
+            skip.assert_not_called()
+            self.assertEqual(seek.call_count, 3)
 
-    def test_key_repeat_does_not_count_as_double_tap(self):
+    def test_key_repeat_still_seeks(self):
         app = self._playing_app()
         with (
             patch.object(app, "_begin_episode_skip", return_value=True) as skip,

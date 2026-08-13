@@ -1,5 +1,8 @@
 # Troubleshooting
 
+Installing a Pi from a blank SD card? Start with
+[Raspberry Pi — from empty board to TV](raspberry-pi.md) before debugging runtime issues.
+
 ## No shows found
 
 - Check `media_paths` and that folders contain supported video files ([Media library](media-library.md))  
@@ -52,6 +55,20 @@ Check ffmpeg/ffplay are installed and numpy is available in the venv/pipx enviro
 ```
 
 Or manually: `sudo apt install ffmpeg` / `brew install ffmpeg`.
+
+## Chromium missing (YouTube catalog / Retro / live Weather)
+
+CDP features need a **system** Chrome/Chromium (installed by `install-system-deps.sh` / `install-pi.sh`). The app does not download a browser at runtime.
+
+```bash
+./scripts/install-system-deps.sh
+# or:
+sudo apt install -y chromium          # Debian / Pi OS
+brew install --cask chromium          # macOS
+command -v chromium || command -v chromium-browser
+```
+
+Logs will say “No system Chromium/Chrome found…” if it is still missing. Native Weather and cached YouTube file playback do not need Chromium.
 
 ## Choppy video on Raspberry Pi
 

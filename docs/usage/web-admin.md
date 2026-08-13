@@ -64,8 +64,9 @@ The chosen name is stored in `/etc/tv-time-capsule/mdns-hostname` on Linux.
 
 | Screen | What it does |
 |--------|----------------|
-| **Status** | Show count, current menu/playback state |
-| **Player settings** | Toggle fun tweaks and **CRT safe zone** margins (top/bottom/left/right %) plus pixel offset (X/Y), channel snow, screensaver, etc. Saved to config; applies immediately. See [Configuration → Safe zone](configuration.md#safe-zone). |
+| **Status** | Show count, current menu/playback state, active profile |
+| **Player settings** | Fun tweaks, CRT safe zone, volume, stall auto-skip, read-only media, pause CC OSD, screensaver, etc. |
+| **Profiles** | Active profile, labels, PIN (write-only), favorites counts, copy allowlist parent→kids / kids→guest |
 | **Media paths** | Edit local library roots, verify readability, preview or apply library scans |
 | **Network mounts** | Edit CIFS/NFS/SSHFS/FTP entries, verify/mount shares |
 | **Cached library** | Full hierarchical tree of the in-memory discovery cache (shows → seasons → episodes) |
@@ -83,6 +84,10 @@ The chosen name is stored in `/etc/tv-time-capsule/mdns-hostname` on Linux.
 | GET/POST | `/api/config` | Read or save config |
 | POST | `/api/config/reload` | Reload config from disk |
 | GET/POST | `/api/settings` | Read or patch player toggles |
+| GET | `/api/profiles` | Active profile + summary (no PIN values) |
+| POST | `/api/profiles/active` | Switch active profile (`{"profile":"kids"}`) |
+| POST | `/api/profiles/pin` | Set/clear PIN (`{"profile":"kids","pin":"1234"}` or `null`) |
+| POST | `/api/profiles/copy-allowlist` | Copy allowlist (`{"src":"parent","dest":"kids"}`) |
 | GET/POST | `/api/paths` | Read or update `media_paths` / `mounts` |
 | POST | `/api/paths/verify` | Probe a local media path |
 | POST | `/api/mounts/verify` | Mount or confirm a configured share |

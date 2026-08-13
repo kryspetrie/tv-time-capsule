@@ -34,6 +34,7 @@ class DialNavTests(unittest.TestCase):
         self.assertEqual(classify_dial("001").kind, DialKind.TEST_PATTERN)
         self.assertEqual(classify_dial("000").kind, DialKind.HIDDEN_GUIDE)
         self.assertEqual(classify_dial("004").kind, DialKind.WEATHER)
+        self.assertEqual(classify_dial("005").kind, DialKind.TV_GUIDE)
         self.assertEqual(classify_dial("1").kind, DialKind.CHANNEL)
         self.assertEqual(classify_dial("1").channel, 1)
         self.assertEqual(classify_dial("12").channel, 12)

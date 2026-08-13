@@ -59,6 +59,14 @@ class AdminContext(Protocol):
 
     def admin_update_paths(self, patch: dict) -> tuple[bool, str]: ...
 
+    def admin_profiles(self) -> dict[str, Any]: ...
+
+    def admin_set_active_profile(self, profile_id: str) -> dict[str, Any]: ...
+
+    def admin_set_profile_pin(self, profile_id: str, pin: str | None) -> dict[str, Any]: ...
+
+    def admin_copy_allowlist(self, src: str, dest: str) -> dict[str, Any]: ...
+
 
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -114,6 +122,13 @@ ADMIN_HTML = """<!DOCTYPE html>
   <div id="settings"></div>
   <button onclick="saveSettings()">Save settings</button>
   <span id="settings-msg" class="msg"></span>
+</div>
+
+<div class="card">
+  <h2>Profiles</h2>
+  <p class="muted">Parent / Kids / Guest. PIN is write-only (shown as set or empty). Copy allowlist between profiles.</p>
+  <div id="profiles"></div>
+  <span id="profiles-msg" class="msg"></span>
 </div>
 
 <div class="card">
@@ -216,6 +231,10 @@ const SETTING_LABELS = {
   safe_zone_offset_y: "Safe zone offset Y (px)",
   screensaver: "Screensaver",
   screensaver_timeout_seconds: "Screensaver timeout (seconds)",
+  playback_volume: "Playback volume (0-100)",
+  stall_auto_skip: "Auto-skip after playback stall",
+  media_read_only: "Read-only media (no writes on media paths)",
+  pause_cc_osd: "Fake CC / tracking lines when paused",
 };
 
 function renderSettings() {
@@ -230,6 +249,7 @@ function renderSettings() {
       : key;
     const locked = cli[overrideKey];
     if (key === "screensaver_timeout_seconds" || key === "analog_artifact_rate"
+        || key === "playback_volume"
         || (key.startsWith("safe_zone_") && !key.includes("offset"))) {
       row.innerHTML = `<label>${label}${locked ? " (CLI)" : ""}</label>
         <input type="number" min="0" id="set-${key}" value="${settingsState[key] ?? (key === "analog_artifact_rate" ? 12 : 0)}" ${locked ? "disabled" : ""}>`;
@@ -361,8 +381,9 @@ async function saveSettings() {
     const el = document.getElementById("set-" + key);
     if (!el || el.disabled) continue;
     patch[key] = key === "screensaver_timeout_seconds" || key === "analog_artifact_rate"
+      || key === "playback_volume"
       || key.startsWith("safe_zone_")
-      ? (key === "safe_zone_offset_x" || key === "safe_zone_offset_y"
+      ? (key === "safe_zone_offset_x" || key === "safe_zone_offset_y" || key === "playback_volume"
         ? parseInt(el.value, 10) : parseFloat(el.value))
       : el.checked;
   }
@@ -482,8 +503,65 @@ async function loadKeymap() {
 async function loadLogs() {
   document.getElementById("log").textContent = (await api("/api/logs")).lines.join("\\n");
 }
+let profilesState = {active: "parent", profiles: {}};
+function renderProfiles() {
+  const box = document.getElementById("profiles");
+  box.innerHTML = "";
+  const active = profilesState.active || "parent";
+  for (const [pid, p] of Object.entries(profilesState.profiles || {})) {
+    const row = document.createElement("div");
+    row.className = "mount-block";
+    const pinHint = p.has_pin ? "(PIN set)" : "(no PIN)";
+    row.innerHTML = `<strong>${esc(p.label || pid)}</strong> <span class="muted">${esc(pid)}${pid===active?" · active":""}</span>
+      <div class="muted">Favorites: ${p.favorites_shows||0} shows / ${p.favorites_movies||0} movies · vol ${p.volume??100} · ${pinHint}</div>
+      <div class="row">
+        <button class="secondary" onclick="setActiveProfile('${pid}')">Make active</button>
+        <input type="password" id="pin-${pid}" placeholder="Set 4-digit PIN" maxlength="4" style="width:9rem">
+        <button class="secondary" onclick="setProfilePin('${pid}')">Save PIN</button>
+        <button class="secondary" onclick="clearProfilePin('${pid}')">Clear PIN</button>
+      </div>`;
+    box.appendChild(row);
+  }
+  const copy = document.createElement("div");
+  copy.className = "row";
+  copy.style.marginTop = "0.75rem";
+  copy.innerHTML = `<button class="secondary" onclick="copyAllowlist('parent','kids')">Copy allowlist parent→kids</button>
+    <button class="secondary" onclick="copyAllowlist('kids','guest')">Copy allowlist kids→guest</button>`;
+  box.appendChild(copy);
+}
+async function loadProfiles() {
+  profilesState = await api("/api/profiles");
+  renderProfiles();
+}
+async function setActiveProfile(pid) {
+  profilesState = await api("/api/profiles/active", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: pid})});
+  document.getElementById("profiles-msg").className = "msg ok";
+  document.getElementById("profiles-msg").textContent = "Active profile: " + pid;
+  renderProfiles();
+}
+async function setProfilePin(pid) {
+  const el = document.getElementById("pin-" + pid);
+  const pin = (el && el.value) || "";
+  profilesState = await api("/api/profiles/pin", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: pid, pin})});
+  document.getElementById("profiles-msg").className = "msg ok";
+  document.getElementById("profiles-msg").textContent = "PIN updated for " + pid;
+  if (el) el.value = "";
+  renderProfiles();
+}
+async function clearProfilePin(pid) {
+  profilesState = await api("/api/profiles/pin", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: pid, pin: null})});
+  document.getElementById("profiles-msg").className = "msg ok";
+  document.getElementById("profiles-msg").textContent = "PIN cleared for " + pid;
+  renderProfiles();
+}
+async function copyAllowlist(src, dest) {
+  profilesState = await api("/api/profiles/copy-allowlist", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({src, dest})});
+  document.getElementById("profiles-msg").className = "msg ok";
+  document.getElementById("profiles-msg").textContent = "Copied allowlist " + src + " → " + dest;
+  renderProfiles();
+}
 async function refreshAll() {
-  await loadStatus(); await loadSettings(); await loadPaths(); await loadLibrary();
+  await loadStatus(); await loadSettings(); await loadProfiles(); await loadPaths(); await loadLibrary();
   await loadConfig(); await loadChannels(); await loadWatch(); await loadKeymap(); await loadLogs();
 }
 refreshAll();
@@ -671,6 +749,26 @@ class DeferredAdminBridge:
             return False, "app still starting"
         return self._app.admin_update_paths(patch)
 
+    def admin_profiles(self) -> dict[str, Any]:
+        if self._app is None:
+            return {"active": "parent", "profiles": {}}
+        return self._app.admin_profiles()
+
+    def admin_set_active_profile(self, profile_id: str) -> dict[str, Any]:
+        if self._app is None:
+            return {"active": "parent", "profiles": {}}
+        return self._app.admin_set_active_profile(profile_id)
+
+    def admin_set_profile_pin(self, profile_id: str, pin: str | None) -> dict[str, Any]:
+        if self._app is None:
+            return {"active": "parent", "profiles": {}}
+        return self._app.admin_set_profile_pin(profile_id, pin)
+
+    def admin_copy_allowlist(self, src: str, dest: str) -> dict[str, Any]:
+        if self._app is None:
+            return {"active": "parent", "profiles": {}}
+        return self._app.admin_copy_allowlist(src, dest)
+
 
 def _read_admin_pid() -> int | None:
     try:
@@ -846,6 +944,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                     "mounts": list(cfg.get("mounts") or []),
                 },
             )
+        elif path == "/api/profiles":
+            self._send_json(200, ctx.admin_profiles())
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -910,6 +1010,27 @@ class AdminHandler(BaseHTTPRequestHandler):
             apply = bool(data.get("apply"))
             result = ctx.admin_scan_library(paths, apply=apply)
             self._send_json(200, result)
+        elif path == "/api/profiles/active":
+            data = self._read_json()
+            self._send_json(200, ctx.admin_set_active_profile(str(data.get("profile") or "parent")))
+        elif path == "/api/profiles/pin":
+            data = self._read_json()
+            pin = data.get("pin")
+            if pin is not None:
+                pin = str(pin)
+            self._send_json(
+                200,
+                ctx.admin_set_profile_pin(str(data.get("profile") or "parent"), pin),
+            )
+        elif path == "/api/profiles/copy-allowlist":
+            data = self._read_json()
+            self._send_json(
+                200,
+                ctx.admin_copy_allowlist(
+                    str(data.get("src") or "parent"),
+                    str(data.get("dest") or "kids"),
+                ),
+            )
         else:
             self._send_json(404, {"error": "not found"})
 

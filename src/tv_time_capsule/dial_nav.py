@@ -16,6 +16,7 @@ class DialKind(Enum):
     HIDDEN_GUIDE = auto()
     TEST_PATTERN = auto()
     WEATHER = auto()
+    TV_GUIDE = auto()
     RETRO_TV = auto()
     CHANNEL = auto()
     INVALID = auto()
@@ -57,6 +58,9 @@ def classify_dial(digits: str) -> DialResult:
 
     if digits == "004":
         return DialResult(DialKind.WEATHER, digits)
+
+    if digits == "005":
+        return DialResult(DialKind.TV_GUIDE, digits)
 
     if digits.startswith("0"):
         return DialResult(DialKind.INVALID, digits)

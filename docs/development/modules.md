@@ -55,9 +55,7 @@ Defined in `pyproject.toml`:
 
 | Tool | Used for |
 |------|----------|
-| ffmpeg / ffprobe | Video decode, duration/fps |
-| ffplay | Audio during embedded playback |
-| omxplayer | Legacy Pi GPU path |
+| ffmpeg / ffprobe / ffplay | File playback (RGB video + audio); Pi may use V4L2 `hw_decode` |
 | mount / mount.cifs / mount.nfs | Privileged mounts |
 | sshfs / curlftpfs | FUSE remotes |
 | nmcli / rfkill | Networking ensure script |

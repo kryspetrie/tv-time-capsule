@@ -17,11 +17,24 @@ END_COMPLETE_SECONDS = 10.0
 
 _YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
+_active_state_file: str = STATE_FILE
+
+
+def set_active_state_file(path: str | None) -> None:
+    """Point load/save at a profile-specific state file."""
+    global _active_state_file
+    _active_state_file = path or STATE_FILE
+
+
+def active_state_file() -> str:
+    return _active_state_file
+
 
 def load_state():
-    if os.path.exists(STATE_FILE):
+    path = _active_state_file
+    if os.path.exists(path):
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(path, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -29,8 +42,9 @@ def load_state():
 
 
 def save_state(state):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(STATE_FILE, "w") as f:
+    path = _active_state_file
+    os.makedirs(os.path.dirname(path) or STATE_DIR, exist_ok=True)
+    with open(path, "w") as f:
         json.dump(state, f, indent=2)
 
 
@@ -560,3 +574,123 @@ def watch_summary(state: dict | None = None) -> dict:
         if any(isinstance(k, str) and k.startswith("s") for k in value):
             out[key] = value
     return out
+
+
+def _parse_ts(value: Any) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def iter_season_entries(state: dict) -> list[tuple[str, int, dict[str, Any]]]:
+    """Yield (show_name, season_num, entry) for every season dict in state."""
+    out: list[tuple[str, int, dict[str, Any]]] = []
+    if not isinstance(state, dict):
+        return out
+    for show, seasons in state.items():
+        if not isinstance(show, str) or show.startswith("_"):
+            continue
+        if not isinstance(seasons, dict):
+            continue
+        for key, entry in seasons.items():
+            if not isinstance(key, str) or not key.startswith("s") or not key[1:].isdigit():
+                continue
+            if not isinstance(entry, dict):
+                continue
+            out.append((show, int(key[1:]), entry))
+    return out
+
+
+def list_continue_watching(
+    state: dict,
+    *,
+    known_shows: set[str] | None = None,
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    """In-progress titles sorted by newest ``ts`` first."""
+    items: list[dict[str, Any]] = []
+    for show, season, entry in iter_season_entries(state):
+        if known_shows is not None and show not in known_shows:
+            continue
+        try:
+            seconds = float(entry.get("pos") or 0)
+        except (TypeError, ValueError):
+            continue
+        if seconds < MIN_RESUME_SECONDS:
+            continue
+        ep_num = entry.get("pos_ep")
+        try:
+            ep_i = int(ep_num) if ep_num is not None else None
+        except (TypeError, ValueError):
+            ep_i = None
+        if ep_i is None and not _normalize_youtube_id(entry.get("pos_id")):
+            continue
+        items.append(
+            {
+                "kind": "show",
+                "name": show,
+                "season": season,
+                "episode": ep_i,
+                "pos": seconds,
+                "pos_id": _normalize_youtube_id(entry.get("pos_id")),
+                "ts": entry.get("ts"),
+                "ts_sort": _parse_ts(entry.get("ts")),
+            }
+        )
+    items.sort(key=lambda x: x["ts_sort"], reverse=True)
+    return items[: max(1, int(limit))]
+
+
+def list_recently_watched(
+    state: dict,
+    *,
+    known_shows: set[str] | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Recently touched seasons (resume or completed) by ``ts``."""
+    items: list[dict[str, Any]] = []
+    for show, season, entry in iter_season_entries(state):
+        if known_shows is not None and show not in known_shows:
+            continue
+        ts = entry.get("ts")
+        if not ts:
+            continue
+        watched = _watched_numbers(entry) or _watched_ids(entry)
+        try:
+            seconds = float(entry.get("pos") or 0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        in_progress = seconds >= MIN_RESUME_SECONDS and (
+            entry.get("pos_ep") is not None or _normalize_youtube_id(entry.get("pos_id"))
+        )
+        if not watched and not in_progress:
+            continue
+        ep_num = entry.get("pos_ep")
+        try:
+            ep_i = int(ep_num) if ep_num is not None else None
+        except (TypeError, ValueError):
+            ep_i = None
+        items.append(
+            {
+                "kind": "show",
+                "name": show,
+                "season": season,
+                "episode": ep_i,
+                "pos": seconds if in_progress else 0.0,
+                "pos_id": _normalize_youtube_id(entry.get("pos_id")),
+                "ts": ts,
+                "ts_sort": _parse_ts(ts),
+                "in_progress": in_progress,
+            }
+        )
+    # Dedupe by show (keep newest)
+    best: dict[str, dict[str, Any]] = {}
+    for item in sorted(items, key=lambda x: x["ts_sort"], reverse=True):
+        best.setdefault(item["name"], item)
+    out = list(best.values())
+    out.sort(key=lambda x: x["ts_sort"], reverse=True)
+    return out[: max(1, int(limit))]
+

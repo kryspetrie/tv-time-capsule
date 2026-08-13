@@ -28,8 +28,8 @@ DEFAULT_GAMEPAD_BINDINGS: dict[str, list[str]] = {
     "down": ["hat-down", "stick-down"],
     "left": ["hat-left", "stick-left"],
     "right": ["hat-right", "stick-right"],
-    "next_episode": [],
-    "prev_episode": [],
+    "next_episode": ["button-5"],
+    "prev_episode": ["button-4"],
     "stop_clear": [],
 }
 

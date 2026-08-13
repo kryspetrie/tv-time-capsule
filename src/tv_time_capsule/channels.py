@@ -8,11 +8,15 @@ from typing import Any
 def build_channel_lineup(
     show_names: list[str] | set[str],
     channels_cfg: dict[str, Any] | None,
+    *,
+    favorite_names: list[str] | set[str] | None = None,
 ) -> tuple[list[str], dict[str, int], dict[int, str]]:
     """Build browse order and channel maps from config.
 
     Rules:
-    - Shows listed in ``order`` appear first (unknown names are skipped).
+    - Favorite shows (when provided) appear first among unnumbered lineup order
+      preferences, then ``order``, then remaining alphabetical.
+    - Shows listed in ``order`` appear next (unknown names are skipped).
     - Remaining shows append in stable alphabetical order.
     - Each show gets a display channel: explicit ``numbers`` entry, else
       1-based index in the ordered lineup.
@@ -37,8 +41,14 @@ def build_channel_lineup(
             except (TypeError, ValueError):
                 continue
 
+    favs = [str(n) for n in (favorite_names or []) if str(n) in known]
+
     ordered: list[str] = []
     seen: set[str] = set()
+    for name in favs:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
     for name in order_list:
         if name in known and name not in seen:
             ordered.append(name)

@@ -203,12 +203,15 @@ with open(sys.argv[1], encoding="utf-8") as f:
     cfg = json.load(f)
 mounts = cfg.get("mounts") or []
 
-lines = ensure_mounts(mounts, retries=3, delay_s=2.0)
+lines, failures = ensure_mounts(mounts, retries=3, delay_s=2.0)
 fail = 0
 for line in lines:
     print(line)
     if line.startswith("failed ") or line.startswith("skip mount"):
         fail += 1
+for line in failures:
+    print(f"FAIL: {line}")
+    fail += 1
 
 mountpoints = [m["mountpoint"] for m in mounts if m.get("mountpoint")]
 shows = discover_shows(mountpoints)

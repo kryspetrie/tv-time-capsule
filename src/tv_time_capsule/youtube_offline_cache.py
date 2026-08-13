@@ -209,8 +209,16 @@ def state_fallback_cache_dir() -> Path:
     return Path(STATE_DIR) / "youtube-offline"
 
 
-def default_cache_dir(media_paths: list[str] | None = None) -> Path:
+def default_cache_dir(
+    media_paths: list[str] | None = None,
+    *,
+    read_only_media: bool = False,
+) -> Path:
     """Prefer the first writable ``media_paths`` entry; else state dir fallback."""
+    if read_only_media:
+        fallback = state_fallback_cache_dir()
+        LOG.info("YouTube offline cache: media.read_only — using %s", fallback)
+        return fallback.resolve()
     tried: list[str] = []
     for path in media_paths or []:
         text = str(path or "").strip()
@@ -250,7 +258,10 @@ def resolve_cache_dir(
     cache_cfg: dict[str, Any] | None,
     *,
     media_paths: list[str] | None = None,
+    read_only_media: bool = False,
 ) -> Path:
+    if read_only_media:
+        return default_cache_dir(media_paths, read_only_media=True)
     raw = (cache_cfg or {}).get("directory")
     if raw:
         explicit = Path(os.path.expanduser(str(raw)))
@@ -260,7 +271,7 @@ def resolve_cache_dir(
             "YouTube offline cache.directory %s is not writable — falling back",
             explicit,
         )
-    return default_cache_dir(media_paths)
+    return default_cache_dir(media_paths, read_only_media=False)
 
 
 def is_idle_for_youtube_cache(
@@ -370,8 +381,11 @@ class YoutubeOfflineCache:
         media_paths = config.get("media_paths") or []
         if not isinstance(media_paths, list):
             media_paths = []
+        read_only_media = bool((config.get("media") or {}).get("read_only", False))
         self.cache_dir = resolve_cache_dir(
-            cache_cfg, media_paths=[str(p) for p in media_paths]
+            cache_cfg,
+            media_paths=[str(p) for p in media_paths],
+            read_only_media=read_only_media,
         )
         self._manifest_path = self.cache_dir / MANIFEST_NAME
         self._lock = threading.RLock()

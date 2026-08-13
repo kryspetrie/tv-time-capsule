@@ -135,7 +135,7 @@ class MovieNavTests(unittest.TestCase):
         self.assertIn("004", secret_pages)
 
     def test_help_details_fit_canvas_width(self):
-        """Help row details must not render wider than the 640 canvas."""
+        """Help detail slots stay within the 640 canvas (overflow marquees)."""
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
         pygame.init()
@@ -143,21 +143,26 @@ class MovieNavTests(unittest.TestCase):
         app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         app.sw, app.sh = 640, 480
         margin = 40
+        saw_overflow = False
         for _title, lines in app._help_pages(device="keyboard"):
             for label, detail in lines:
                 if detail is None:
                     continue
-                label_text = app._ellipsize_help_text(
-                    app.font_sm, label, max(40, app.sw // 2 - 56)
+                lab, lab_x, lab_w, det, det_x, det_w, stacked = app._help_row_layout(
+                    label, detail
                 )
-                lt_w = app.font_sm.size(label_text)[0]
-                budget = max(40, app.sw - 56 - lt_w - 16 - margin)
-                fitted = app._ellipsize_help_text(app.font_sm, detail, budget)
-                self.assertLessEqual(
-                    app.font_sm.size(fitted)[0],
-                    app.sw - margin,
-                    msg=f"{label!r} / {detail!r}",
-                )
+                self.assertGreaterEqual(lab_x, 0)
+                self.assertGreaterEqual(det_x, 0)
+                self.assertLessEqual(lab_x + lab_w, app.sw - margin + 16)
+                self.assertLessEqual(det_x + det_w, app.sw - margin + 1)
+                if app.font_sm.size(det)[0] > det_w:
+                    saw_overflow = True
+                if stacked:
+                    self.assertEqual(lab_x, det_x)
+        self.assertTrue(
+            saw_overflow,
+            "expected at least one help detail wider than its slot (marquee)",
+        )
 
 
 if __name__ == "__main__":

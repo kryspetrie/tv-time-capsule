@@ -1,10 +1,13 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
 # TV Time Capsule — Raspberry Pi Setup Script
-# Works on: Pi Model B (2011), Pi 2, Pi 3, Pi 4, Pi 5
+# Works on: Pi Model B / Pi 1, Zero, Pi 2, Pi 3, Pi 4, Pi 5
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Run on a fresh Raspberry Pi OS Lite installation:
+# Pi 1 / Zero / Zero W: flash Raspberry Pi OS (Legacy) Lite 32-bit (Bookworm) —
+# not Desktop, not current/Trixie. See docs/usage/raspberry-pi.md
+# Pi 2+: Desktop is fine (use kiosk day-to-day); Lite is leaner.
+# Full path from blank SD card: docs/usage/raspberry-pi.md
 #   chmod +x install-pi.sh && ./install-pi.sh
 #   ./install-pi.sh --hostname vintage-tv-bedroom
 #
@@ -65,19 +68,7 @@ else
     echo -e "${YELLOW}Warning:${NC} Not running on a Raspberry Pi. Some features may not work."
 fi
 
-# Determine video player
-USE_OMXPLAYER=false
-USE_MPV=false
-if echo "$PI_MODEL" | grep -qi "model b\|pi 2\|pi 3"; then
-    USE_OMXPLAYER=true
-    echo -e "${GREEN}Video player:${NC} omxplayer (GPU-accelerated for this Pi)"
-elif echo "$PI_MODEL" | grep -qi "pi 4\|pi 5"; then
-    USE_MPV=true
-    echo -e "${GREEN}Video player:${NC} mpv (hardware decode for this Pi)"
-else
-    USE_OMXPLAYER=true
-    echo -e "${YELLOW}Video player:${NC} Will try omxplayer, fall back to mpv"
-fi
+echo -e "${GREEN}Video player:${NC} ffmpeg (hw_decode on supported Pi models)"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -100,21 +91,6 @@ echo ""
 
 echo -e "${CYAN}Installing system prerequisites...${NC}"
 "$SCRIPT_DIR/scripts/install-system-deps.sh"
-
-# Legacy Pi video player fallbacks
-if [ "$USE_OMXPLAYER" = true ]; then
-    sudo apt-get install -y -qq omxplayer 2>/dev/null || true
-    if ! command -v omxplayer &>/dev/null && ! command -v omxplayer.bin &>/dev/null; then
-        echo -e "${YELLOW}omxplayer not available, using mpv instead...${NC}"
-        sudo apt-get install -y -qq mpv 2>/dev/null || true
-        USE_OMXPLAYER=false
-        USE_MPV=true
-    fi
-fi
-
-if [ "$USE_MPV" = true ]; then
-    sudo apt-get install -y -qq mpv 2>/dev/null || true
-fi
 
 echo -e "${GREEN}✓${NC} System packages installed"
 
@@ -228,7 +204,7 @@ if echo "$PI_MODEL" | grep -qi "model b"; then
     echo ""
     echo -e "${CYAN}Detected original Pi Model B — applying optimizations...${NC}"
 
-    # GPU memory for omxplayer at 480i
+    # GPU memory for video decode at 480i
     if ! grep -q "gpu_mem" /boot/config.txt 2>/dev/null; then
         echo "gpu_mem=192" | sudo tee -a /boot/config.txt > /dev/null
     fi

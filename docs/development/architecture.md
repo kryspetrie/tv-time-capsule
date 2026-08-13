@@ -9,8 +9,7 @@ CLI (cli.py)
   ├─ discover_shows()         # walk media_paths
   └─ TVTimeCapsule.run()      # pygame event loop
         ├─ menu / channel UI
-        └─ EmbeddedPlayer     # ffmpeg frames + ffplay audio
-              └─ omxplayer fallback on older Pi when needed
+        └─ EmbeddedPlayer     # ffmpeg frames + ffplay audio (+ hw_decode on Pi)
 ```
 
 ## Display model

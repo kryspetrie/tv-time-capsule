@@ -2,6 +2,11 @@
 
 Used by Weather Channel, MyRetroTVs decade screencasts, and YouTube
 catalog/playback.
+
+Policy: use a **system-installed** Chrome/Chromium only. Install it with
+``scripts/install-system-deps.sh`` (or ``install-pi.sh`` / ``install.sh``).
+We do not vendor or download browser builds at runtime — that path differed
+by CPU (x86 zip vs ARM apt) and was hard to support.
 """
 
 from __future__ import annotations
@@ -9,129 +14,66 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import time
 import urllib.request
-import zipfile
-from pathlib import Path
 
 LOG = logging.getLogger(__name__)
 
-# Playwright-published Chromium builds.
-_CHROMIUM_REVISIONS: dict[str, str] = {
-    "linux": "1097",
-    "mac": "1097",
-    "mac_arm": "1097",
-}
-_CHROMIUM_HOST = "https://playwright.azureedge.net/builds/chromium"
+# Prefer Chromium (matches apt/brew package name); Chrome is an acceptable stand-in.
+_CANDIDATE_NAMES = (
+    "chromium",
+    "chromium-browser",
+    "google-chrome-stable",
+    "google-chrome",
+)
 
-
-def cache_dir() -> Path:
-    if sys.platform == "darwin":
-        base = Path.home() / "Library" / "Caches"
-    elif sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return base / "tv-time-capsule" / "chromium"
-
-
-def chromium_platform_key() -> str | None:
-    if sys.platform == "linux":
-        return "linux"
-    if sys.platform == "darwin":
-        machine = platform.machine().lower()
-        return "mac_arm" if machine in ("arm64", "aarch64") else "mac"
-    return None
-
-
-def chromium_download_url() -> str | None:
-    key = chromium_platform_key()
-    if key is None:
-        return None
-    rev = _CHROMIUM_REVISIONS.get(key)
-    if rev is None:
-        return None
-    return f"{_CHROMIUM_HOST}/{rev}/chromium-{key}.zip"
+_CANDIDATE_PATHS = (
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+)
 
 
 def find_chrome() -> str | None:
-    for name in (
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium-browser",
-        "chromium",
-    ):
+    """Return path to a system Chrome/Chromium binary, or None."""
+    for name in _CANDIDATE_NAMES:
         path = shutil.which(name)
         if path:
             return path
-    mac_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    if os.path.exists(mac_path):
-        return mac_path
+    for path in _CANDIDATE_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
     return None
 
 
-def ensure_executable(path: Path) -> None:
-    if sys.platform == "win32":
-        return
-    try:
-        st = path.stat()
-        path.chmod(st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    except Exception:
-        pass
-
-
 def ensure_chromium(*, log_label: str = "screencast") -> str | None:
-    """Return a Chrome/Chromium binary path, downloading if needed."""
+    """Return a system Chrome/Chromium path, or None with an install hint."""
     system = find_chrome()
     if system is not None:
         return system
 
-    cache = cache_dir()
-    key = chromium_platform_key()
-    if key is None:
-        LOG.warning("Unsupported platform for Chromium download")
-        return None
-
     if sys.platform == "darwin":
-        chrome_bin = (
-            cache / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+        hint = (
+            "brew install --cask chromium   "
+            "(or re-run ./scripts/install-system-deps.sh)"
         )
-    elif sys.platform == "linux":
-        chrome_bin = cache / "chrome-linux" / "chrome"
     else:
-        return None
-
-    if chrome_bin.is_file():
-        ensure_executable(chrome_bin)
-        return str(chrome_bin)
-
-    url = chromium_download_url()
-    if url is None:
-        return None
-
-    LOG.info("Downloading Chromium for %s...", log_label)
-    try:
-        cache.mkdir(parents=True, exist_ok=True)
-        zip_path = cache / "chromium.zip"
-        urllib.request.urlretrieve(url, zip_path)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(cache)
-        zip_path.unlink()
-    except Exception as exc:
-        LOG.warning("Failed to download Chromium: %s", exc)
-        return None
-
-    if chrome_bin.is_file():
-        ensure_executable(chrome_bin)
-        LOG.info("Chromium ready at %s", chrome_bin)
-        return str(chrome_bin)
-
+        hint = (
+            "sudo apt install -y chromium   "
+            "(or re-run ./scripts/install-system-deps.sh / ./install-pi.sh)"
+        )
+    LOG.warning(
+        "No system Chromium/Chrome found for %s. Install with: %s",
+        log_label,
+        hint,
+    )
     return None
 
 
