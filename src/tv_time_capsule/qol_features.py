@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
 import pygame
 
 from .breadcrumb import write_breadcrumb
-from .channels import build_channel_lineup
 from .config import C, save_config
 from .log import LOG
 from .profiles import (
@@ -24,21 +24,35 @@ from .state import (
     list_continue_watching,
     list_recently_watched,
 )
+from .guide_meta import (
+    guide_meta_epoch,
+    merge_guide_meta_into_rows,
+    tv_guide_meta_enabled,
+    tv_guide_omdb_key,
+)
+from .player import detect_ffmpeg
 from .thumbnails import ensure_movie_thumbnail, ensure_show_thumbnail
 from .tv_guide import (
     PAGE_DWELL_MS,
     PAGE_SCROLL_MS,
-    TOP_SLOT_MS,
     build_guide_rows,
     draw_tv_guide,
     ease_in_out,
     ensure_guide_weather,
+    guide_page_size,
     guide_row_metrics,
+    guide_weather_status,
+    is_guide_program_row,
+    next_guide_scroll_offset,
     peek_guide_weather,
     pick_random_preview_idx,
+    pick_random_scroll_offset,
     resolve_top_mode,
+    resolve_virtual_guide_list,
+    resolve_virtual_guide_top,
+    top_slot_count,
+    top_slot_duration_ms,
 )
-from .player import detect_ffmpeg
 
 
 class QolFeaturesMixin:
@@ -62,6 +76,13 @@ class QolFeaturesMixin:
         self._tv_guide_page_size = 1
         self._tv_guide_page_at = 0
         self._tv_guide_weather = None
+        self._tv_guide_previous_view = None
+        self._tv_guide_previous_cursor = 0
+        self._tv_guide_meta_epoch = -1
+        # Virtual "always-on" channel clock (wall time); not ticked while hidden.
+        self._tv_guide_channel_origin_wall: float | None = None
+        self._tv_guide_channel_origin_offset = 0
+        self._tv_guide_channel_seed = 0
         self._pin_prompt_active = False
         self._pin_buffer = ""
         self._pin_pending_action: str | None = None  # leave_kids|switch_profile
@@ -250,29 +271,32 @@ class QolFeaturesMixin:
         self._browse_filter = None
 
     def _enter_tv_guide(self) -> None:
+        # Never leave live Weather/Retro Chromium running under the guide.
+        if getattr(self, "_weather_session", None) is not None or self.view == self.WEATHER:
+            prev = getattr(self, "_weather_previous_view", None)
+            cursor = int(getattr(self, "_weather_previous_cursor", 0) or 0)
+            self._stop_weather_session()
+            if self.view == self.WEATHER:
+                # Restore browse destination so Esc from guide doesn't return
+                # to a dead Weather view.
+                self._weather_previous_view = None
+                self._weather_previous_cursor = 0
+                if prev is None or prev == self.WEATHER:
+                    self.view = self._view_for_library_layout()
+                    self.cursor = 0
+                else:
+                    self.view = prev
+                    self.cursor = max(0, cursor)
+        if self.view == self.RETRO_TV:
+            prev = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
+            self._exit_retro_tv(with_fx=False)
+            self.view = prev
+        # Remember where we came from (like Weather) so Esc restores browse position.
+        if self.view != self.TV_GUIDE:
+            self._tv_guide_previous_view = self.view
+            self._tv_guide_previous_cursor = int(getattr(self, "cursor", 0) or 0)
         show_names = list(self._browse_show_names())
         movie_names = list(self._browse_movie_names())
-        # Refresh posters so the top preview has art.
-        ffmpeg = None
-        try:
-            ffmpeg = detect_ffmpeg()
-        except Exception:
-            ffmpeg = None
-        for name in show_names:
-            show = self.shows.get(name)
-            if show is not None:
-                ensure_show_thumbnail(
-                    name,
-                    show,
-                    ffmpeg_path=ffmpeg,
-                    resolve_local=getattr(self, "_resolve_episode_local_video", None),
-                )
-        for key in movie_names:
-            movie = self.movies.get(key)
-            if movie is not None:
-                ensure_movie_thumbnail(
-                    movie.get("title") or key, movie, ffmpeg_path=ffmpeg
-                )
         # Use the same display channel numbers as the normal show/movie lists.
         show_channels = {
             name: int(self._display_channel(name)) for name in show_names
@@ -288,37 +312,164 @@ class QolFeaturesMixin:
             shows=self.shows,
             movies=self.movies,
         )
-        now = pygame.time.get_ticks()
-        self._tv_guide_top_slot = 0
-        self._tv_guide_top_slot_at = now
-        self._tv_guide_preview_idx = -1
-        self._apply_tv_guide_top_slot()
-        self._tv_guide_scroll_offset = 0
-        self._tv_guide_scroll_pixel = 0.0
-        self._tv_guide_scroll_phase = "dwell"
-        self._tv_guide_scroll_to = 0
-        self._tv_guide_scroll_delta_rows = 0
-        self._tv_guide_scroll_anim_at = 0
-        self._tv_guide_page_size = 1
-        self._tv_guide_page_at = now
+        self._sync_tv_guide_from_channel_clock()
         self.view = self.TV_GUIDE
         self.cursor = 0
         # One cache read / rare refresh — not every draw frame.
         self._tv_guide_weather = ensure_guide_weather(self.config)
+        self._tv_guide_meta_seeded = False
+        self._merge_tv_guide_meta(force=True)
         self._write_session_breadcrumb(action="tv_guide")
+
+    def _estimate_tv_guide_page_size(self) -> int:
+        """Page size assuming a non-blurb (1/3) top panel — good enough for virtual scroll."""
+        fonts_title = self.font_sm
+        top_h = max(120, int(self.sh) // 3)
+        return guide_page_size(
+            screen_h=int(self.sh),
+            top_h=top_h,
+            font_title=fonts_title,
+            font_sub=self.font_sm,
+        )
+
+    def _sync_tv_guide_from_channel_clock(self) -> None:
+        """Place list/top as if the guide channel ran continuously since origin."""
+        rows = self._tv_guide_rows
+        now_wall = time.time()
+        now_ticks = pygame.time.get_ticks()
+        page = self._estimate_tv_guide_page_size()
+        self._tv_guide_page_size = page
+        row_h, gap = guide_row_metrics(font_title=self.font_sm)
+        stride = row_h + gap
+        self._tv_guide_row_stride = stride
+
+        if self._tv_guide_channel_origin_wall is None:
+            start = pick_random_scroll_offset(rows)
+            self._tv_guide_channel_origin_wall = now_wall
+            self._tv_guide_channel_origin_offset = start
+            self._tv_guide_channel_seed = random.randrange(1, 2**31)
+
+        origin_wall = float(self._tv_guide_channel_origin_wall)
+        origin_offset = int(self._tv_guide_channel_origin_offset)
+        n = len(rows)
+        if n > 0:
+            origin_offset %= n
+            self._tv_guide_channel_origin_offset = origin_offset
+
+        elapsed_ms = max(0.0, (now_wall - origin_wall) * 1000.0)
+        offset, phase, scroll_t, scroll_to, delta = resolve_virtual_guide_list(
+            origin_offset=origin_offset,
+            elapsed_ms=elapsed_ms,
+            rows=rows,
+            page=page,
+        )
+        self._tv_guide_scroll_offset = offset
+        self._tv_guide_scroll_to = scroll_to
+        self._tv_guide_scroll_delta_rows = delta
+        self._tv_guide_scroll_phase = phase
+        if phase == "scroll":
+            self._tv_guide_scroll_pixel = ease_in_out(scroll_t) * float(delta) * float(stride)
+            # Align anim clock so live tick continues the same ease curve.
+            self._tv_guide_scroll_anim_at = now_ticks - int(scroll_t * PAGE_SCROLL_MS)
+            self._tv_guide_page_at = now_ticks  # unused until dwell resumes
+        else:
+            self._tv_guide_scroll_pixel = 0.0
+            self._tv_guide_scroll_anim_at = 0
+            # How far into the dwell we already are.
+            cycle = float(PAGE_DWELL_MS + PAGE_SCROLL_MS) or 1.0
+            phase_ms = elapsed_ms % cycle
+            self._tv_guide_page_at = now_ticks - int(phase_ms)
+
+        absolute_slot, mode, preview_idx, top_phase = resolve_virtual_guide_top(
+            elapsed_ms=elapsed_ms,
+            rows=rows,
+            seed=int(self._tv_guide_channel_seed),
+        )
+        self._tv_guide_top_slot = int(absolute_slot)
+        self._tv_guide_top_mode = mode
+        self._tv_guide_top_slot_at = now_ticks - int(top_phase)
+        if mode == "preview":
+            self._tv_guide_preview_idx = int(preview_idx)
+            self._ensure_guide_preview_thumbnail(int(self._tv_guide_preview_idx))
+        else:
+            self._tv_guide_preview_idx = 0
+
+    def _merge_tv_guide_meta(self, *, force: bool = False) -> None:
+        """Pull cached blurbs/years into guide rows; queue missing fetches."""
+        if not tv_guide_meta_enabled(self.config):
+            return
+        epoch = guide_meta_epoch()
+        if not force and epoch == int(getattr(self, "_tv_guide_meta_epoch", -1)):
+            # Still need first pass / missing queue even when epoch is unchanged
+            # after enter — use force=True on enter.
+            if getattr(self, "_tv_guide_meta_seeded", False):
+                return
+        merge_guide_meta_into_rows(
+            self._tv_guide_rows,
+            shows=getattr(self, "shows", None),
+            movies=getattr(self, "movies", None),
+            omdb_api_key=tv_guide_omdb_key(self.config),
+            enabled=True,
+        )
+        self._tv_guide_meta_epoch = epoch
+        self._tv_guide_meta_seeded = True
 
     def _apply_tv_guide_top_slot(self) -> None:
         mode = resolve_top_mode(int(self._tv_guide_top_slot))
         self._tv_guide_top_mode = mode
         if mode == "preview":
             self._tv_guide_preview_idx = pick_random_preview_idx(
-                len(self._tv_guide_rows),
+                self._tv_guide_rows,
                 avoid=int(self._tv_guide_preview_idx),
             )
+            self._ensure_guide_preview_thumbnail(int(self._tv_guide_preview_idx))
+
+    def _ensure_guide_preview_thumbnail(self, idx: int) -> None:
+        """Lazily generate poster art only for the active top preview."""
+        rows = self._tv_guide_rows
+        if idx < 0 or idx >= len(rows):
+            return
+        row = rows[idx]
+        if not is_guide_program_row(row):
+            return
+        path = row.get("thumbnail")
+        if path and isinstance(path, str) and path:
+            return
+        ffmpeg = None
+        try:
+            ffmpeg = detect_ffmpeg()
+        except Exception:
+            ffmpeg = None
+        if row.get("kind") == "movie":
+            key = row.get("key")
+            movie = self.movies.get(key) if key else None
+            if movie is None:
+                return
+            thumb = ensure_movie_thumbnail(
+                movie.get("title") or key, movie, ffmpeg_path=ffmpeg
+            )
+            if thumb:
+                row["thumbnail"] = thumb
+                movie["thumbnail"] = thumb
+            return
+        name = row.get("name")
+        show = self.shows.get(name) if name else None
+        if show is None:
+            return
+        thumb = ensure_show_thumbnail(
+            str(name),
+            show,
+            ffmpeg_path=ffmpeg,
+            resolve_local=getattr(self, "_resolve_episode_local_video", None),
+        )
+        if thumb:
+            row["thumbnail"] = thumb
+            show["thumbnail"] = thumb
 
     def _cycle_tv_guide_top_mode(self, delta: int = 1) -> None:
-        """Manual left/right: step equal-time top slots."""
-        self._tv_guide_top_slot = max(0, int(self._tv_guide_top_slot) + int(delta))
+        """Manual left/right: step equal-time top slots (wraps)."""
+        cycle = max(1, top_slot_count())
+        self._tv_guide_top_slot = (int(self._tv_guide_top_slot) + int(delta)) % cycle
         self._tv_guide_top_slot_at = pygame.time.get_ticks()
         self._apply_tv_guide_top_slot()
 
@@ -326,10 +477,26 @@ class QolFeaturesMixin:
         """Equal-time top slots + dwell / smooth page scroll."""
         if self.view != self.TV_GUIDE:
             return
+        self._merge_tv_guide_meta(force=False)
         now = pygame.time.get_ticks()
         rows = self._tv_guide_rows
 
-        if now - int(self._tv_guide_top_slot_at or 0) >= TOP_SLOT_MS:
+        fonts = {
+            "md": self.font_md,
+            "sm": self.font_sm,
+            "title": self.font_sm,
+            "ch": self.font_sm,
+            "sub": self.font_sm,
+        }
+        slot_ms = top_slot_duration_ms(
+            top_mode=str(getattr(self, "_tv_guide_top_mode", "preview") or "preview"),
+            rows=rows,
+            preview_idx=int(getattr(self, "_tv_guide_preview_idx", 0) or 0),
+            fonts=fonts,
+            screen_w=int(self.sw),
+            screen_h=int(self.sh),
+        )
+        if now - int(self._tv_guide_top_slot_at or 0) >= slot_ms:
             self._tv_guide_top_slot = int(self._tv_guide_top_slot) + 1
             self._tv_guide_top_slot_at = now
             self._apply_tv_guide_top_slot()
@@ -369,20 +536,31 @@ class QolFeaturesMixin:
             self._tv_guide_page_at = now
             return
 
-        nxt = cur + page
-        if nxt >= n:
-            to = 0
-        else:
-            to = nxt
+        to, delta = next_guide_scroll_offset(cur, rows, page)
         self._tv_guide_scroll_phase = "scroll"
         self._tv_guide_scroll_anim_at = now
         self._tv_guide_scroll_to = to
-        self._tv_guide_scroll_delta_rows = page
+        # Draw wraps indices so wrap-anim isn't blank.
+        self._tv_guide_scroll_delta_rows = delta
         self._tv_guide_scroll_pixel = 0.0
 
     def _activate_tv_guide_row(self) -> None:
         """Guide is view-only — Enter does not tune a channel."""
         return
+
+    def _leave_tv_guide(self) -> None:
+        """Restore the view that was active before entering the guide."""
+        prev = getattr(self, "_tv_guide_previous_view", None)
+        cursor = int(getattr(self, "_tv_guide_previous_cursor", 0) or 0)
+        self._tv_guide_previous_view = None
+        if prev is None or prev == self.TV_GUIDE:
+            self.view = self._view_for_library_layout()
+            self.cursor = 0
+            return
+        self.view = prev
+        self.cursor = max(0, cursor)
+        pygame.event.clear()
+        self._arm_nav_back_grace()
 
     def _kids_allowlist_shows(self) -> list[str]:
         al = (self.config.get("kids_mode") or {}).get("allowlist") or {}
@@ -517,6 +695,7 @@ class QolFeaturesMixin:
 
     def _draw_tv_guide(self) -> None:
         self._tick_tv_guide_panels()
+        self._marquee_begin_frame()
         # Smaller list title so more of the show name fits.
         fonts = {
             "xl": self.font_lg,
@@ -543,7 +722,10 @@ class QolFeaturesMixin:
             fonts=fonts,
             load_image=self.load_image,
             weather=self._tv_guide_weather,
+            weather_status=guide_weather_status(),
             now_ms=pygame.time.get_ticks(),
+            top_slot_at_ms=int(getattr(self, "_tv_guide_top_slot_at", 0) or 0),
+            blit_marquee=self._blit_marquee_text,
         )
 
     def admin_profiles(self) -> dict[str, Any]:

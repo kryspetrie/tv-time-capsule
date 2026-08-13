@@ -20,7 +20,10 @@ def _local_tag(tag: str) -> str:
 
 
 def parse_nfo(path: str | os.PathLike) -> dict:
-    """Parse a sidecar NFO file. Returns title, plot, thumb keys when present."""
+    """Parse a sidecar NFO file.
+
+    Returns title, plot, thumb, year, years, network, studio when present.
+    """
     result: dict[str, str] = {}
     try:
         tree = ET.parse(path)
@@ -39,7 +42,45 @@ def parse_nfo(path: str | os.PathLike) -> dict:
             result["plot"] = text
         elif key in ("thumb", "poster", "fanart") and "thumb" not in result:
             result["thumb"] = text
+        elif key in ("year", "premiered", "aired") and "year" not in result:
+            # premiered/aired often YYYY-MM-DD — keep year digits.
+            digits = "".join(ch for ch in text if ch.isdigit())
+            result["year"] = digits[:4] if len(digits) >= 4 else text
+        elif key in ("ended", "endyear") and "ended" not in result:
+            digits = "".join(ch for ch in text if ch.isdigit())
+            result["ended"] = digits[:4] if len(digits) >= 4 else text
+        elif key in ("studio", "network", "company") and "network" not in result:
+            result["network"] = text
+    start = result.get("year") or ""
+    end = result.get("ended") or ""
+    if start and end and end != start:
+        result["years"] = f"{start}-{end}"
+    elif start:
+        result["years"] = start
     return result
+
+
+def resolve_show_guide_nfo(show_dir: str, show_name: str) -> dict[str, str]:
+    """NFO fields useful for TV Guide (plot / years / network)."""
+    nfo_path = find_nfo_file(show_dir, (show_name,))
+    if not nfo_path:
+        return {}
+    return parse_nfo(nfo_path)
+
+
+def resolve_movie_guide_nfo(movie_dir: str, movie_name: str = "") -> dict[str, str]:
+    """NFO fields for a movie folder or sibling ``.nfo``."""
+    extra = (movie_name,) if movie_name else ()
+    nfo_path = find_nfo_file(movie_dir, extra)
+    if not nfo_path:
+        # Sibling of the video when movie_dir is the file's parent.
+        for entry in sorted(os.listdir(movie_dir)):
+            if entry.lower().endswith(".nfo"):
+                nfo_path = os.path.join(movie_dir, entry)
+                break
+    if not nfo_path:
+        return {}
+    return parse_nfo(nfo_path)
 
 
 def find_nfo_file(directory: str, extra_names: tuple[str, ...] = ()) -> str | None:

@@ -892,6 +892,20 @@ def _parse_retro_tv(raw: dict | None) -> dict[str, Any]:
     }
 
 
+def _parse_tv_guide(raw: dict | None) -> dict[str, Any]:
+    """TV Guide Channel options (metadata enrichment, OMDb key)."""
+    guide = raw if isinstance(raw, dict) else {}
+    key_raw = guide.get("omdb_api_key")
+    if key_raw is None or str(key_raw).strip() == "":
+        omdb_api_key = None
+    else:
+        omdb_api_key = str(key_raw).strip()
+    return {
+        "meta_enabled": bool(guide.get("meta_enabled", True)),
+        "omdb_api_key": omdb_api_key,
+    }
+
+
 def _parse_youtube_channels(raw: list | None) -> list[dict[str, Any]]:
     """YouTube channels/playlists listed as virtual shows.
 
@@ -1444,6 +1458,10 @@ def _default_config() -> dict[str, Any]:
             "playback_mode": "cached",
             "cache_directory": None,
         },
+        "tv_guide": {
+            "meta_enabled": True,
+            "omdb_api_key": None,
+        },
         "youtube_channels": _parse_youtube_channels(_default_youtube_channels()),
         "youtube_title_rules": list(DEFAULT_YOUTUBE_TITLE_RULES),
         "youtube": _parse_youtube(None),
@@ -1496,6 +1514,7 @@ def _parse_config(raw: dict[str, Any]) -> dict[str, Any]:
         "features": _parse_features(raw.get("features")),
         "weather": _parse_weather(raw.get("weather")),
         "retro_tv": _parse_retro_tv(raw.get("retro_tv")),
+        "tv_guide": _parse_tv_guide(raw.get("tv_guide")),
         "youtube_channels": _parse_youtube_channels(
             raw["youtube_channels"]
             if "youtube_channels" in raw

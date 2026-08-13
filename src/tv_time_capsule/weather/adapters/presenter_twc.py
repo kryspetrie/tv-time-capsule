@@ -14,7 +14,13 @@ import time
 
 import pygame
 
-from ...chrome_cdp import ensure_chromium, kill_port_process, wait_for_page_ws
+from ...chrome_cdp import (
+    acquire_chromium,
+    ensure_chromium,
+    register_chromium_process,
+    release_chromium,
+    wait_for_page_ws,
+)
 from ...screencast_adapt import (
     ScreencastAdaptState,
     initial_screencast_params,
@@ -177,8 +183,7 @@ class WeatherChannel:
 
     def _start_once(self, chrome_path: str) -> bool:
         """Single Chrome + CDP connect attempt. Caller handles retries."""
-        kill_port_process(CDP_PORT)
-        time.sleep(0.3)
+        acquire_chromium("weather", ports=CDP_PORT)
 
         # Isolated profile: avoids clashing with a running Google Chrome
         # instance and keeps extensions out of the CDP target list.
@@ -207,12 +212,15 @@ class WeatherChannel:
             )
         except Exception as exc:
             LOG.warning("Failed to launch Chrome: %s", exc)
+            release_chromium("weather")
             self._cleanup_user_data()
             return False
 
+        register_chromium_process("weather", self._chrome)
         ws_url = wait_for_page_ws(CDP_PORT, chrome=self._chrome, timeout=12.0)
         if ws_url is None:
             LOG.warning("No CDP page target found for weather channel")
+            release_chromium("weather")
             return False
 
         self._running = True
@@ -247,13 +255,37 @@ class WeatherChannel:
         )
         return False
 
+    # Silence page media before Chrome teardown (stops orphan Howler/audio).
+    _JS_MUTE_ALL = r"""
+(() => {
+  try {
+    if (window.Howler) {
+      Howler.mute(true);
+      Howler.volume(0);
+    }
+  } catch (e) {}
+  for (const m of document.querySelectorAll("audio, video")) {
+    try { m.muted = true; m.volume = 0; m.pause(); } catch (e) {}
+  }
+  return true;
+})()
+""".strip()
+
     def stop(self) -> None:
-        """Stop the screencast and tear down Chrome."""
+        """Stop the screencast and tear down Chrome (including audio orphans)."""
         self._running = False
         self._available = False
 
         ws = self._ws
         if ws is not None:
+            try:
+                self._send(
+                    ws,
+                    "Runtime.evaluate",
+                    {"expression": self._JS_MUTE_ALL, "returnByValue": True},
+                )
+            except Exception:
+                pass
             try:
                 ws.close()
             except Exception:
@@ -275,6 +307,7 @@ class WeatherChannel:
                     pass
             self._chrome = None
 
+        release_chromium("weather", kill=True)
         self._cleanup_user_data()
         LOG.info("Weather channel stopped (frames=%d)", self._frame_count)
 

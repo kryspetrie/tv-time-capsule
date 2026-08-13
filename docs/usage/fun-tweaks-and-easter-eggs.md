@@ -111,7 +111,7 @@ Hidden or discoverable extras — no config switch; they are always available wh
 
 On parent screens (browse, playback, weather, retro), press **`000`** for a full-screen listing of the special channels below. Esc / `0` backs out. Help Overview points at this page under number keys.
 
-Pin specials on the home menu with [`home_menu`](configuration.md#home_menu) (Weather is on by default for parent and kids).
+Pin specials on the home menu with [`home_menu`](configuration.md#home_menu) (Weather and TV Guide are on by default for parent; remove `tvguide` from `home_menu.parent` to hide the guide row).
 
 ### Secret test patterns (parent)
 
@@ -135,10 +135,12 @@ Dial **`004`** for the Weather Channel. **Default** is `weather.provider: native
 
 **Label:** easter egg
 
-Dial **`005`** (or pin `tvguide` on the home menu) for a **TV Guide Channel** styled like the rest of the menus:
+Dial **`005`** (or the home-menu **TV GUIDE** row — on by default for parents) for a **TV Guide Channel** styled like the rest of the menus:
 
-- **Bottom:** text-only channel list (taller rows, smaller titles, left-aligned numbers) that **smooth-scrolls** one page at a time after a short dwell
-- **Top third:** equal-time slots — five randomized show previews (4:3 center-cropped thumbs), then local weather, then a **TV GUIDE CHANNEL** bumper, repeating
+- **Bottom:** text-only channel list (taller rows, smaller titles, left-aligned numbers) that **opens mid-lineup** (as if the guide channel had been running) and **smooth-scrolls** one page at a time after a short dwell — **all shows, then all movies**, with **SHOWS** / **MOVIES** section headers when both kinds are in the lineup; subtitle shows air years / original network when known (e.g. `1988-1993 - NBC`). Leaving and returning resumes the virtual timeline from wall-clock time (nothing runs while the guide is hidden).
+- **Top:** equal-time slots — five randomized show/movie previews (4:3 center-cropped thumbs), then local weather, then a **TV GUIDE CHANNEL** bumper, repeating. When a preview has a short description, the top panel expands to **half the screen**, lingers longer, and **scrolls vertically** through up to two sentences
+- Descriptions/years/network come from NFO → OMDb (optional key) → Wikipedia/Wikidata and are cached on disk; disable with `"tv_guide": { "meta_enabled": false }`
+- Esc from guide restores the previous browse screen (and cursor), like Weather
 - Weather uses the native forecast disk cache and refreshes at most about every 30 minutes (not every frame)
 - **← / →** steps the top panel; **Esc / back** exits (view-only — Enter does not tune)
 

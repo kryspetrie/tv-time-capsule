@@ -28,7 +28,7 @@ class HomeMenuParseTests(unittest.TestCase):
     def test_parse_config_defaults(self):
         cfg = parse_config({})
         self.assertEqual(
-            cfg["home_menu"]["parent"], ["continue", "shows", "movies", "weather"]
+            cfg["home_menu"]["parent"], ["continue", "shows", "movies", "weather", "tvguide"]
         )
         self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies"])
 

@@ -436,15 +436,15 @@ Top-level **LIBRARY** picker rows for parent vs kids. Pin Weather, Continue, Fav
 ```json
 {
   "home_menu": {
-    "parent": ["continue", "shows", "movies", "weather"],
-    "kids": ["continue", "shows", "movies", "weather"]
+    "parent": ["continue", "shows", "movies", "weather", "tvguide"],
+    "kids": ["shows", "movies"]
   }
 }
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `parent` | `["continue", "shows", "movies", "weather"]` | Adult home-menu tokens (order = on-screen order) |
+| `parent` | `["continue", "shows", "movies", "weather", "tvguide"]` | Adult home-menu tokens (order = on-screen order). Remove `tvguide` to hide TV Guide from the home menu (dial **`005`** still works). |
 | `kids` | `["shows", "movies"]` | Kids home-menu tokens — **one full-screen option at a time** (Shows / Movies) with cycling posters |
 
 **Tokens:** `continue`, `favorites`, `recent`, `shows`, `movies`, `weather`, `tvguide` (`005`), `1950s`…`2000s`, `directory` (`000`), `001` / `002` / `003` (test patterns). Unknown tokens are skipped. Empty Continue / Favorites / Recent rows are omitted. Rows for disabled features (`features.weather` / `features.retro_tv`) are omitted. Empty show/movie libraries are omitted when that library type is not present.
@@ -553,6 +553,24 @@ Legacy seasons with a single `ep` field (highest completed in order) migrate to 
 Episode list labels: **NEXT** (first unwatched), **RESUME** (bookmark), **WATCHED** (completed). Season list shows `21 eps` and `E-05 next` when applicable. Tap **R** on an episode to clear its watched flag and bookmark; hold **R** to rescan the library.
 
 > **Defaults:** the app ships **native Weather**, **YouTube `prefer_cache` + offline fills**, and **Decades `cached`**. Live Chrome modes stay fully supported — see [Native weather & cached defaults](native-cached-defaults.md).
+
+## `tv_guide`
+
+Options for the TV Guide Channel (dial **`005`**). Background enrichment pulls short descriptions, air years, and original network from local NFO sidecars, then OMDb (optional API key), then Wikipedia/Wikidata. Results are cached under `~/.cache/tv-time-capsule/guide-meta/`.
+
+```json
+{
+  "tv_guide": {
+    "meta_enabled": true,
+    "omdb_api_key": null
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `meta_enabled` | `true` | When `false`, skip network/NFO enrichment (no blurbs / years / network in the guide) |
+| `omdb_api_key` | `null` | Free [OMDb](http://www.omdbapi.com/) key for IMDb-backed Plot/Year. You can also set env `OMDB_API_KEY`. Without a key, Wikipedia/Wikidata still run after NFO. |
 
 ## `retro_tv`
 

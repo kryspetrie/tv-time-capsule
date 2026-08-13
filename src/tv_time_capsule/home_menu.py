@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-# Parent default: Continue + library + Weather.
+# Parent default: Continue + library + Weather + TV Guide.
 DEFAULT_HOME_MENU_TOKENS: tuple[str, ...] = (
     "continue",
     "shows",
     "movies",
     "weather",
+    "tvguide",
 )
 
 # Kids default: Shows / Movies only — drives the full-bleed dual-tile home UI

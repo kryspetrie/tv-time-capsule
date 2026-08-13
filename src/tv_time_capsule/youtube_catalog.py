@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from .chrome_cdp import ensure_chromium, kill_port_process, wait_for_page_ws
+from .chrome_cdp import (
+    acquire_chromium,
+    ensure_chromium,
+    register_chromium_process,
+    release_chromium,
+    wait_for_page_ws,
+)
 from .config import STATE_DIR
 from .youtube_titles import (
     DEFAULT_YOUTUBE_TITLE_RULES,
@@ -1204,7 +1210,7 @@ def _open_catalog_chrome(*, port: int = CDP_PORT):
         LOG.warning("Chrome/Chromium not available for YouTube catalog")
         return None
 
-    kill_port_process(port)
+    acquire_chromium("yt-catalog", ports=port)
     user_data = tempfile.mkdtemp(prefix="ttc-yt-catalog-")
     try:
         chrome = subprocess.Popen(
@@ -1224,16 +1230,19 @@ def _open_catalog_chrome(*, port: int = CDP_PORT):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        register_chromium_process("yt-catalog", chrome)
         ws_url = wait_for_page_ws(port, chrome=chrome, timeout=15.0)
         if not ws_url:
             LOG.warning("YouTube catalog: CDP page not ready")
             chrome.terminate()
+            release_chromium("yt-catalog")
             return None
         ws = websocket.create_connection(ws_url, timeout=10, suppress_origin=True)
         ws.settimeout(2.0)
         return chrome, ws, user_data
     except Exception as exc:
         LOG.warning("YouTube catalog Chrome start failed: %s", exc)
+        release_chromium("yt-catalog")
         try:
             import shutil
 
@@ -1258,7 +1267,7 @@ def _close_catalog_chrome(chrome, ws, user_data: str | None, *, port: int = CDP_
                 chrome.kill()
             except Exception:
                 pass
-    kill_port_process(port)
+    release_chromium("yt-catalog", kill=True)
     if user_data:
         try:
             import shutil

@@ -23,7 +23,13 @@ from typing import Any
 
 import pygame
 
-from .chrome_cdp import ensure_chromium, kill_port_process, wait_for_page_ws
+from .chrome_cdp import (
+    acquire_chromium,
+    ensure_chromium,
+    register_chromium_process,
+    release_chromium,
+    wait_for_page_ws,
+)
 from .youtube_crop import (
     _color_dist,
     detect_letterbox_rect,
@@ -338,7 +344,7 @@ class YouTubePlayer:
         self._last_recover_at = 0.0
         self._last_good_time_pos = self.time_pos
 
-        kill_port_process(self._cdp_port)
+        acquire_chromium("youtube", ports=self._cdp_port)
         self._user_data_dir = tempfile.mkdtemp(prefix="ttc-yt-play-")
 
         url = self._play_url(yid)
@@ -369,9 +375,11 @@ class YouTubePlayer:
         except Exception as exc:
             LOG.warning("Failed to launch Chrome for YouTube: %s", exc)
             self.running = False
+            release_chromium("youtube")
             self._cleanup_user_data()
             return False
 
+        register_chromium_process("youtube", self._chrome)
         ws_url = wait_for_page_ws(self._cdp_port, chrome=self._chrome, timeout=15.0)
         if not ws_url:
             LOG.warning("YouTubePlayer: CDP not ready")
@@ -529,7 +537,7 @@ class YouTubePlayer:
                     pass
             self._chrome = None
 
-        kill_port_process(self._cdp_port)
+        release_chromium("youtube", kill=True)
         self._cleanup_user_data()
         if was_running and self.filepath:
             LOG.info(

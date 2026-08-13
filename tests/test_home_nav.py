@@ -176,6 +176,49 @@ class HomeNavTests(unittest.TestCase):
             app._process_browse_action("back")
         quit_dlg.assert_called_once()
 
+    def test_esc_from_weather_returns_previous_not_quit(self):
+        app = self._app()
+        app.view = app.SHOW_LIST
+        app.cursor = 2
+        app._weather_previous_view = app.SHOW_LIST
+        app._weather_previous_cursor = 2
+        app.view = app.WEATHER
+        with patch.object(app, "_stop_weather_session"):
+            with patch.object(app, "_animate_channel_snow_burst") as snow:
+                with patch.object(app, "_enter_confirm_exit") as quit_dlg:
+                    app._process_weather_action("back")
+                    # Mimic Esc key-repeat already in the same event batch.
+                    app._process_browse_action("back")
+        quit_dlg.assert_not_called()
+        snow.assert_called_once()
+        self.assertEqual(app.view, app.SHOW_LIST)
+        self.assertEqual(app.cursor, 2)
+
+    def test_esc_from_weather_home_does_not_open_quit(self):
+        app = self._app()
+        app.view = app.LIBRARY_SELECT
+        app.cursor = 1
+        app._weather_previous_view = app.LIBRARY_SELECT
+        app._weather_previous_cursor = 1
+        app.view = app.WEATHER
+        with patch.object(app, "_stop_weather_session"):
+            with patch.object(app, "_animate_channel_snow_burst"):
+                with patch.object(app, "_enter_confirm_exit") as quit_dlg:
+                    app._process_weather_action("back")
+                    app._process_browse_action("back")
+        quit_dlg.assert_not_called()
+        self.assertEqual(app.view, app.LIBRARY_SELECT)
+        self.assertEqual(app.cursor, 1)
+
+    def test_esc_from_hidden_channels_uses_static(self):
+        app = self._app()
+        app.view = app.SHOW_LIST
+        app._hidden_channels_guide = True
+        with patch.object(app, "_animate_channel_snow_burst") as snow:
+            app._process_browse_action("back")
+        snow.assert_called_once()
+        self.assertFalse(app._hidden_channels_guide)
+
     def test_secret_dial_allowed_on_playing(self):
         app = self._app()
         app.view = app.PLAYING

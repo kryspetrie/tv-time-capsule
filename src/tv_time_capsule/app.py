@@ -440,6 +440,11 @@ class TVTimeCapsule(QolFeaturesMixin):
         self._playback_browse_cursor = 0
         self._handling_episode_finish = False
         self._ignore_quit_until_ms = 0
+        # After leaving Weather/Retro (or similar), ignore buffered Esc/back
+        # key-repeats already sitting in the same event.get() batch.
+        self._ignore_nav_back_until_ms = 0
+        self._weather_previous_view = None
+        self._weather_previous_cursor = 0
 
         # Channel number input
         self.channel_digits = ""
@@ -1148,6 +1153,7 @@ class TVTimeCapsule(QolFeaturesMixin):
                         "name": "WEATHER",
                         "count": None,
                         "subtitle": "Channel 004",
+                        "dial": "004",
                     }
                 )
             elif tok == "directory":
@@ -1252,6 +1258,7 @@ class TVTimeCapsule(QolFeaturesMixin):
                         "name": "TV GUIDE",
                         "count": None,
                         "subtitle": "Channel 005",
+                        "dial": "005",
                     }
                 )
             else:
@@ -1773,6 +1780,18 @@ class TVTimeCapsule(QolFeaturesMixin):
         """Ignore stray ``pygame.QUIT`` events for a short window (decoder teardown)."""
         self._ignore_quit_until_ms = pygame.time.get_ticks() + max(0, ms)
 
+    def _arm_nav_back_grace(self, ms: int = 500) -> None:
+        """Ignore Esc/back briefly after leaving a special channel.
+
+        Weather/Retro boot and teardown pump events without draining them, and
+        key-repeat Esc can leave Weather then immediately open Quit? on home in
+        the same ``pygame.event.get()`` batch.
+        """
+        self._ignore_nav_back_until_ms = pygame.time.get_ticks() + max(0, ms)
+
+    def _nav_back_blocked(self) -> bool:
+        return pygame.time.get_ticks() < self._ignore_nav_back_until_ms
+
     def _request_quit(self, *, source: str = "unknown") -> None:
         if not self._quit_allowed():
             LOG.debug("quit ignored in kids mode (source=%s)", source)
@@ -1841,12 +1860,13 @@ class TVTimeCapsule(QolFeaturesMixin):
         return self.playing_index + 1
 
     def _stack_page_size_for_view(self) -> int:
-        if self._kids_mode_active and self.view in (
-            self.SHOW_LIST,
-            self.MOVIE_LIST,
-            self.LIBRARY_SELECT,
-        ):
-            # Kids: one full-screen option / title per page.
+        if self._kids_mode_active and self.view == self.LIBRARY_SELECT:
+            # Kids home is always one full-screen option.
+            return 1
+        if self._kids_mode_active and self.view in (self.SHOW_LIST, self.MOVIE_LIST):
+            # Kids card = compact stack; full = one title per page.
+            if getattr(self, "_kids_browse_style", "full") == "card":
+                return KIDS_STACK_VISIBLE
             return 1
         return STACK_VISIBLE
 
@@ -2423,6 +2443,13 @@ class TVTimeCapsule(QolFeaturesMixin):
                 bool(getattr(self, "_kids_mode_active", False)),
                 getattr(self, "_kids_browse_style", None),
             )
+        if view == self.TV_GUIDE:
+            return (
+                view,
+                int(getattr(self, "_tv_guide_scroll_offset", 0) or 0),
+                int(getattr(self, "_tv_guide_preview_idx", 0) or 0),
+                str(getattr(self, "_tv_guide_top_mode", "") or ""),
+            )
         return (view,)
 
     def _marquee_begin_frame(self) -> None:
@@ -2960,6 +2987,24 @@ class TVTimeCapsule(QolFeaturesMixin):
     def _clear_hidden_channels_guide(self) -> None:
         self._hidden_channels_guide = False
 
+    def _leave_hidden_channels_guide(self) -> None:
+        """Esc/back out of the secret-channels directory with channel-change static."""
+        if not self._hidden_channels_guide:
+            return
+        self._hidden_channels_guide = False
+        self._animate_channel_snow_burst()
+        pygame.event.clear()
+        self._arm_nav_back_grace()
+
+    def _leave_show_list_test_pattern(self) -> None:
+        """Esc/back out of a secret test pattern with channel-change static."""
+        if not self._show_list_test_pattern:
+            return
+        self._show_list_test_pattern = None
+        self._animate_channel_snow_burst()
+        pygame.event.clear()
+        self._arm_nav_back_grace()
+
     def _enter_hidden_channels_guide(self) -> None:
         """Show the secret-channels directory (dial 000)."""
         self._clear_show_list_test_pattern()
@@ -3141,6 +3186,9 @@ class TVTimeCapsule(QolFeaturesMixin):
             self.channel_error = "Weather Unavailable"
             self.channel_error_time = pygame.time.get_ticks()
             self._exit_weather_channel()
+            return
+        pygame.event.clear()
+        self._arm_nav_back_grace()
 
     def _process_weather_action(self, action: str | None) -> bool:
         """Handle volume / menu / back while weather is on. Returns True if consumed."""
@@ -3167,6 +3215,8 @@ class TVTimeCapsule(QolFeaturesMixin):
                 self.volume_overlay_timer = pygame.time.get_ticks()
             return True
         if action == "back":
+            if self._nav_back_blocked():
+                return True
             self._exit_weather_channel()
             return True
         return False
@@ -3229,7 +3279,7 @@ class TVTimeCapsule(QolFeaturesMixin):
             return
         if self.view == self.RETRO_TV:
             prev = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
-            self._exit_retro_tv()
+            self._exit_retro_tv(with_fx=False)
             self.view = prev
 
         self._clear_hidden_channels_guide()
@@ -3237,6 +3287,7 @@ class TVTimeCapsule(QolFeaturesMixin):
         self._weather_menu.close()
         if self.view != self.WEATHER:
             self._weather_previous_view = self.view
+            self._weather_previous_cursor = int(getattr(self, "cursor", 0) or 0)
         self.view = self.WEATHER
         self.channel_flash = "004"
         self.channel_flash_time = pygame.time.get_ticks()
@@ -3249,6 +3300,7 @@ class TVTimeCapsule(QolFeaturesMixin):
 
         if self._weather_session is not None and self._weather_session.is_available():
             self._animate_channel_snow_burst()
+            pygame.event.clear()
             return
 
         result: dict = {"ok": False}
@@ -3297,6 +3349,10 @@ class TVTimeCapsule(QolFeaturesMixin):
             self.channel_error = "Weather Unavailable"
             self.channel_error_time = pygame.time.get_ticks()
             self._exit_weather_channel()
+            return
+        # Drop Esc/back pressed during the boot pump so they don't fire on home.
+        pygame.event.clear()
+        self._arm_nav_back_grace()
 
     def _paint_weather_tune_frame(self) -> None:
         """Draw weather destination under channel snow (safe-zone aware)."""
@@ -3314,13 +3370,35 @@ class TVTimeCapsule(QolFeaturesMixin):
         # On top of static while Weather boots / restarts.
         self._draw_popup_banner("Loading Weather...")
 
-    def _exit_weather_channel(self) -> None:
-        """Leave the Weather Channel and return to the previous browse view."""
+    def _stop_weather_session(self) -> None:
+        """Tear down live Weather Chrome / native music without changing view."""
         self._weather_menu.close()
         if self._weather_session is not None:
-            self._weather_session.stop()
+            try:
+                self._weather_session.stop()
+            except Exception:
+                LOG.exception("Weather session stop failed")
             self._weather_session = None
-        self.view = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
+
+    def _exit_weather_channel(self, *, with_fx: bool = True) -> None:
+        """Leave the Weather Channel and return to the previous browse view."""
+        self._stop_weather_session()
+        prev = getattr(self, "_weather_previous_view", None)
+        cursor = int(getattr(self, "_weather_previous_cursor", 0) or 0)
+        self._weather_previous_view = None
+        self._weather_previous_cursor = 0
+        if prev is None or prev == self.WEATHER:
+            self.view = self._view_for_library_layout()
+            self.cursor = 0
+        else:
+            self.view = prev
+            self.cursor = max(0, cursor)
+        if with_fx:
+            # Destination sits under the same static burst used when tuning in.
+            self._animate_channel_snow_burst()
+        # Chrome teardown / snow pump can leave held Esc in the queue.
+        pygame.event.clear()
+        self._arm_nav_back_grace()
 
     def _draw_retro_tv(self) -> None:
         """Render MyRetroTVs: live screencast or cached ffmpeg frames."""
@@ -3449,6 +3527,8 @@ class TVTimeCapsule(QolFeaturesMixin):
                 self._retro_tv_channel.channel_down()
             return True
         if action == "back":
+            if self._nav_back_blocked():
+                return True
             self._exit_retro_tv()
             return True
         return False
@@ -3488,7 +3568,7 @@ class TVTimeCapsule(QolFeaturesMixin):
         if self.view == self.WEATHER:
             # Preserve browse destination; exit restores weather's previous view.
             prev = getattr(self, "_weather_previous_view", self.LIBRARY_SELECT)
-            self._exit_weather_channel()
+            self._exit_weather_channel(with_fx=False)
             self.view = prev  # ensure we don't start from a stale weather view
 
         self._clear_hidden_channels_guide()
@@ -3974,12 +4054,16 @@ class TVTimeCapsule(QolFeaturesMixin):
         if self._channel_fx.snow_enabled:
             self._channel_fx.draw(self.screen)
 
-    def _exit_retro_tv(self) -> None:
+    def _exit_retro_tv(self, *, with_fx: bool = True) -> None:
         """Leave MyRetroTVs and return to the previous browse view."""
         self._retro_tv_menu.close()
         prev = getattr(self, "_retro_tv_previous_view", self.LIBRARY_SELECT)
         self._stop_retro_tv_session(keep_view=False)
         self.view = prev
+        if with_fx:
+            self._animate_channel_snow_burst()
+        pygame.event.clear()
+        self._arm_nav_back_grace()
 
     def _apply_channel_fx(self):
         """Brief static burst when tuning channels (if enabled)."""
@@ -4010,13 +4094,12 @@ class TVTimeCapsule(QolFeaturesMixin):
         if self.view == self.LIBRARY_SELECT:
             self.draw_library_selector()
         elif self.view == self.SHOW_LIST:
-            # Kids: always one full-height title per page.
-            if self._kids_mode_active:
+            if self._kids_mode_active and getattr(self, "_kids_browse_style", "full") == "full":
                 self.draw_kids_full_card()
             else:
                 self.draw_show_browser()
         elif self.view == self.MOVIE_LIST:
-            if self._kids_mode_active:
+            if self._kids_mode_active and getattr(self, "_kids_browse_style", "full") == "full":
                 self.draw_kids_full_card()
             else:
                 self.draw_movie_browser()
@@ -4665,6 +4748,7 @@ class TVTimeCapsule(QolFeaturesMixin):
         ch_num = self._display_channel(show_name)
         self._draw_header(
             show_name.upper(),
+            ch_num=ch_num,
             badge_text=self._title_badge_text(show=show_name),
         )
 
@@ -4788,6 +4872,7 @@ class TVTimeCapsule(QolFeaturesMixin):
             else:
                 pygame.draw.rect(self.screen, C.BG_CARD, rect, border_radius=8)
 
+            # Home rows are numbered 1..N in list order (dial codes stay in subtitles).
             ch = str(i + 1)
             ch_surf = self.font_lg.render(ch, True, C.GREEN if selected else self._dim_color())
             self.screen.blit(
@@ -5145,13 +5230,8 @@ class TVTimeCapsule(QolFeaturesMixin):
             )
             return
 
-        # Carousel: 3 slots — left (small), center (big), right (small)
-        # Transition progress 0→1 scrolls left: left exits, center→left, right→center, new→right
-        now = pygame.time.get_ticks()
-        elapsed = now - self._carousel_transition_start
-        progress = min(1.0, elapsed / CAROUSEL_TRANSITION_MS)
-
-        center_frac = CAROUSEL_CENTER_FRAC
+        # Carousel: 3 slots — left (small), center (big), right (small).
+        # Thumbnail cycle advances the strip; no slide tween on cursor changes.
         side_scale = CAROUSEL_SIDE_SCALE
 
         # Calculate sizes
@@ -5165,7 +5245,6 @@ class TVTimeCapsule(QolFeaturesMixin):
         # Center the strip in thumb_area
         strip_x = thumb_area.x + (thumb_area.w - total_w) // 2
 
-        # Positions (static, no transition offset — the cycle handles the "scroll" effect)
         left_x = strip_x
         center_x = strip_x + side_w + 8
         right_x = strip_x + side_w + 8 + center_w + 8
@@ -5230,6 +5309,7 @@ class TVTimeCapsule(QolFeaturesMixin):
             else "special"
         )
         count = item.get("count")
+        # Selection index on this page (1..N), not the secret dial (e.g. 004).
         ch_num = self.cursor + 1
         label = str(item.get("name") or "LIBRARY")
 
@@ -5297,6 +5377,7 @@ class TVTimeCapsule(QolFeaturesMixin):
         )
         self._draw_header(
             title.upper(),
+            ch_num=ch_num,
             badge_text="[kids]" if tagged else "",
         )
 
@@ -7783,8 +7864,7 @@ class TVTimeCapsule(QolFeaturesMixin):
                 self.cursor = 0
 
         elif self.view == self.TV_GUIDE:
-            self.view = self._view_for_library_layout()
-            self.cursor = 0
+            self._leave_tv_guide()
 
         elif self.view == self.SHOW_LIST and getattr(self, "_browse_filter", None):
             filt = self._browse_filter
@@ -8658,6 +8738,10 @@ class TVTimeCapsule(QolFeaturesMixin):
         self._enter_playback_display()
         prepared: YouTubePlayer | None = None
         if youtube_live:
+            # Live YouTube needs the exclusive Chromium slot.
+            self._stop_weather_session()
+            if self.view != self.RETRO_TV:
+                self._stop_retro_tv_session(keep_view=True)
             prepared = self._claim_youtube_preload(play_path)
             if prepared is not None:
                 self.player = prepared
@@ -9286,11 +9370,13 @@ class TVTimeCapsule(QolFeaturesMixin):
         elif action == "left":
             self.go_back()
         elif action == "back":
+            if self._nav_back_blocked():
+                return
             if self._hidden_channels_guide:
-                self._clear_hidden_channels_guide()
+                self._leave_hidden_channels_guide()
                 return
             if self._show_list_test_pattern:
-                self._clear_show_list_test_pattern()
+                self._leave_show_list_test_pattern()
                 return
             if self.view == self.WEATHER:
                 self._exit_weather_channel()
@@ -10048,6 +10134,12 @@ class TVTimeCapsule(QolFeaturesMixin):
             self._weather_session.stop()
             self._weather_session = None
         self._stop_retro_tv_session(keep_view=True)
+        try:
+            from .chrome_cdp import shutdown_app_chromium
+
+            shutdown_app_chromium()
+        except Exception:
+            LOG.debug("shutdown_app_chromium failed", exc_info=True)
         if shutdown_snapshot is not None:
             self._channel_fx.play_shutdown(
                 self.screen,
@@ -10243,6 +10335,9 @@ class TVTimeCapsule(QolFeaturesMixin):
                         # key-repeat tick (keeps idle timer + cache UX sane).
                         if key_repeat and key_action == "select":
                             continue
+                        # Held Esc must not re-fire after leaving Weather/Retro.
+                        if key_repeat and key_action == "back":
+                            continue
 
                         if self.view == self.WEATHER:
                             digit = digit_for_key(self.keymap, event.key)
@@ -10255,7 +10350,7 @@ class TVTimeCapsule(QolFeaturesMixin):
                                 self._process_weather_action(key_action)
                                 continue
                             if key_action == "quit":
-                                self._exit_weather_channel()
+                                self._exit_weather_channel(with_fx=False)
                                 self._request_quit(source="quit-key")
                                 continue
                             # Ignore other keys so they don't exit the channel.
@@ -10279,7 +10374,7 @@ class TVTimeCapsule(QolFeaturesMixin):
                                 self._process_retro_tv_action(key_action)
                                 continue
                             if key_action == "quit":
-                                self._exit_retro_tv()
+                                self._exit_retro_tv(with_fx=False)
                                 self._request_quit(source="quit-key")
                                 continue
                             continue

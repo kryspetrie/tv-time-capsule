@@ -200,6 +200,7 @@ class KidsLibrarySelectorTests(unittest.TestCase):
         pygame.display.set_mode((800, 600))
         app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         app._kids_mode_active = True
+        app._kids_allowlist = None
         app.library_layout = "split"
         app.view = app.LIBRARY_SELECT
         app.show_names = ["Bluey"]
@@ -282,6 +283,7 @@ class KidsLibrarySelectorTests(unittest.TestCase):
         pygame.display.set_mode((800, 600))
         app = TVTimeCapsule(["./media"], fullscreen=False, admin=False)
         app._kids_mode_active = True
+        app._kids_allowlist = None
         app.library_layout = "split"
         app.view = app.LIBRARY_SELECT
         app.config["home_menu"] = {"parent": ["shows", "movies"], "kids": ["shows", "movies"]}

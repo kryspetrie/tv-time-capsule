@@ -81,7 +81,7 @@ class PlaybackConfigTests(unittest.TestCase):
         self.assertEqual(cfg["weather"]["name"], "Boston")
         self.assertIsNone(cfg["weather"]["latitude"])
         self.assertEqual(
-            cfg["home_menu"]["parent"], ["continue", "shows", "movies", "weather"]
+            cfg["home_menu"]["parent"], ["continue", "shows", "movies", "weather", "tvguide"]
         )
         self.assertEqual(cfg["home_menu"]["kids"], ["shows", "movies"])
         self.assertIsNone(cfg["retro_tv"]["filters"])

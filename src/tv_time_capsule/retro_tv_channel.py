@@ -23,7 +23,13 @@ import time
 
 import pygame
 
-from .chrome_cdp import ensure_chromium, kill_port_process, wait_for_page_ws
+from .chrome_cdp import (
+    acquire_chromium,
+    ensure_chromium,
+    register_chromium_process,
+    release_chromium,
+    wait_for_page_ws,
+)
 
 _YOUTUBE_ID_RE = re.compile(
     r"(?:youtube(?:-nocookie)?\.com/(?:embed|shorts)/|youtu\.be/|[?&]v=)([\w-]{11})"
@@ -153,8 +159,7 @@ class RetroTvChannel:
         return self.start()
 
     def _start_once(self, chrome_path: str) -> bool:
-        kill_port_process(CDP_PORT)
-        time.sleep(0.3)
+        acquire_chromium("retro", ports=CDP_PORT)
 
         self._user_data_dir = tempfile.mkdtemp(prefix="ttc-retro-")
 
@@ -183,12 +188,15 @@ class RetroTvChannel:
             )
         except Exception as exc:
             LOG.warning("Failed to launch Chrome: %s", exc)
+            release_chromium("retro")
             self._cleanup_user_data()
             return False
 
+        register_chromium_process("retro", self._chrome)
         ws_url = wait_for_page_ws(CDP_PORT, chrome=self._chrome, timeout=12.0)
         if ws_url is None:
             LOG.warning("No CDP page target found for retro TV")
+            release_chromium("retro")
             return False
 
         self._running = True
@@ -278,6 +286,7 @@ class RetroTvChannel:
                     pass
             self._chrome = None
 
+        release_chromium("retro", kill=True)
         self._cleanup_user_data()
         LOG.info("Retro TV stopped (frames=%d)", self._frame_count)
 
